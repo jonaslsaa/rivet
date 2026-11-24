@@ -4,10 +4,13 @@
 use crate::server::level::level_ctx::{LevelCtx, LifecycleEvent};
 use crate::world::entity::entity_attachments::{EntityAttachment, EntityAttachments};
 use crate::world::entity::entity_dimensions::EntityDimensions;
-use crate::world::entity::entity_record::{Aabb, EntityRemovalReason};
+use crate::world::entity::entity_record::EntityRemovalReason;
 use crate::world::entity::pose::Pose;
-use rivet_registry::core::{BlockPos, ChunkPos, Vec3};
+use rivet_registry::core::{BlockPos, ChunkPos};
+
 use rivet_registry::generated::tags::ENTITY_TYPE_TAG_BY_NAME;
+use rivet_registry::world::phys::AABB;
+use rivet_registry::world::phys::Vec3;
 use rivet_util::mth::{self, Uuid};
 use rivet_util::random::SingleThreadedRandomSource;
 
@@ -195,7 +198,7 @@ pub struct Entity {
     pub last_known_speed: Vec3,
     pub block_pos: BlockPos,
     pub chunk_pos: ChunkPos,
-    pub bounding_box: Aabb,
+    pub bounding_box: AABB,
     pub dimensions: EntityDimensions,
     pub eye_height: f32,
     pub pose: Pose,

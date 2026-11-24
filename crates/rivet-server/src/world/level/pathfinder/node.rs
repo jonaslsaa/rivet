@@ -6,8 +6,9 @@
 use indexmap::IndexMap;
 use rivet_util::mth;
 
-use crate::world::entity::ai::goal::context::{BlockPos, Vec3};
+use crate::world::entity::ai::goal::context::BlockPos;
 use crate::world::level::pathfinder::path_type::PathType;
+use rivet_registry::world::phys::Vec3;
 
 /// Port of `net.minecraft.world.level.pathfinder.Node` in Paper 26.2.
 #[derive(Debug, Clone)]

@@ -10,8 +10,14 @@ use rivet_protocol::game::{
     ServerboundUseItemPacket,
 };
 use rivet_registry::block_state::BlockState;
-use rivet_registry::core::{Direction, HitResultType, InteractionHand, Vec3};
+use rivet_registry::core::Direction;
+
+use rivet_registry::world::phys::hit_result::Type as HitResultType;
+
+use rivet_registry::world::interaction_hand::InteractionHand;
+
 use rivet_registry::generated::blocks::BlockId;
+use rivet_registry::world::phys::{HitResultBehavior, Vec3};
 use rivet_util::mth::{self, clamp_f32, wrap_degrees_f32};
 use rivet_world::interaction_result::SwingSource;
 use rivet_world::item::item_stack::ItemStack;

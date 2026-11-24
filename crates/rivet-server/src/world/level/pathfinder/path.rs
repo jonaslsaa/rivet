@@ -1,7 +1,8 @@
 //! Port of `net.minecraft.world.level.pathfinder.Path` in Paper 26.2.
 
-use crate::world::entity::ai::goal::context::{BlockPos, Vec3};
+use crate::world::entity::ai::goal::context::BlockPos;
 use crate::world::level::pathfinder::node::{Node, Target};
+use rivet_registry::world::phys::Vec3;
 
 /// Port of `Path.DebugData` in Paper 26.2.
 #[derive(Debug, Clone)]

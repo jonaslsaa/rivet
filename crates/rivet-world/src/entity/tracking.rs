@@ -1,6 +1,6 @@
 //! Typed synchronized state of the supported native entities. Values are
 //! projected from actual constructor/load state, never reparsed saved NBT.
-use rivet_registry::core::Vec3;
+use rivet_registry::world::phys::Vec3;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum MetadataValue {

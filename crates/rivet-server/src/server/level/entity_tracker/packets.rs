@@ -9,7 +9,7 @@ use rivet_protocol::game::{
     ClientboundAddEntityPacket, ClientboundRemoveEntitiesPacket, ClientboundSetEntityDataPacket,
     ClientboundSetPassengersPacket, ClientboundUpdateAttributesPacket,
 };
-use rivet_registry::core::Vec3;
+use rivet_registry::world::phys::Vec3;
 
 /// `net.minecraft.world.entity.EquipmentSlot` in Java declaration order
 /// (`EquipmentSlot.VALUES`), used for `ServerEntity::sendPairingData` and

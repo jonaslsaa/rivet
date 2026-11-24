@@ -1,7 +1,8 @@
 //! Mirrors `net.minecraft.world.entity.ai.goal.LookAtPlayerGoal`.
 
-use super::context::{EntityId, EntityTypeId, GoalContext, GoalRandom, TargetingConditions};
+use super::context::{EntityTypeId, GoalContext, GoalRandom, TargetingConditions};
 use super::goal::{Goal, GoalFlags};
+use crate::world::entity::entity_id::EntityId;
 
 /// Target entity category watched by [`LookAtPlayerGoal`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -97,7 +98,7 @@ impl<C: GoalContext> Goal<C> for LookAtPlayerGoal {
                     .map(|e| e.id);
             }
             LookAtTargetType::EntityType(entity_type) => {
-                let area = ctx.bounding_box().inflate(
+                let area = ctx.bounding_box().inflate_xyz(
                     self.look_distance as f64,
                     3.0,
                     self.look_distance as f64,
@@ -129,7 +130,7 @@ impl<C: GoalContext> Goal<C> for LookAtPlayerGoal {
             return false;
         }
         let max_dist_sqr = (self.look_distance * self.look_distance) as f64;
-        if ctx.pos().distance_to_sqr(target.pos) > max_dist_sqr {
+        if ctx.pos().distance_to_sqr(&target.pos) > max_dist_sqr {
             return false;
         }
         self.look_time > 0

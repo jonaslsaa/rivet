@@ -1,8 +1,9 @@
 //! Port of `net.minecraft.world.entity.EntityDimensions` (Paper 26.2, commit `0a993450f129c4942c2a9ed45ba047412b4667cf`).
 
 use crate::world::entity::entity_attachments::{EntityAttachments, EntityAttachmentsBuilder};
-use crate::world::entity::entity_record::Aabb;
-use rivet_registry::core::Vec3;
+
+use rivet_registry::world::phys::AABB;
+use rivet_registry::world::phys::Vec3;
 
 /// Port of `net.minecraft.world.entity.EntityDimensions`.
 #[derive(Debug, Clone, PartialEq)]
@@ -61,16 +62,16 @@ impl EntityDimensions {
 
     /// Paper `EntityDimensions#makeBoundingBox(Vec3)`.
     #[must_use]
-    pub fn make_bounding_box(&self, pos: Vec3) -> Aabb {
+    pub fn make_bounding_box(&self, pos: Vec3) -> AABB {
         self.make_bounding_box_xyz(pos.x, pos.y, pos.z)
     }
 
     /// Paper `EntityDimensions#makeBoundingBox(double, double, double)`.
     #[must_use]
-    pub fn make_bounding_box_xyz(&self, x: f64, y: f64, z: f64) -> Aabb {
+    pub fn make_bounding_box_xyz(&self, x: f64, y: f64, z: f64) -> AABB {
         let w = f64::from(self.width / 2.0_f32);
         let h = f64::from(self.height);
-        Aabb::new(x - w, y, z - w, x + w, y + h, z + w)
+        AABB::new(x - w, y, z - w, x + w, y + h, z + w)
     }
 
     /// Paper `EntityDimensions#scale(float)`.

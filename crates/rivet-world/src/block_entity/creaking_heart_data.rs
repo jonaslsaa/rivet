@@ -6,7 +6,8 @@ use rivet_nbt::{compound_tag::CompoundTag, nbt_ops::NbtOps, tag::Tag};
 use rivet_registry::{
     block_state::BlockState,
     block_state_properties::{BlockStateProperties, CreakingHeartState},
-    core::{BlockPos, Direction, Vec3, uuid_codec},
+    core::{BlockPos, Direction, uuid_codec},
+    world::phys::Vec3,
 };
 use rivet_util::{RandomSource, mth::Uuid};
 use std::sync::Arc;

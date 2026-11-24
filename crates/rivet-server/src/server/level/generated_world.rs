@@ -129,6 +129,7 @@ use rivet_registry::holder::RegistryId;
 use rivet_registry::holder_lookup::HolderGetter;
 use rivet_registry::holder_set::HolderSet;
 use rivet_registry::registry_ops::RegistryOps;
+use rivet_registry::world::phys::AABB;
 use rivet_registry::{Identifier, RegistrationInfo, ResourceKey};
 use rivet_serialization::codec::{self, Codec};
 use rivet_serialization::json_ops::JsonOps;
@@ -215,6 +216,7 @@ use rivet_world::levelgen::placement::{
     surface_relative_threshold_filter_codec, surface_water_depth_filter_codec,
 };
 use rivet_world::levelgen::world_generation_context::WorldGenerationContext;
+use rivet_world::spottedleaf::moonrise::patches::collisions::collision_util::voxel_shape_intersect;
 
 use super::generation_creature_runtime::{GenerationCreatureError, GenerationCreatureFactory};
 use super::structure_placement::StructurePlacementError;
@@ -4463,7 +4465,7 @@ fn run_spawn_population(
                         }
                     };
                     entity.snap_to(
-                        rivet_registry::core::Vec3::new(fx, y as f64, fz),
+                        rivet_registry::world::phys::Vec3::new(fx, y as f64, fz),
                         random.next_float() * 360.0,
                         0.0,
                     );
@@ -4838,73 +4840,39 @@ fn is_valid_empty_spawn_block(state: BlockState, entity_type: &str, pos: &BlockP
 /// dynamic shapes stay unavailable for obstruction checks, while
 /// `is_valid_empty_spawn_block` separately uses the generated full-face mask
 /// for Paper's empty-context full-block predicate.
-#[derive(Clone, Copy)]
-struct SpawnShapeBox {
-    min_x: f64,
-    min_y: f64,
-    min_z: f64,
-    max_x: f64,
-    max_y: f64,
-    max_z: f64,
+/// `shape.move(pos).bounds()` intersected with `entity` the way Paper's
+/// partial-VoxelShape path does it (`CollisionUtil.voxelShapeIntersect`).
+fn box_intersects(shape: &AABB, block_x: i32, block_y: i32, block_z: i32, entity: &AABB) -> bool {
+    voxel_shape_intersect(
+        &shape.move_xyz(block_x as f64, block_y as f64, block_z as f64),
+        entity,
+    )
 }
 
-impl SpawnShapeBox {
-    const fn new(min_x: f64, min_y: f64, min_z: f64, max_x: f64, max_y: f64, max_z: f64) -> Self {
-        Self {
-            min_x,
-            min_y,
-            min_z,
-            max_x,
-            max_y,
-            max_z,
-        }
-    }
-
-    fn translated(self, x: f64, y: f64, z: f64) -> Self {
-        Self::new(
-            self.min_x + x,
-            self.min_y + y,
-            self.min_z + z,
-            self.max_x + x,
-            self.max_y + y,
-            self.max_z + z,
-        )
-    }
-
-    fn intersects(self, block_x: i32, block_y: i32, block_z: i32, entity: &SpawnAabb) -> bool {
-        SpawnAabb::new(
-            block_x as f64 + self.min_x,
-            block_y as f64 + self.min_y,
-            block_z as f64 + self.min_z,
-            block_x as f64 + self.max_x,
-            block_y as f64 + self.max_y,
-            block_z as f64 + self.max_z,
-        )
+/// The same box test for an exact full cube, which Paper's `BlockCollisions`
+/// takes through the optimized `Shapes.block()` path: a raw `AABB.intersects`.
+fn box_intersects_raw(
+    shape: &AABB,
+    block_x: i32,
+    block_y: i32,
+    block_z: i32,
+    entity: &AABB,
+) -> bool {
+    shape
+        .move_xyz(block_x as f64, block_y as f64, block_z as f64)
         .intersects(entity)
-    }
-
-    fn intersects_raw(self, block_x: i32, block_y: i32, block_z: i32, entity: &SpawnAabb) -> bool {
-        SpawnAabb::new(
-            block_x as f64 + self.min_x,
-            block_y as f64 + self.min_y,
-            block_z as f64 + self.min_z,
-            block_x as f64 + self.max_x,
-            block_y as f64 + self.max_y,
-            block_z as f64 + self.max_z,
-        )
-        .intersects_raw(entity)
-    }
-
-    fn is_full(self) -> bool {
-        self.min_x == 0.0
-            && self.min_y == 0.0
-            && self.min_z == 0.0
-            && self.max_x == 1.0
-            && self.max_y == 1.0
-            && self.max_z == 1.0
-    }
 }
 
+fn box_is_full(shape: &AABB) -> bool {
+    shape.min_x == 0.0
+        && shape.min_y == 0.0
+        && shape.min_z == 0.0
+        && shape.max_x == 1.0
+        && shape.max_y == 1.0
+        && shape.max_z == 1.0
+}
+
+// RivetTodo(#834): stand-in for `CollisionContext.empty()` and `VoxelShape` in spawn obstruction checks.
 #[allow(dead_code)]
 #[derive(Clone, Copy)]
 enum SpawnCollisionContext<'a> {
@@ -4920,13 +4888,13 @@ enum SpawnCollisionContext<'a> {
 enum SpawnCollisionShape {
     Empty,
     Full,
-    Box(SpawnShapeBox),
+    Box(AABB),
     /// Exact static Paper collision boxes from the generated StateId table.
     StaticBoxes(&'static [StaticCollisionBox]),
     /// Paper's empty-context scaffolding shape: a full top plate and four
     /// corner posts. The empty collision context reports `isAbove(..., true)`
     /// as true, selecting `SHAPE_STABLE` for every scaffolding state.
-    Multi([SpawnShapeBox; 5]),
+    Multi([AABB; 5]),
 }
 
 impl SpawnCollisionShape {
@@ -4934,19 +4902,24 @@ impl SpawnCollisionShape {
         match self {
             Self::Full => true,
             Self::Empty | Self::Multi(_) | Self::StaticBoxes(_) => false,
-            Self::Box(shape) => shape.is_full(),
+            Self::Box(shape) => box_is_full(&shape),
         }
     }
 
-    fn intersects(self, block_x: i32, block_y: i32, block_z: i32, entity: &SpawnAabb) -> bool {
+    fn intersects(self, block_x: i32, block_y: i32, block_z: i32, entity: &AABB) -> bool {
         match self {
             Self::Empty => false,
             // Paper's BlockCollisions takes the optimized Shapes.block() path
             // for an exact full cube, whose AABB test is raw (without the
             // partial-shape CollisionUtil epsilon).
-            Self::Full => SpawnShapeBox::new(0.0, 0.0, 0.0, 1.0, 1.0, 1.0)
-                .intersects_raw(block_x, block_y, block_z, entity),
-            Self::Box(shape) => shape.intersects(block_x, block_y, block_z, entity),
+            Self::Full => box_intersects_raw(
+                &AABB::new(0.0, 0.0, 0.0, 1.0, 1.0, 1.0),
+                block_x,
+                block_y,
+                block_z,
+                entity,
+            ),
+            Self::Box(shape) => box_intersects(&shape, block_x, block_y, block_z, entity),
             // Every StaticBoxes value is a partial VoxelShape. Exact full-cube
             // table entries are normalized to Self::Full below, so this path
             // always uses CollisionUtil's 1e-7 overlap margin.
@@ -4954,17 +4927,17 @@ impl SpawnCollisionShape {
                 .iter()
                 .copied()
                 .map(static_box_to_spawn_shape)
-                .any(|shape| shape.intersects(block_x, block_y, block_z, entity)),
+                .any(|shape| box_intersects(&shape, block_x, block_y, block_z, entity)),
             Self::Multi(shapes) => shapes
                 .into_iter()
-                .any(|shape| shape.intersects(block_x, block_y, block_z, entity)),
+                .any(|shape| box_intersects(&shape, block_x, block_y, block_z, entity)),
         }
     }
 }
 
-fn static_box_to_spawn_shape(shape: StaticCollisionBox) -> SpawnShapeBox {
+fn static_box_to_spawn_shape(shape: StaticCollisionBox) -> AABB {
     let unit = |value: i8| f64::from(value) / 32.0;
-    SpawnShapeBox::new(
+    AABB::new(
         unit(shape.min_x),
         unit(shape.min_y),
         unit(shape.min_z),
@@ -5014,16 +4987,19 @@ fn spawn_collision_shape(
         "minecraft:moving_piston" => Some(SpawnCollisionShape::Empty),
         name if name.ends_with("shulker_box") => Some(SpawnCollisionShape::Full),
         "minecraft:bamboo" => Some(SpawnCollisionShape::Box(
-            SpawnShapeBox::new(6.5 / 16.0, 0.0, 6.5 / 16.0, 9.5 / 16.0, 1.0, 9.5 / 16.0)
-                .translated(block_offset(pos).0, 0.0, block_offset(pos).1),
+            AABB::new(6.5 / 16.0, 0.0, 6.5 / 16.0, 9.5 / 16.0, 1.0, 9.5 / 16.0).move_xyz(
+                block_offset(pos).0,
+                0.0,
+                block_offset(pos).1,
+            ),
         )),
         "minecraft:scaffolding" => {
             let stable = [
-                SpawnShapeBox::new(0.0, 14.0 / 16.0, 0.0, 1.0, 1.0, 1.0),
-                SpawnShapeBox::new(0.0, 0.0, 0.0, 2.0 / 16.0, 1.0, 2.0 / 16.0),
-                SpawnShapeBox::new(14.0 / 16.0, 0.0, 0.0, 1.0, 1.0, 2.0 / 16.0),
-                SpawnShapeBox::new(0.0, 0.0, 14.0 / 16.0, 2.0 / 16.0, 1.0, 1.0),
-                SpawnShapeBox::new(14.0 / 16.0, 0.0, 14.0 / 16.0, 1.0, 1.0, 1.0),
+                AABB::new(0.0, 14.0 / 16.0, 0.0, 1.0, 1.0, 1.0),
+                AABB::new(0.0, 0.0, 0.0, 2.0 / 16.0, 1.0, 2.0 / 16.0),
+                AABB::new(14.0 / 16.0, 0.0, 0.0, 1.0, 1.0, 2.0 / 16.0),
+                AABB::new(0.0, 0.0, 14.0 / 16.0, 2.0 / 16.0, 1.0, 1.0),
+                AABB::new(14.0 / 16.0, 0.0, 14.0 / 16.0, 1.0, 1.0, 1.0),
             ];
             let entity_shape = match context {
                 SpawnCollisionContext::Empty => SpawnCollisionShape::Multi(stable),
@@ -5043,14 +5019,7 @@ fn spawn_collision_shape(
                         // above the block's bottom face.
                         && entity_min_y > pos.get_y() as f64 + 2.0 / 16.0 - 1.0e-5 =>
                 {
-                    SpawnCollisionShape::Box(SpawnShapeBox::new(
-                        0.0,
-                        0.0,
-                        0.0,
-                        1.0,
-                        2.0 / 16.0,
-                        1.0,
-                    ))
+                    SpawnCollisionShape::Box(AABB::new(0.0, 0.0, 0.0, 1.0, 2.0 / 16.0, 1.0))
                 }
                 SpawnCollisionContext::Entity { .. } => SpawnCollisionShape::Empty,
             };
@@ -5126,12 +5095,12 @@ fn spawn_collision_shape(
             return None;
         };
         let height = f64::from(layers.clamp(1, 8)) / 8.0;
-        return Some(SpawnCollisionShape::Box(SpawnShapeBox::new(
+        return Some(SpawnCollisionShape::Box(AABB::new(
             0.0, 0.0, 0.0, 1.0, height, 1.0,
         )));
     }
     if name == "minecraft:cactus" {
-        return Some(SpawnCollisionShape::Box(SpawnShapeBox::new(
+        return Some(SpawnCollisionShape::Box(AABB::new(
             1.0 / 16.0,
             0.0,
             1.0 / 16.0,
@@ -5205,7 +5174,7 @@ fn speleothem_collision_shape(state: BlockState, pos: &BlockPos) -> Option<Spawn
             _ => return None,
         };
     let (offset_x, offset_z) = speleothem_offset(pos);
-    Some(SpawnCollisionShape::Box(SpawnShapeBox::new(
+    Some(SpawnCollisionShape::Box(AABB::new(
         min_x + offset_x,
         min_y,
         min_z + offset_z,
@@ -5215,57 +5184,9 @@ fn speleothem_collision_shape(state: BlockState, pos: &BlockPos) -> Option<Spawn
     )))
 }
 
-#[derive(Clone, Copy)]
-struct SpawnAabb {
-    min_x: f64,
-    min_y: f64,
-    min_z: f64,
-    max_x: f64,
-    max_y: f64,
-    max_z: f64,
-}
-
-impl SpawnAabb {
-    fn new(min_x: f64, min_y: f64, min_z: f64, max_x: f64, max_y: f64, max_z: f64) -> Self {
-        Self {
-            min_x,
-            min_y,
-            min_z,
-            max_x,
-            max_y,
-            max_z,
-        }
-    }
-
-    fn intersects(self, other: &Self) -> bool {
-        self.intersects_with_epsilon(other)
-    }
-
-    fn intersects_raw(self, other: &Self) -> bool {
-        self.min_x < other.max_x
-            && self.max_x > other.min_x
-            && self.min_y < other.max_y
-            && self.max_y > other.min_y
-            && self.min_z < other.max_z
-            && self.max_z > other.min_z
-    }
-
-    /// Paper's `CollisionUtil.voxelShapeIntersect`: touching or overlapping by
-    /// at most `COLLISION_EPSILON` is not a collision for partial VoxelShapes.
-    fn intersects_with_epsilon(self, other: &Self) -> bool {
-        const COLLISION_EPSILON: f64 = 1.0e-7;
-        self.min_x - other.max_x < -COLLISION_EPSILON
-            && self.max_x - other.min_x > COLLISION_EPSILON
-            && self.min_y - other.max_y < -COLLISION_EPSILON
-            && self.max_y - other.min_y > COLLISION_EPSILON
-            && self.min_z - other.max_z < -COLLISION_EPSILON
-            && self.max_z - other.min_z > COLLISION_EPSILON
-    }
-}
-
-fn spawn_aabb(x: f64, y: i32, z: f64, width: f64, height: f64) -> SpawnAabb {
+fn spawn_aabb(x: f64, y: i32, z: f64, width: f64, height: f64) -> AABB {
     let half = width / 2.0;
-    SpawnAabb::new(
+    AABB::new(
         x - half,
         y as f64,
         z - half,
@@ -5277,7 +5198,7 @@ fn spawn_aabb(x: f64, y: i32, z: f64, width: f64, height: f64) -> SpawnAabb {
 
 fn collision_free(
     region: &WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey>,
-    entity: SpawnAabb,
+    entity: AABB,
     context: SpawnCollisionContext<'_>,
 ) -> Option<bool> {
     // BlockCollisions scans one block beyond each AABB face. That extra ring is
@@ -10444,13 +10365,13 @@ mod tests {
         const EPSILON: f64 = 1.0e-7;
         // The dynamic partial shape has a half-height, so this exercises the
         // Box path rather than accidentally testing a full cube.
-        let dynamic_partial = SpawnShapeBox::new(0.0, 0.0, 0.0, 1.0, 0.5, 1.0);
-        let at_epsilon = SpawnAabb::new(1.0 - EPSILON, 0.25, 0.25, 1.5, 0.4, 0.75);
-        let beyond_epsilon = SpawnAabb::new(1.0 - 2.0 * EPSILON, 0.25, 0.25, 1.5, 0.4, 0.75);
+        let dynamic_partial = AABB::new(0.0, 0.0, 0.0, 1.0, 0.5, 1.0);
+        let at_epsilon = AABB::new(1.0 - EPSILON, 0.25, 0.25, 1.5, 0.4, 0.75);
+        let beyond_epsilon = AABB::new(1.0 - 2.0 * EPSILON, 0.25, 0.25, 1.5, 0.4, 0.75);
         // CollisionUtil.voxelShapeIntersect ignores contact and overlap up to
         // its 1e-7 epsilon for partial VoxelShapes, but accepts a larger overlap.
-        assert!(!dynamic_partial.intersects(0, 0, 0, &at_epsilon));
-        assert!(dynamic_partial.intersects(0, 0, 0, &beyond_epsilon));
+        assert!(!box_intersects(&dynamic_partial, 0, 0, 0, &at_epsilon));
+        assert!(box_intersects(&dynamic_partial, 0, 0, 0, &beyond_epsilon));
 
         const STATIC_PARTIAL_BOXES: &[StaticCollisionBox] = &[StaticCollisionBox {
             min_x: 0,
@@ -10538,8 +10459,8 @@ mod tests {
             let y0 = shape.min_y + (shape.max_y - shape.min_y) / 2.0;
             let y1 = y0 + 0.05;
             let inside_z = shape.max_z - 0.1;
-            let inside = SpawnAabb::new(x0, y0, inside_z, x1, y1, shape.max_z - 0.05);
-            let outside = SpawnAabb::new(x0, y0, shape.max_z + 2.0e-7, x1, y1, shape.max_z + 0.05);
+            let inside = AABB::new(x0, y0, inside_z, x1, y1, shape.max_z - 0.05);
+            let outside = AABB::new(x0, y0, shape.max_z + 2.0e-7, x1, y1, shape.max_z + 0.05);
             assert!(SpawnCollisionShape::Box(shape).intersects(0, 0, 0, &inside));
             assert!(!SpawnCollisionShape::Box(shape).intersects(0, 0, 0, &outside));
         }
@@ -10614,7 +10535,7 @@ mod tests {
             .unwrap()
             .set_value(BlockStateProperties::BOTTOM, PropertyValue::Bool(true))
             .unwrap();
-        let inside_scaffolding = SpawnAabb::new(0.4, 0.05, 0.4, 0.6, 0.1, 0.6);
+        let inside_scaffolding = AABB::new(0.4, 0.05, 0.4, 0.6, 0.1, 0.6);
         assert!(
             !spawn_collision_shape(unstable_scaffolding, &pos, SpawnCollisionContext::Empty)
                 .is_some_and(|shape| shape.intersects(0, 0, 0, &inside_scaffolding))
@@ -10644,7 +10565,7 @@ mod tests {
             ),
             Some(SpawnCollisionShape::Box(_))
         ));
-        let above_unstable_scaffolding = SpawnAabb::new(0.4, 0.2, 0.4, 0.6, 0.3, 0.6);
+        let above_unstable_scaffolding = AABB::new(0.4, 0.2, 0.4, 0.6, 0.3, 0.6);
         assert!(
             !spawn_collision_shape(
                 unstable_scaffolding,
@@ -10702,12 +10623,12 @@ mod tests {
         assert!(is_valid_empty_spawn_block(fence, "minecraft:cow", &pos));
         assert!(static_collision_shape_of(stairs.id()).is_some_and(|boxes| !boxes.is_empty()));
         assert!(static_collision_shape_of(fence.id()).is_some_and(|boxes| !boxes.is_empty()));
-        let low_stair_entity = SpawnAabb::new(0.1, 0.1, 0.1, 0.2, 0.2, 0.2);
+        let low_stair_entity = AABB::new(0.1, 0.1, 0.1, 0.2, 0.2, 0.2);
         assert!(
             spawn_collision_shape(stairs, &pos, SpawnCollisionContext::Empty)
                 .is_some_and(|shape| shape.intersects(0, 0, 0, &low_stair_entity))
         );
-        let fence_post_entity = SpawnAabb::new(0.45, 0.1, 0.45, 0.55, 0.2, 0.55);
+        let fence_post_entity = AABB::new(0.45, 0.1, 0.45, 0.55, 0.2, 0.55);
         assert!(
             spawn_collision_shape(fence, &pos, SpawnCollisionContext::Empty)
                 .is_some_and(|shape| shape.intersects(0, 0, 0, &fence_post_entity))
@@ -10796,7 +10717,7 @@ mod tests {
             }
         }
         let cell_aabb = |(x, y, z): (i32, i32, i32)| {
-            SpawnAabb::new(
+            AABB::new(
                 x as f64 / 32.0 + 0.01,
                 y as f64 / 32.0 + 0.01,
                 z as f64 / 32.0 + 0.01,

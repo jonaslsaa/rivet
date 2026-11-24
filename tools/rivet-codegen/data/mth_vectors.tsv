@@ -1110,18 +1110,18 @@
 1109	super::out_from_origin_with_step(5, 0, 20, 4).collect::<Vec<_>>()	vec![5, 9, 1, 13, 17]
 1110	super::out_from_origin_with_step(0, 0, 5, 1).collect::<Vec<_>>()	vec![0, 1, 2, 3, 4, 5]
 1111	super::out_from_origin_with_step(2, 0, 20, 2).collect::<Vec<_>>()	vec![2, 4, 0, 6, 8, 10, 12, 14, 16, 18, 20]
-1112	super::ray_intersects_aabb( crate::mth_stubs::Vec3::new(1.0, 1.0, 1.0), crate::mth_stubs::Vec3::new(0.0, 0.0, 1.0), crate::mth_stubs::Aabb { min_x: 0.0, min_y: 0.0, min_z: 0.0, max_x: 2.0, max_y: 2.0, max_z: 2.0 } )	false
-1113	super::ray_intersects_aabb( crate::mth_stubs::Vec3::new(0.0, 0.0, 0.0), crate::mth_stubs::Vec3::new(1.0, 0.0, 0.0), crate::mth_stubs::Aabb { min_x: 0.0, min_y: 0.0, min_z: 0.0, max_x: 2.0, max_y: 2.0, max_z: 2.0 } )	false
-1114	super::ray_intersects_aabb( crate::mth_stubs::Vec3::new(5.0, 5.0, 5.0), crate::mth_stubs::Vec3::new(0.0, 0.0, 0.0), crate::mth_stubs::Aabb { min_x: 0.0, min_y: 0.0, min_z: 0.0, max_x: 2.0, max_y: 2.0, max_z: 2.0 } )	false
-1115	super::ray_intersects_aabb( crate::mth_stubs::Vec3::new(1.0, 1.0, 1.0), crate::mth_stubs::Vec3::new(0.0, 0.0, -1.0), crate::mth_stubs::Aabb { min_x: 0.0, min_y: 0.0, min_z: 0.0, max_x: 2.0, max_y: 2.0, max_z: 2.0 } )	false
-1116	super::ray_intersects_aabb( crate::mth_stubs::Vec3::new(-1.0, -1.0, -1.0), crate::mth_stubs::Vec3::new(1.0, 1.0, 1.0), crate::mth_stubs::Aabb { min_x: 0.0, min_y: 0.0, min_z: 0.0, max_x: 2.0, max_y: 2.0, max_z: 2.0 } )	true
-1117	super::ray_intersects_aabb( crate::mth_stubs::Vec3::new(0.0, 0.0, 0.0), crate::mth_stubs::Vec3::new(-1.0, -1.0, -1.0), crate::mth_stubs::Aabb { min_x: 0.0, min_y: 0.0, min_z: 0.0, max_x: 2.0, max_y: 2.0, max_z: 2.0 } )	true
-1118	super::ray_intersects_aabb( crate::mth_stubs::Vec3::new(2.0, 2.0, 2.0), crate::mth_stubs::Vec3::new(1.0, 0.0, 0.0), crate::mth_stubs::Aabb { min_x: 0.0, min_y: 0.0, min_z: 0.0, max_x: 2.0, max_y: 2.0, max_z: 2.0 } )	false
-1119	super::ray_intersects_aabb( crate::mth_stubs::Vec3::new(0.0, 0.0, 0.0), crate::mth_stubs::Vec3::new(0.0, 0.0, 1.0), crate::mth_stubs::Aabb { min_x: 0.0, min_y: 0.0, min_z: 0.0, max_x: 2.0, max_y: 2.0, max_z: 2.0 } )	false
-1120	super::ray_intersects_aabb( crate::mth_stubs::Vec3::new(1.0, 1.0, 1.0), crate::mth_stubs::Vec3::new(1.0, 1.0, 1.0), crate::mth_stubs::Aabb { min_x: 1.0, min_y: 1.0, min_z: 1.0, max_x: 3.0, max_y: 3.0, max_z: 3.0 } )	true
-1121	super::ray_intersects_aabb( crate::mth_stubs::Vec3::new(1.0, 1.0, 1.0), crate::mth_stubs::Vec3::new(0.0, 0.0, -1.0), crate::mth_stubs::Aabb { min_x: 1.0, min_y: 1.0, min_z: 1.0, max_x: 3.0, max_y: 3.0, max_z: 3.0 } )	false
-1122	super::ray_intersects_aabb( crate::mth_stubs::Vec3::new(3.0, 3.0, 3.0), crate::mth_stubs::Vec3::new(-1.0, -1.0, -1.0), crate::mth_stubs::Aabb { min_x: 1.0, min_y: 1.0, min_z: 1.0, max_x: 3.0, max_y: 3.0, max_z: 3.0 } )	true
-1123	super::ray_intersects_aabb( crate::mth_stubs::Vec3::new(0.5, 0.5, 0.5), crate::mth_stubs::Vec3::new(1.0, 0.0, 0.0), crate::mth_stubs::Aabb { min_x: 1.0, min_y: 1.0, min_z: 1.0, max_x: 3.0, max_y: 3.0, max_z: 3.0 } )	false
+1112	super::ray_intersects_aabb( crate::world::phys::Vec3::new(1.0, 1.0, 1.0), crate::world::phys::Vec3::new(0.0, 0.0, 1.0), crate::world::phys::AABB::new(0.0, 0.0, 0.0, 2.0, 2.0, 2.0) )	false
+1113	super::ray_intersects_aabb( crate::world::phys::Vec3::new(0.0, 0.0, 0.0), crate::world::phys::Vec3::new(1.0, 0.0, 0.0), crate::world::phys::AABB::new(0.0, 0.0, 0.0, 2.0, 2.0, 2.0) )	false
+1114	super::ray_intersects_aabb( crate::world::phys::Vec3::new(5.0, 5.0, 5.0), crate::world::phys::Vec3::new(0.0, 0.0, 0.0), crate::world::phys::AABB::new(0.0, 0.0, 0.0, 2.0, 2.0, 2.0) )	false
+1115	super::ray_intersects_aabb( crate::world::phys::Vec3::new(1.0, 1.0, 1.0), crate::world::phys::Vec3::new(0.0, 0.0, -1.0), crate::world::phys::AABB::new(0.0, 0.0, 0.0, 2.0, 2.0, 2.0) )	false
+1116	super::ray_intersects_aabb( crate::world::phys::Vec3::new(-1.0, -1.0, -1.0), crate::world::phys::Vec3::new(1.0, 1.0, 1.0), crate::world::phys::AABB::new(0.0, 0.0, 0.0, 2.0, 2.0, 2.0) )	true
+1117	super::ray_intersects_aabb( crate::world::phys::Vec3::new(0.0, 0.0, 0.0), crate::world::phys::Vec3::new(-1.0, -1.0, -1.0), crate::world::phys::AABB::new(0.0, 0.0, 0.0, 2.0, 2.0, 2.0) )	true
+1118	super::ray_intersects_aabb( crate::world::phys::Vec3::new(2.0, 2.0, 2.0), crate::world::phys::Vec3::new(1.0, 0.0, 0.0), crate::world::phys::AABB::new(0.0, 0.0, 0.0, 2.0, 2.0, 2.0) )	false
+1119	super::ray_intersects_aabb( crate::world::phys::Vec3::new(0.0, 0.0, 0.0), crate::world::phys::Vec3::new(0.0, 0.0, 1.0), crate::world::phys::AABB::new(0.0, 0.0, 0.0, 2.0, 2.0, 2.0) )	false
+1120	super::ray_intersects_aabb( crate::world::phys::Vec3::new(1.0, 1.0, 1.0), crate::world::phys::Vec3::new(1.0, 1.0, 1.0), crate::world::phys::AABB::new(1.0, 1.0, 1.0, 3.0, 3.0, 3.0) )	true
+1121	super::ray_intersects_aabb( crate::world::phys::Vec3::new(1.0, 1.0, 1.0), crate::world::phys::Vec3::new(0.0, 0.0, -1.0), crate::world::phys::AABB::new(1.0, 1.0, 1.0, 3.0, 3.0, 3.0) )	false
+1122	super::ray_intersects_aabb( crate::world::phys::Vec3::new(3.0, 3.0, 3.0), crate::world::phys::Vec3::new(-1.0, -1.0, -1.0), crate::world::phys::AABB::new(1.0, 1.0, 1.0, 3.0, 3.0, 3.0) )	true
+1123	super::ray_intersects_aabb( crate::world::phys::Vec3::new(0.5, 0.5, 0.5), crate::world::phys::Vec3::new(1.0, 0.0, 0.0), crate::world::phys::AABB::new(1.0, 1.0, 1.0, 3.0, 3.0, 3.0) )	false
 1124	super::rotation_around_axis( crate::mth_stubs::Vec3f { x: 0.0f32, y: 1.0f32, z: 0.0f32 }, crate::mth_stubs::Quaternionf { x: 0.3f32, y: 0.4f32, z: 0.5f32, w: 0.6f32 } ) .x .to_bits()	0x00000000
 1125	super::rotation_around_axis( crate::mth_stubs::Vec3f { x: 0.0f32, y: 1.0f32, z: 0.0f32 }, crate::mth_stubs::Quaternionf { x: 0.3f32, y: 0.4f32, z: 0.5f32, w: 0.6f32 } ) .y .to_bits()	0x3f0e00d5
 1126	super::rotation_around_axis( crate::mth_stubs::Vec3f { x: 0.0f32, y: 1.0f32, z: 0.0f32 }, crate::mth_stubs::Quaternionf { x: 0.3f32, y: 0.4f32, z: 0.5f32, w: 0.6f32 } ) .z .to_bits()	0x00000000

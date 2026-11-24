@@ -1,9 +1,8 @@
 //! Mirrors `net.minecraft.world.entity.ai.goal.UseItemGoal`.
 
-use super::context::{
-    EquipmentSlot, GoalContext, GoalRandom, InteractionHand, ItemStackRef, SoundId,
-};
+use super::context::{EquipmentSlot, GoalContext, GoalRandom, ItemStackRef, SoundId};
 use super::goal::{Goal, GoalFlags};
+use rivet_registry::world::interaction_hand::InteractionHand;
 
 /// Equips an item in the main hand, starts using it while `is_using_item()` stays true,
 /// and clears the slot (playing an optional finish sound) on stop.

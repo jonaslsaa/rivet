@@ -18,7 +18,8 @@ use rivet_protocol::{
 use rivet_registry::{
     RegistryAccess,
     block_state::BlockState,
-    core::{BlockPos, ChunkPos, SectionPos, Vec3},
+    core::{BlockPos, ChunkPos, SectionPos},
+    world::phys::Vec3,
 };
 use rivet_util::short2object_open_hash_map::Short2ObjectOpenHashMap;
 use rivet_world::{block_entity::NativeBlockEntityData, chunk::status::ChunkStatus};

@@ -11,7 +11,9 @@ use crate::world::entity::entity_equipment::{EntityEquipment, EquipmentItem, Equ
 use crate::world::entity::entity_record::EntityRemovalReason;
 use crate::world::entity::equipment_slot::EquipmentSlot;
 use crate::world::entity::pose::Pose;
-use rivet_registry::core::{BlockPos, Vec3};
+use rivet_registry::core::BlockPos;
+
+use rivet_registry::world::phys::Vec3;
 use rivet_util::mth;
 use rivet_util::random::RandomSource;
 

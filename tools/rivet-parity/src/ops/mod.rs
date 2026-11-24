@@ -40,6 +40,8 @@ pub mod handlers;
 pub mod packet;
 pub mod packet_corpus;
 pub mod packet_seeds;
+pub mod shapes;
+pub mod shapes_corpus;
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -742,6 +744,7 @@ pub fn emit_corpus() -> Result<Vec<(&'static str, String)>, String> {
         ("component.json", component),
         ("nbt.decode", decode),
         ("packet.reencode", packet_corpus::emit()?),
+        ("shapes.eval", shapes_corpus::emit()?),
         ("snbt.parse", snbt),
     ];
     corpora.extend(entity_corpus::emit());

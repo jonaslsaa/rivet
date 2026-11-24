@@ -1,6 +1,7 @@
 //! Port of `net.minecraft.world.entity.ai.targeting.TargetingConditions` in Paper 26.2.
 
-use crate::world::entity::ai::goal::context::{EntityId, Vec3};
+use crate::world::entity::entity_id::EntityId;
+use rivet_registry::world::phys::Vec3;
 
 /// Mirrors `net.minecraft.world.Difficulty` for peaceful combat target checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -155,7 +156,7 @@ impl TargetingConditions {
                     self.range * modifier,
                     Self::MIN_VISIBILITY_DISTANCE_FOR_INVISIBLE_TARGET,
                 );
-                let dist_sqr = targeter.pos().distance_to_sqr(target.pos());
+                let dist_sqr = targeter.pos().distance_to_sqr(&target.pos());
                 if dist_sqr > visibility_distance * visibility_distance {
                     return false;
                 }

@@ -66,10 +66,12 @@ use rivet_protocol::protocol::game::position_move_rotation::PositionMoveRotation
 use rivet_protocol::protocol::game::{clientbound_bundle, clientbound_bundle_delimiter};
 use rivet_protocol::protocol::{Packet, PacketType, clientbound_protocol};
 use rivet_protocol::registry_friendly_byte_buf::RegistryFriendlyByteBuf;
-use rivet_registry::core::{GameProfile, GameType, GlobalPos, Vec3};
+use rivet_registry::core::{GameProfile, GameType, GlobalPos};
+
 use rivet_registry::holder::Holder;
 use rivet_registry::registries;
 use rivet_registry::registries::{DimensionType, WorldClock};
+use rivet_registry::world::phys::Vec3;
 use rivet_registry::{Identifier, RegistrationInfo, RegistryAccess, RegistryBuilder, ResourceKey};
 use rivet_util::mth::Uuid;
 use std::fmt;

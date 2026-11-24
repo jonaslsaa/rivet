@@ -1,7 +1,8 @@
 //! Mirrors `net.minecraft.world.entity.ai.goal.target.ResetUniversalAngerTargetGoal`.
 
-use crate::world::entity::ai::goal::context::{Aabb, GoalContext};
+use crate::world::entity::ai::goal::context::GoalContext;
 use crate::world::entity::ai::goal::goal::{Goal, GoalFlags};
+use rivet_registry::world::phys::AABB;
 
 /// Refreshes universal anger when hurt by a player while the `UNIVERSAL_ANGER`
 /// gamerule is enabled.
@@ -42,7 +43,7 @@ impl<C: GoalContext> Goal<C> for ResetUniversalAngerTargetGoal {
         ctx.forget_current_target_and_refresh_universal_anger();
         if self.alert_others_of_same_type {
             let within = ctx.follow_range();
-            let search_area = Aabb::unit_cube_from_lower_corner(ctx.pos()).inflate(
+            let search_area = AABB::unit_cube_from_lower_corner(&ctx.pos()).inflate_xyz(
                 within,
                 Self::ALERT_RANGE_Y,
                 within,

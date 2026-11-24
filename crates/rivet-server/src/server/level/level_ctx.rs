@@ -12,7 +12,9 @@ use crate::world::entity::living_entity::LivingEntity;
 use crate::world::entity::mob::{Mob, MobControlFlags};
 use crate::world::entity::pose::Pose;
 use indexmap::IndexMap;
-use rivet_registry::core::{BlockPos, Vec3};
+use rivet_registry::core::BlockPos;
+
+use rivet_registry::world::phys::Vec3;
 use rivet_util::mth;
 use std::collections::{HashMap, HashSet};
 

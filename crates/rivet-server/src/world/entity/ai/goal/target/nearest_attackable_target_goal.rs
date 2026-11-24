@@ -1,11 +1,13 @@
 //! Mirrors `net.minecraft.world.entity.ai.goal.target.NearestAttackableTargetGoal`.
 
 use crate::world::entity::ai::goal::context::{
-    Aabb, EntityId, EntityTypeId, GoalContext, GoalRandom, TargetReason, TargetingConditions,
+    EntityTypeId, GoalContext, GoalRandom, TargetReason, TargetingConditions,
 };
 use crate::world::entity::ai::goal::goal::{Goal, GoalFlags, reduced_tick_delay};
 
 use super::target_goal::TargetGoalState;
+use crate::world::entity::entity_id::EntityId;
+use rivet_registry::world::phys::AABB;
 
 /// Target filter for [`NearestAttackableTargetGoal`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -54,9 +56,9 @@ impl NearestAttackableTargetGoal {
         self.target = target;
     }
 
-    fn get_target_search_area<C: GoalContext>(ctx: &C, follow_distance: f64) -> Aabb {
+    fn get_target_search_area<C: GoalContext>(ctx: &C, follow_distance: f64) -> AABB {
         ctx.bounding_box()
-            .inflate(follow_distance, follow_distance, follow_distance)
+            .inflate_xyz(follow_distance, follow_distance, follow_distance)
     }
 
     fn find_target<C: GoalContext>(&mut self, ctx: &C) {

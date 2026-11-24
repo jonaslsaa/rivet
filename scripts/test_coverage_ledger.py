@@ -249,6 +249,40 @@ class RealClassTest(unittest.TestCase):
         self.assertEqual(self.rows["net.minecraft.world.level.block.Block"]["assigned_crate"], "rivet-server")
         self.assertEqual(self.rows["net.minecraft.world.level.chunk.LevelChunk"]["assigned_crate"], "rivet-world")
 
+    def test_split_classes_list_both_homes(self):
+        """VoxelShape holds the Moonrise shape caches, so those classes are
+        assigned to rivet-world (CLASS_CRATES); CollisionUtil is a D15 split
+        whose rivet-server half is listed (pending) in other_paths, as is
+        Mth's rivet-registry half."""
+        base = "ca.spottedleaf.moonrise.patches.collisions."
+        for fqn in (base + "CollisionUtil", base + "shape.CachedShapeData",
+                    base + "shape.CachedToAABBs", base + "shape.MergedORCache",
+                    "ca.spottedleaf.moonrise.common.util.FlatBitsetUtil",
+                    "ca.spottedleaf.moonrise.common.util.MixinWorkarounds"):
+            self.assertEqual(self.rows[fqn]["assigned_crate"], "rivet-world", fqn)
+        self.assertEqual(self.rows[base + "ExplosionBlockCache"]["assigned_crate"], "rivet-server")
+        cu = self.rows[base + "CollisionUtil"]["other_paths"].split(";")
+        self.assertIn(
+            "crates/rivet-server/src/spottedleaf/moonrise/patches/collisions/collision_util.rs(pending)", cu)
+        mth = self.rows["net.minecraft.util.Mth"]["other_paths"].split(";")
+        self.assertIn("crates/rivet-registry/src/util/mth.rs", mth)
+
+    def test_split_home_is_the_assigned_crate_and_halves_count(self):
+        """CollisionContext is assigned to rivet-world (its interface and
+        factories-free members); the rivet-server file is the live half, mounted
+        at an exact `world/phys/shapes` path but not in the assigned crate, so it
+        is listed in other_paths, not chosen as the home. `AABB.of` (rivet-world
+        half of AABB) and `HitResult.distanceTo` (rivet-server half) are ported
+        in the other half of their split and count as covered."""
+        cc = self.rows["net.minecraft.world.phys.shapes.CollisionContext"]
+        self.assertEqual(cc["assigned_crate"], "rivet-world")
+        self.assertEqual(cc["rust_path"], "crates/rivet-world/src/phys/shapes/collision_context.rs")
+        self.assertIn("crates/rivet-server/src/world/phys/shapes/collision_context.rs",
+                      cc["other_paths"].split(";"))
+        for fqn in ("net.minecraft.world.phys.AABB", "net.minecraft.world.phys.HitResult"):
+            r = self.rows[fqn]
+            self.assertEqual(r["method_covered"], r["method_total"], fqn)
+
     def test_non_target_buckets(self):
         craft = self.rows["org.bukkit.craftbukkit.CraftServer"]
         self.assertEqual((craft["bucket"], craft["hub"], craft["status"]), ("E", "adapter", "adapter"))

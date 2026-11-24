@@ -59,26 +59,27 @@
 //!   `mc.world.level.saveddata`/`mc.util.datafix` units
 //!   (`crate::level::saveddata`); `WorldBorder extends SavedData` and exposes
 //!   the [`TYPE`] `SavedDataType` static (pinned to `NbtOps`).
-//! - `VoxelShape`/`Shapes`/`BooleanOp` — pending `mc.world.phys.shapes` unit;
-//!   the [`shapes`] seam carries the `STUB(mc.world.phys.shapes)` marker.
+//! - `VoxelShape`/`Shapes`/`BooleanOp` — `crate::phys::shapes` (the wall is
+//!   `Shapes.join(Shapes.INFINITY, Shapes.box(..), BooleanOp.ONLY_FIRST)`).
 //! - `Entity` — pending `mc.world.entity` unit; minimal `getX`/`getZ` handle
 //!   in [`entity_stub`] (`// STUB(mc.world.entity)`).
-//! - `AABB` — `rivet_util::mth_stubs::Aabb` (only the six fields); the
-//!   `getXsize`/`getZsize` reads are inlined (`max_x - min_x`).
+//! - `AABB` — `rivet_registry::world::phys::AABB`; the `getXsize`/`getZsize`
+//!   reads are inlined (`max_x - min_x`).
 
 pub use crate::level::border::entity_stub::Entity;
-pub use crate::level::border::shapes::Shapes;
-pub use crate::level::border::shapes::VoxelShape;
 use crate::level::saveddata::saved_data::SavedData;
 use crate::level::saveddata::saved_data_type::SavedDataType;
 use crate::level::saveddata::stub_data_fix_types::DataFixTypes;
+use crate::phys::shapes::boolean_op::BooleanOp;
+use crate::phys::shapes::shapes::{self, INFINITY};
+use crate::phys::shapes::voxel_shape::VoxelShape;
 use rivet_registry::Identifier;
 use rivet_registry::core::{BlockPos, ChunkPos};
+use rivet_registry::world::phys::{AABB, Vec3};
 use rivet_serialization::codec::{self, Codec};
 use rivet_serialization::dynamic_ops::DynamicOps;
 use rivet_serialization::record_builder::{self, RecordCodecBuilder};
 use rivet_util::mth::{clamp_f64, lerp, max_f64, min_f64};
-use rivet_util::mth_stubs::{Aabb, Vec3};
 use std::sync::{Arc, LazyLock};
 
 /// `WorldBorder.MAX_SIZE` — `5.999997E7F` (a **float** literal, widened).
@@ -209,7 +210,7 @@ impl WorldBorder {
 
     /// `isWithinBounds(AABB)` — the `aabb.maxX - 1.0E-5F` float-literal
     /// corners.
-    pub fn is_within_bounds_aabb(&self, aabb: &Aabb) -> bool {
+    pub fn is_within_bounds_aabb(&self, aabb: &AABB) -> bool {
         self.is_within_bounds_corners(
             aabb.min_x,
             aabb.min_z,
@@ -282,7 +283,7 @@ impl WorldBorder {
 
     /// `getCollisionShape()` — the extent's `VoxelShape` (Java reads the
     /// border's live center/absmax via `WorldBorder.this`).
-    pub fn get_collision_shape(&self) -> crate::level::border::shapes::VoxelShape {
+    pub fn get_collision_shape(&self) -> VoxelShape {
         self.extent
             .get_collision_shape(self.center_x, self.center_z, self.absolute_max_size)
     }
@@ -299,7 +300,7 @@ impl WorldBorder {
     }
 
     /// `isInsideCloseToBorder(Entity source, AABB boundingBox)`.
-    pub fn is_inside_close_to_border(&self, source: &Entity, bounding_box: &Aabb) -> bool {
+    pub fn is_inside_close_to_border(&self, source: &Entity, bounding_box: &AABB) -> bool {
         // Java: `Math.max(Mth.absMax(getXsize(), getZsize()), 1.0)`; both
         // `Math.max` calls must propagate NaN (Java), so compose with
         // `max_f64` (the NaN-propagating mirror) rather than `f64::max`.
@@ -803,7 +804,7 @@ impl BorderExtent {
         absolute_max_size: i32,
     ) -> (BorderExtent, bool) {
         match self {
-            BorderExtent::Static(s) => (BorderExtent::Static(*s), false),
+            BorderExtent::Static(s) => (BorderExtent::Static(s.clone()), false),
             BorderExtent::Moving(m) => {
                 m.lerp_progress = m.lerp_progress.wrapping_sub(1);
                 m.previous_size = m.size;
@@ -835,18 +836,31 @@ impl BorderExtent {
         center_x: f64,
         center_z: f64,
         absolute_max_size: i32,
-    ) -> crate::level::border::shapes::VoxelShape {
+    ) -> VoxelShape {
         match self {
-            BorderExtent::Static(s) => s.shape,
+            BorderExtent::Static(s) => s.shape.clone(),
             BorderExtent::Moving(m) => {
                 let min_x = m.get_min_x(0.0_f32, center_x, absolute_max_size).floor();
                 let min_z = m.get_min_z(0.0_f32, center_z, absolute_max_size).floor();
                 let max_x = m.get_max_x(0.0_f32, center_x, absolute_max_size).ceil();
                 let max_z = m.get_max_z(0.0_f32, center_z, absolute_max_size).ceil();
-                Shapes::border_wall(min_x, min_z, max_x, max_z)
+                border_wall(min_x, min_z, max_x, max_z)
             }
         }
     }
+}
+
+/// `Shapes.join(Shapes.INFINITY, Shapes.box(minX, -Infinity, minZ, maxX,
+/// Infinity, maxZ), BooleanOp.ONLY_FIRST)` — the border wall: the infinite
+/// solid with the (floored/ceiled) inner box carved out. `Shapes.box` throws
+/// `IllegalArgumentException` (a panic here) when a min exceeds its max, as a
+/// negative border size does in `StaticBorderExtent.updateBox()`.
+fn border_wall(min_x: f64, min_z: f64, max_x: f64, max_z: f64) -> VoxelShape {
+    shapes::join(
+        &INFINITY,
+        &shapes::box_(min_x, f64::NEG_INFINITY, min_z, max_x, f64::INFINITY, max_z),
+        BooleanOp::ONLY_FIRST,
+    )
 }
 
 /// `WorldBorder.MovingBorderExtent` — the timed lerp extent.
@@ -965,14 +979,14 @@ impl MovingBorderExtent {
 }
 
 /// `WorldBorder.StaticBorderExtent` — the fixed-size extent with a cached box.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct StaticBorderExtent {
     size: f64,
     min_x: f64,
     min_z: f64,
     max_x: f64,
     max_z: f64,
-    shape: crate::level::border::shapes::VoxelShape,
+    shape: VoxelShape,
 }
 
 impl StaticBorderExtent {
@@ -984,7 +998,7 @@ impl StaticBorderExtent {
             min_z: 0.0,
             max_x: 0.0,
             max_z: 0.0,
-            shape: crate::level::border::shapes::VoxelShape::INFINITY,
+            shape: INFINITY.clone(),
         };
         extent.update_box(center_x, center_z, absolute_max_size);
         extent
@@ -1000,7 +1014,7 @@ impl StaticBorderExtent {
         self.min_z = clamp_f64(center_z - self.size / 2.0, abs_neg, abs);
         self.max_x = clamp_f64(center_x + self.size / 2.0, abs_neg, abs);
         self.max_z = clamp_f64(center_z + self.size / 2.0, abs_neg, abs);
-        self.shape = Shapes::border_wall(
+        self.shape = border_wall(
             self.get_min_x(0.0_f32).floor(),
             self.get_min_z(0.0_f32).floor(),
             self.get_max_x(0.0_f32).ceil(),
@@ -1526,14 +1540,7 @@ mod tests {
         let border = WorldBorder::default();
         // `aabb.maxX - 1.0E-5F` — an AABB whose maxX is exactly the border
         // max would otherwise sit on the (exclusive) edge.
-        let aabb = Aabb {
-            min_x: 0.0,
-            min_y: 0.0,
-            min_z: 0.0,
-            max_x: border.get_max_x(),
-            max_y: 256.0,
-            max_z: border.get_max_z(),
-        };
+        let aabb = AABB::new(0.0, 0.0, 0.0, border.get_max_x(), 256.0, border.get_max_z());
         assert!(border.is_within_bounds_aabb(&aabb));
         // The EPSILON is subtracted BEFORE the half-open test, so `maxX`
         // (exclusive) is tested as `maxX - EPSILON` (inclusive-ok).
@@ -1596,43 +1603,48 @@ mod tests {
     }
 
     #[test]
-    fn get_collision_shape_bounds_are_floored_and_ceiled() {
+    fn get_collision_shape_is_the_infinite_solid_minus_the_floored_ceiled_box() {
         let border = WorldBorder::default();
         let shape = border.get_collision_shape();
-        // The wall is `Shapes.join(INFINITY, box, ONLY_FIRST)` — the box
-        // corners (Java floors/ceils the min/max). The stub carries no
-        // "infinity" flag (the wall is NOT the full infinite solid; it is the
-        // infinite solid minus the inner box).
-        assert_eq!(shape.min_x, border.get_min_x().floor());
-        assert_eq!(shape.min_z, border.get_min_z().floor());
-        assert_eq!(shape.max_x, border.get_max_x().ceil());
-        assert_eq!(shape.max_z, border.get_max_z().ceil());
+        // `Shapes.join(INFINITY, box(floor(minX), -inf, floor(minZ),
+        // ceil(maxX), inf, ceil(maxZ)), ONLY_FIRST)`: a hollow wall.
+        assert!(!shape.is_empty());
+        let wall = border_wall(
+            border.get_min_x().floor(),
+            border.get_min_z().floor(),
+            border.get_max_x().ceil(),
+            border.get_max_z().ceil(),
+        );
+        assert!(
+            crate::spottedleaf::moonrise::patches::collisions::collision_util::equals_shape(
+                &shape, &wall
+            )
+        );
+        // The border centre is inside the carved hole, a point beyond the
+        // border is in the wall.
+        assert!(
+            !crate::spottedleaf::moonrise::patches::collisions::collision_util::strictly_contains(
+                &shape, 0.5, 64.0, 0.5
+            )
+        );
+        assert!(
+            crate::spottedleaf::moonrise::patches::collisions::collision_util::strictly_contains(
+                &shape,
+                border.get_max_x() + 10.0,
+                64.0,
+                0.5
+            )
+        );
     }
 
     #[test]
-    fn negative_size_stores_a_degenerate_shape_without_panicking() {
-        // Java's `Shapes.box` throws `IllegalArgumentException("The min values
-        // need to be smaller or equals to the max values")` when a min
-        // coordinate exceeds its max. A border of size -100 has
-        // `minX = 50 > maxX = -50`, so `StaticBorderExtent.updateBox()` throws
-        // at construction in Java (`setSize(-100)`). The shapes STUB
-        // (mc.world.phys.shapes) stores the degenerate corners silently — the
-        // real `Shapes.box` port must replicate that validation. The box
-        // accessors themselves match Java (they only invert, never throw).
+    #[should_panic(expected = "The min values need to be smaller or equals to the max values")]
+    fn negative_size_throws_like_shapes_box() {
+        // A border of size -100 has `minX = 50 > maxX = -50`, so
+        // `StaticBorderExtent.updateBox()` throws `IllegalArgumentException`
+        // from `Shapes.box` at construction in Java (`setSize(-100)`).
         let mut border = WorldBorder::default();
         border.set_size(-100.0);
-        assert_eq!(border.get_size(), -100.0);
-        assert_eq!(border.get_status(), BorderStatus::Stationary);
-        assert!(border.get_min_x() > border.get_max_x());
-        assert_eq!(border.get_min_x(), 50.0);
-        assert_eq!(border.get_max_x(), -50.0);
-        // The collision shape carries the same degenerate (floored/ceiled)
-        // corners — the stub does not throw where Java's `Shapes.box` would.
-        let shape = border.get_collision_shape();
-        assert_eq!(shape.min_x, 50.0);
-        assert_eq!(shape.min_z, 50.0);
-        assert_eq!(shape.max_x, -50.0);
-        assert_eq!(shape.max_z, -50.0);
     }
 
     #[test]

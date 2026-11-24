@@ -1,7 +1,7 @@
 //! Port of Spigot `TrackingRange` and Paper `ChunkMap.TrackedEntity` visibility
 //! range checks (Paper 26.2).
 
-use rivet_registry::core::Vec3;
+use rivet_registry::world::phys::Vec3;
 
 /// `org.spigotmc.ActivationRange.ActivationType` values consulted by
 /// `TrackingRange.getEntityTrackingRange`.

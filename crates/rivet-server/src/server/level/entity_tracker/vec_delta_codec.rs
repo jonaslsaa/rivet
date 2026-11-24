@@ -3,7 +3,7 @@
 //! Encodes entity position deltas relative to a synchronized base position at
 //! `1 / 4096` block resolution using Java's `Math.round(double)` semantics.
 
-use rivet_registry::core::Vec3;
+use rivet_registry::world::phys::Vec3;
 
 /// `VecDeltaCodec.TRUNCATION_STEPS`.
 pub const TRUNCATION_STEPS: f64 = 4096.0;

@@ -1,6 +1,6 @@
 //! Genuine Moonrise lookup commands against native owned Rust entities.
 use super::*;
-use rivet_registry::core::Vec3;
+use rivet_registry::world::phys::Vec3;
 use rivet_util::random_source::LegacyRandomSource;
 use rivet_world::entity::{
     farm_variants::{FarmFamily, FarmVariantRegistries},

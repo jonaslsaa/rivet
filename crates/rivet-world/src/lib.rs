@@ -104,8 +104,10 @@ pub mod level;
 pub mod levelgen;
 pub mod lighting;
 pub mod loot;
+pub mod phys;
 pub mod poi;
 pub mod scores;
+pub mod spottedleaf;
 pub mod superflat;
 /// `net.minecraft.world.ticks` value and container layer (#370/#522):
 /// [`ticks::TickPriority`], [`ticks::SavedTick`] (+ the

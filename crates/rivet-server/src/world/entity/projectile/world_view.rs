@@ -6,12 +6,15 @@
 //! and all queries/side effects cross an explicit synchronous trait boundary
 //! without `Arc<RwLock>` shared state.
 
+use crate::world::entity::entity_id::EntityId;
 use crate::world::entity::projectile::arrow::PotionContents;
-use crate::world::entity::projectile::phys::{
-    Aabb, BlockHitResult, BlockPos, ClipBlock, EntityId, EntityUuid, Vec3,
-};
+use crate::world::entity::projectile::phys::{ClipBlock, EntityUuid};
 use crate::world::entity::projectile::projectile::EntityReference;
 use crate::world::entity::projectile::projectile_deflection::ProjectileDeflection;
+use rivet_registry::core::BlockPos;
+use rivet_registry::world::phys::AABB;
+use rivet_registry::world::phys::BlockHitResult;
+use rivet_registry::world::phys::Vec3;
 
 /// Snapshot of an entity in the world used for projectile collision, ownership, and return logic.
 #[derive(Debug, Clone, PartialEq)]
@@ -22,7 +25,7 @@ pub struct EntitySnapshot {
     pub eye_position: Vec3,
     pub delta_movement: Vec3,
     pub look_angle: Vec3,
-    pub bounding_box: Aabb,
+    pub bounding_box: AABB,
     pub bb_width: f64,
     pub on_ground: bool,
     pub alive: bool,
@@ -142,7 +145,7 @@ pub trait ProjectileWorld {
 
     /// Returns candidate entities in `search_area` (excluding `source_id`) in deterministic
     /// level iteration order.
-    fn get_entities(&self, source_id: EntityId, search_area: Aabb) -> Vec<EntitySnapshot>;
+    fn get_entities(&self, source_id: EntityId, search_area: AABB) -> Vec<EntitySnapshot>;
 
     /// Looks up a single entity by runtime ID.
     fn get_entity(&self, id: EntityId) -> Option<EntitySnapshot>;

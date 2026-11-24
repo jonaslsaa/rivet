@@ -6,8 +6,10 @@ use rivet_nbt::tag::Tag;
 use rivet_util::random::RandomSource;
 
 use crate::world::entity::projectile::arrow::abstract_arrow::{AbstractArrow, ArrowHooks};
-use crate::world::entity::projectile::phys::{EntityId, Vec3};
+
+use crate::world::entity::entity_id::EntityId;
 use crate::world::entity::projectile::world_view::{PickupItem, PostHurtEffect, ProjectileWorld};
+use rivet_registry::world::phys::Vec3;
 
 /// `Arrow.EXPOSED_POTION_DECAY_TIME`.
 pub const EXPOSED_POTION_DECAY_TIME: i32 = 600;

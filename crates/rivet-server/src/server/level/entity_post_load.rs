@@ -7,7 +7,7 @@ use super::{
     structure_placement_adapter::StructureEntityCreation,
 };
 use rivet_nbt::compound_tag::CompoundTag;
-use rivet_registry::{Identifier, RegistryAccess, core::Vec3};
+use rivet_registry::{Identifier, RegistryAccess, world::phys::Vec3};
 use rivet_util::mth::Uuid;
 use rivet_world::{entity::loaded_entity::NativeLoadedEntity, levelgen::structure::StructureError};
 

@@ -17,8 +17,10 @@ use rivet_nbt::list_tag::ListTag;
 use rivet_nbt::nbt_utils::add_current_data_version;
 use rivet_nbt::tag::Tag;
 use rivet_registry::core::{
-    BlockPos, ChunkPos, SectionPos, Vec3, uuid_from_int_array, uuid_to_int_array,
+    BlockPos, ChunkPos, SectionPos, uuid_from_int_array, uuid_to_int_array,
 };
+
+use rivet_registry::world::phys::{AABB, Vec3};
 use rivet_util::mth::{self, Uuid};
 use rivet_util::random::{SingleThreadedRandomSource, random_support};
 use std::collections::HashMap;
@@ -131,54 +133,18 @@ pub enum EntityStorageError {
     Backend { message: String },
 }
 
-/// Axis-aligned bounding box matching `net.minecraft.world.phys.AABB`.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Aabb {
-    pub min_x: f64,
-    pub min_y: f64,
-    pub min_z: f64,
-    pub max_x: f64,
-    pub max_y: f64,
-    pub max_z: f64,
-}
-
-impl Aabb {
-    /// Creates an AABB from min/max corners (ordering coordinates like Java's `new AABB`).
-    #[must_use]
-    pub fn new(x0: f64, y0: f64, z0: f64, x1: f64, y1: f64, z1: f64) -> Self {
-        Self {
-            min_x: x0.min(x1),
-            min_y: y0.min(y1),
-            min_z: z0.min(z1),
-            max_x: x0.max(x1),
-            max_y: y0.max(y1),
-            max_z: z0.max(z1),
-        }
-    }
-
-    /// Creates a unit-sized bounding box centered horizontally around `pos`.
-    #[must_use]
-    pub fn unit_at(pos: Vec3) -> Self {
-        Self::new(
-            pos.x - 0.5,
-            pos.y,
-            pos.z - 0.5,
-            pos.x + 0.5,
-            pos.y + 1.0,
-            pos.z + 0.5,
-        )
-    }
-
-    /// `AABB.intersects(AABB)` — strict open-interval overlap check matching Java.
-    #[must_use]
-    pub fn intersects(&self, other: &Self) -> bool {
-        self.min_x < other.max_x
-            && self.max_x > other.min_x
-            && self.min_y < other.max_y
-            && self.max_y > other.min_y
-            && self.min_z < other.max_z
-            && self.max_z > other.min_z
-    }
+/// A one-block-tall unit box centred horizontally on `pos` (the default bounding
+/// box of a freshly constructed `StoredEntityRecord`).
+#[must_use]
+pub fn unit_box_at(pos: Vec3) -> AABB {
+    AABB::new(
+        pos.x - 0.5,
+        pos.y,
+        pos.z - 0.5,
+        pos.x + 0.5,
+        pos.y + 1.0,
+        pos.z + 0.5,
+    )
 }
 
 /// Port of `net.minecraft.world.entity.Entity.RemovalReason`.
@@ -338,7 +304,7 @@ pub struct StoredEntityRecord {
     /// Nested passenger records used during recursive NBT decode/encode.
     pub passengers: Vec<StoredEntityRecord>,
     /// Bounding box used for section spatial queries.
-    pub bounding_box: Aabb,
+    pub bounding_box: AABB,
     /// Entity-family-specific NBT fields preserved verbatim across save/load.
     pub extra_tags: CompoundTag,
 }
@@ -368,7 +334,7 @@ impl StoredEntityRecord {
             vehicle_id: None,
             passenger_ids: Vec::new(),
             passengers: Vec::new(),
-            bounding_box: Aabb::unit_at(pos),
+            bounding_box: unit_box_at(pos),
             extra_tags: CompoundTag::new(),
         }
     }
@@ -429,7 +395,7 @@ impl StoredEntityRecord {
         let dy = new_pos.y - self.pos.y;
         let dz = new_pos.z - self.pos.z;
         self.pos = new_pos;
-        self.bounding_box = Aabb::new(
+        self.bounding_box = AABB::new(
             self.bounding_box.min_x + dx,
             self.bounding_box.min_y + dy,
             self.bounding_box.min_z + dz,
@@ -672,7 +638,7 @@ impl StoredEntityRecord {
             vehicle_id: None,
             passenger_ids,
             passengers,
-            bounding_box: Aabb::unit_at(clamped_pos),
+            bounding_box: unit_box_at(clamped_pos),
             extra_tags,
         }))
     }

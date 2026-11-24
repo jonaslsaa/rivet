@@ -3,7 +3,7 @@
 //! separately in world_gen_region's center/dependency ownership test.
 use super::*;
 use crate::entity::chest_minecart::{EntityConstructionContext, NativeChestMinecart};
-use rivet_registry::core::Vec3;
+use rivet_registry::world::phys::Vec3;
 use rivet_util::mth::Uuid;
 
 struct NativeChestAuthority {

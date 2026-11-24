@@ -2,7 +2,12 @@ use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
+use rivet_registry::world::interaction_hand::InteractionHand;
+use rivet_registry::world::phys::{AABB, Vec3};
+
 use super::*;
+use crate::world::entity::ai::goal::context::BlockPos;
+use crate::world::entity::entity_id::EntityId;
 
 #[derive(Default)]
 struct ScriptedRandom {
@@ -48,7 +53,7 @@ struct MockContext {
     pos: Vec3,
     eye_y: f64,
     block_pos: BlockPos,
-    bounding_box: Aabb,
+    bounding_box: AABB,
     delta_movement: Vec3,
     on_ground: bool,
     has_controlling_passenger: bool,
@@ -91,9 +96,9 @@ struct MockContext {
     aggressive: bool,
     swings: Vec<InteractionHand>,
     hurt_targets: Vec<EntityId>,
-    alerted_same_type: Vec<(Aabb, EntityId, Vec<EntityTypeId>)>,
+    alerted_same_type: Vec<(AABB, EntityId, Vec<EntityTypeId>)>,
     universal_anger_refreshes: usize,
-    universal_anger_alerts: Vec<Aabb>,
+    universal_anger_alerts: Vec<AABB>,
     is_tame: bool,
     is_ordered_to_sit: bool,
     owner_id: Option<EntityId>,
@@ -116,7 +121,7 @@ impl Default for MockContext {
             pos: Vec3::ZERO,
             eye_y: 1.5,
             block_pos: BlockPos::new(0, 0, 0),
-            bounding_box: Aabb::new(-0.3, 0.0, -0.3, 0.3, 1.8, 0.3),
+            bounding_box: AABB::new(-0.3, 0.0, -0.3, 0.3, 1.8, 0.3),
             delta_movement: Vec3::ZERO,
             on_ground: true,
             has_controlling_passenger: false,
@@ -207,7 +212,7 @@ impl GoalContext for MockContext {
         self.block_pos
     }
 
-    fn bounding_box(&self) -> Aabb {
+    fn bounding_box(&self) -> AABB {
         self.bounding_box
     }
 
@@ -288,7 +293,7 @@ impl GoalContext for MockContext {
         self.target = None;
     }
 
-    fn alert_nearby_same_type_universal_anger(&mut self, search_area: Aabb) {
+    fn alert_nearby_same_type_universal_anger(&mut self, search_area: AABB) {
         self.universal_anger_alerts.push(search_area);
     }
 
@@ -409,7 +414,7 @@ impl GoalContext for MockContext {
     fn nearest_entity_of_type(
         &self,
         _entity_type: EntityTypeId,
-        _area: Aabb,
+        _area: AABB,
         _conditions: TargetingConditions,
         _x: f64,
         _eye_y: f64,
@@ -420,7 +425,7 @@ impl GoalContext for MockContext {
 
     fn alert_nearby_same_type(
         &mut self,
-        search_area: Aabb,
+        search_area: AABB,
         attacker: EntityId,
         ignored_types: &[EntityTypeId],
     ) {

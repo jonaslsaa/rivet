@@ -18,6 +18,7 @@ pub enum SupportType {
 }
 
 /// A closed axis-aligned box in Paper's 0..16 block coordinates.
+// RivetTodo(#834): stand-in beside the canonical `AABB`/`VoxelShape`; answer with canonical shapes.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ShapeBox {
     pub min_x: f64,

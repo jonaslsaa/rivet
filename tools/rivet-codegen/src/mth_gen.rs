@@ -39,6 +39,11 @@ use crate::extract;
 
 /// Repo-relative paths of the generated files.
 const GOLDEN_REL: &str = "crates/rivet-util/src/mth_golden_tests.rs";
+/// The `rayIntersectsAABB` vectors (`Mth` members that take `world.phys` types
+/// live in rivet-registry, D15) and the skeleton they are rendered from.
+const RAY_GOLDEN_REL: &str = "crates/rivet-registry/src/util/golden_tests.rs";
+const RAY_SKELETON_REL: &str = "tools/rivet-codegen/data/mth_ray_golden_skeleton.rs";
+const GOLDEN_SKELETON_REL: &str = "tools/rivet-codegen/data/mth_golden_skeleton.rs";
 const SIN_REL: &str = "crates/rivet-util/src/mth_sin_table.rs";
 const ATAN_REL: &str = "crates/rivet-util/src/mth_atan_tables.rs";
 /// Per-arch COS_TAB modules (D14). COS_TAB differs by up to 1 ULP between
@@ -117,8 +122,14 @@ pub fn run(bundler_flag: Option<&Path>, output_flag: Option<&Path>) -> Result<()
     if let Some(dir) = golden_out.parent() {
         fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     }
-    let rendered = render_golden(&repo_root, &parsed.vectors).context("render golden")?;
+    let (rendered, ray_rendered) =
+        render_golden(&repo_root, &parsed.vectors).context("render golden")?;
     fs::write(&golden_out, &rendered).with_context(|| format!("write {}", golden_out.display()))?;
+    let ray_out = out_dir.join(RAY_GOLDEN_REL);
+    if let Some(dir) = ray_out.parent() {
+        fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    }
+    fs::write(&ray_out, &ray_rendered).with_context(|| format!("write {}", ray_out.display()))?;
 
     // Fail-closed cross-check (D14): the four arch-selected atan2 rows read
     // COS_TAB[181], which differs between x86_64 and aarch64 by 1 ULP. Verify
@@ -302,28 +313,35 @@ fn render_cos(cos: &[String], arch_label: &str) -> String {
     s
 }
 
-/// Substitute vector values into the committed golden skeleton, then rustfmt.
-fn render_golden(repo_root: &Path, vectors: &[String]) -> Result<String> {
-    let skeleton_path = repo_root.join("tools/rivet-codegen/data/mth_golden_skeleton.rs");
-    let skeleton = fs::read_to_string(&skeleton_path)
-        .with_context(|| format!("read skeleton {}", skeleton_path.display()))?;
-
-    let mut filled = skeleton.clone();
+/// Substitute vector values into the committed golden skeletons (the rivet-util
+/// file and the rivet-registry `rayIntersectsAABB` file), then rustfmt each.
+/// Every vector's placeholder occurs exactly once across the two skeletons.
+fn render_golden(repo_root: &Path, vectors: &[String]) -> Result<(String, String)> {
+    let read = |rel: &str| -> Result<String> {
+        let path = repo_root.join(rel);
+        fs::read_to_string(&path).with_context(|| format!("read skeleton {}", path.display()))
+    };
+    let mut filled = [read(GOLDEN_SKELETON_REL)?, read(RAY_SKELETON_REL)?];
     for (i, v) in vectors.iter().enumerate() {
         let ph = format!("@@{i}@@");
-        let count = filled.matches(&ph).count();
+        let count: usize = filled.iter().map(|f| f.matches(&ph).count()).sum();
         anyhow::ensure!(
             count == 1,
-            "placeholder {ph} occurs {count} times in skeleton"
+            "placeholder {ph} occurs {count} times in the skeletons"
         );
-        filled = filled.replace(&ph, v);
+        for f in &mut filled {
+            *f = f.replace(&ph, v);
+        }
     }
     anyhow::ensure!(
-        !filled.contains("@@"),
+        filled.iter().all(|f| !f.contains("@@")),
         "unfilled placeholders remain in golden output"
     );
-
-    rustfmt(repo_root, &filled).with_context(|| "rustfmt golden tests")
+    let [golden, ray] = filled;
+    Ok((
+        rustfmt(repo_root, &golden).with_context(|| "rustfmt golden tests")?,
+        rustfmt(repo_root, &ray).with_context(|| "rustfmt ray golden tests")?,
+    ))
 }
 
 /// The four golden `atan2` rows whose expected value is arch-selected (D14):

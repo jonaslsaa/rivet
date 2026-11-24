@@ -493,7 +493,7 @@ impl PlayerSessionManager {
     /// observability for issue #158: proves the ack/movement paths write the
     /// tick-owned player — the counterfactual to "client prediction"). `None`
     /// when the connection has no session.
-    pub fn player_position(&self, id: ConnectionId) -> Option<rivet_registry::core::Vec3> {
+    pub fn player_position(&self, id: ConnectionId) -> Option<rivet_registry::world::phys::Vec3> {
         self.sessions.get(&id).map(|s| s.player.position())
     }
 
@@ -749,7 +749,7 @@ impl PlayerSessionManager {
             connection_id,
             profile,
             entity_id,
-            rivet_registry::core::Vec3::new(
+            rivet_registry::world::phys::Vec3::new(
                 pos.get_x() as f64,
                 pos.get_y() as f64,
                 pos.get_z() as f64,
@@ -1213,8 +1213,8 @@ impl PlayerSessionManager {
         let packet = ClientboundPlayerPositionPacket::new(
             teleport_id,
             PositionMoveRotation::new(
-                rivet_registry::core::Vec3::new(x, y, z),
-                rivet_registry::core::Vec3::new(0.0, 0.0, 0.0),
+                rivet_registry::world::phys::Vec3::new(x, y, z),
+                rivet_registry::world::phys::Vec3::new(0.0, 0.0, 0.0),
                 yaw,
                 pitch,
             ),

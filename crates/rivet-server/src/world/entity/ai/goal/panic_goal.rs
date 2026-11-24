@@ -1,7 +1,8 @@
 //! Mirrors `net.minecraft.world.entity.ai.goal.PanicGoal`.
 
-use super::context::{DAMAGE_TYPE_TAG_PANIC_CAUSES, DamageTypeTagId, GoalContext, Vec3};
+use super::context::{DAMAGE_TYPE_TAG_PANIC_CAUSES, DamageTypeTagId, GoalContext};
 use super::goal::{Goal, GoalFlags};
+use rivet_registry::world::phys::Vec3;
 
 /// Causes a mob to flee when hurt by a panic-causing damage source (seeking water
 /// first if currently on fire).

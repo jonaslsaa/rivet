@@ -8,12 +8,14 @@ use std::collections::HashMap;
 
 use rivet_util::mth;
 
-use crate::world::entity::ai::goal::context::{Aabb, BlockPos, GoalRandom};
+use crate::world::entity::ai::goal::context::BlockPos;
+use crate::world::entity::ai::goal::context::GoalRandom;
 use crate::world::level::pathfinder::node::{NodeArena, Target};
 use crate::world::level::pathfinder::path_type::{Direction, PathType, block_pos_as_long};
 use crate::world::level::pathfinder::world_view::{
     MobPathingState, PathWorldView, PathfindingContext,
 };
+use rivet_registry::world::phys::AABB;
 
 /// Shared configuration and prepared dimensions from `NodeEvaluator`.
 #[derive(Debug, Clone, Copy)]
@@ -213,7 +215,7 @@ impl WalkNodeEvaluator {
         pt
     }
 
-    fn aabb_cache_key(aabb: Aabb) -> [u64; 6] {
+    fn aabb_cache_key(aabb: AABB) -> [u64; 6] {
         let norm = |v: f64| {
             if v == 0.0 {
                 0.0_f64.to_bits()
@@ -234,7 +236,7 @@ impl WalkNodeEvaluator {
     pub(crate) fn has_collisions<W: PathWorldView + ?Sized>(
         &mut self,
         world: &W,
-        aabb: Aabb,
+        aabb: AABB,
     ) -> bool {
         let key = Self::aabb_cache_key(aabb);
         if let Some(&cached) = self.collision_cache.get(&key) {
@@ -398,7 +400,7 @@ impl WalkNodeEvaluator {
         dy *= scale;
         dz *= scale;
         for _ in 1..=steps {
-            bb = Aabb::new(
+            bb = AABB::new(
                 bb.min_x + dx,
                 bb.min_y + dy,
                 bb.min_z + dz,
@@ -571,7 +573,7 @@ impl WalkNodeEvaluator {
         ) + 0.001;
         let max_y =
             f64::from(mob.bb_height) + self.get_floor_level(ctx.level(), mob, above_pos) - 0.002;
-        let grow = Aabb::new(
+        let grow = AABB::new(
             center_x - half_width,
             min_y,
             center_z - half_width,
