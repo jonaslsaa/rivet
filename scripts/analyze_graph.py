@@ -201,7 +201,7 @@ CRATE_RULES = [
     ("net.minecraft.resources", "rivet-registry"),
     ("net.minecraft.tags", "rivet-registry"),
     ("net.minecraft.data", "rivet-registry"),
-    ("net.minecraft.world.entity", "rivet-entity"),
+    ("net.minecraft.world.entity", "rivet-server"),
     ("net.minecraft.world.level", "rivet-world"),
     ("net.minecraft.world", "rivet-world"),
     ("net.minecraft.gametest", "rivet-oracle"),

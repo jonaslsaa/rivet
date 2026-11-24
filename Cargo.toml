@@ -33,7 +33,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rivet-api = { path = "crates/rivet-api" }
 rivet-brigadier = { path = "crates/rivet-brigadier" }
 rivet-core = { path = "crates/rivet-core" }
-rivet-entity = { path = "crates/rivet-entity" }
 rivet-nbt = { path = "crates/rivet-nbt" }
 rivet-protocol = { path = "crates/rivet-protocol" }
 rivet-registry = { path = "crates/rivet-registry" }

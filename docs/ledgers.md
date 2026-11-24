@@ -22,8 +22,8 @@ One row per Java class (per `.java` file) of the three Paper source roots that
   (CraftBukkit) and F (paper-api) are `adapter`. A B-bucket class on the
   Appendix A spine list (`PlacementUtils`, `Pools`, `FeatureUtils`) is a target.
 - **hub**: `spine`, `adapter` or `dfu-audit` for the 200 Appendix A classes.
-- **assigned_crate**: the D15 home, computed from the class graph. `rivet-entity`
-  content and Paper server code go to `rivet-server`. A package of another
+- **assigned_crate**: the D15 home, computed from the class graph. Paper
+  server code and `net.minecraft.world.entity` go to `rivet-server`. A package of another
   crate moves to `rivet-server` when more than half of its classes reference a
   live type (world.entity, server, commands, ...). This moves block and item
   behaviour, block entities, menus, effects and damage, and keeps chunks,

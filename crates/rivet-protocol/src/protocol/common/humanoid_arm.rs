@@ -8,9 +8,9 @@
 //! `ClientInformation` codec uses plus `getOpposite` are ported.
 //!
 //! Placement note: `HumanoidArm` is a `net.minecraft.world.entity` value type,
-//! but it lives in `rivet-protocol` (not `rivet-entity`, its package-mirror
+//! but it lives in `rivet-protocol` (not `rivet-server`, its package-mirror
 //! home) because the only consumer in this slice is the `ClientInformation`
-//! packet body and `rivet-entity` is downstream of `rivet-protocol`.
+//! packet body and `rivet-server` is downstream of `rivet-protocol`.
 
 /// `net.minecraft.world.entity.HumanoidArm`.
 #[repr(i32)]

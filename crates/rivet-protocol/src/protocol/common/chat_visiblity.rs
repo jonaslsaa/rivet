@@ -7,9 +7,9 @@
 //! ported.
 //!
 //! Placement note: `ChatVisiblity` is a `net.minecraft.world.entity.player`
-//! value type, but it lives in `rivet-protocol` (not `rivet-entity`, its
+//! value type, but it lives in `rivet-protocol` (not `rivet-server`, its
 //! package-mirror home) because the only consumer in this slice is the
-//! `ClientInformation` packet body and `rivet-entity` is downstream of
+//! `ClientInformation` packet body and `rivet-server` is downstream of
 //! `rivet-protocol`.
 
 /// `net.minecraft.world.entity.player.ChatVisiblity`.
