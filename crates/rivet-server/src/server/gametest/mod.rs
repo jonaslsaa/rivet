@@ -75,7 +75,7 @@ pub use game_test_runner::{
     DeterministicGridSpawner, EnvironmentHook, GameTestBatchListener, GameTestLifecycleEvent,
     GameTestListener, GameTestRunner, GameTestRunnerConfig, NoopEnvironmentHook, StructureSpawner,
 };
-pub use game_test_sequence::{GameTestSequence, SequenceAssertion, SequenceStepEffect};
+pub use game_test_sequence::{GameTestSequence, SequenceAssertion, SequenceParent};
 pub use game_test_ticker::{GameTestTicker, TestInfoId, TickerState, TickerTickResult};
 pub use multiple_test_tracker::MultipleTestTracker;
 pub use registries::{

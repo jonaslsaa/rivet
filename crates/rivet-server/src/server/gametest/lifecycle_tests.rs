@@ -22,7 +22,7 @@ use crate::server::gametest::game_test_runner::{
     DeterministicGridSpawner, EnvironmentHook, GameTestBatchListener, GameTestLifecycleEvent,
     GameTestListener, GameTestRunner, GameTestRunnerConfig,
 };
-use crate::server::gametest::game_test_sequence::GameTestSequence;
+use crate::server::gametest::game_test_sequence::{GameTestSequence, SequenceParent};
 use crate::server::gametest::game_test_ticker::{GameTestTicker, TestInfoId, TickerState};
 use crate::server::gametest::multiple_test_tracker::MultipleTestTracker;
 use crate::server::gametest::registries::{
@@ -207,9 +207,9 @@ fn exact_paper_setup_tick_and_delay_timing() {
 
 #[test]
 fn intentionally_failing_synthetic_test_paper_timing_and_reports() {
-    // Paper: when fail() is called during tickInternal at tick_count = 5 (server tick 6),
-    // GameTestInfo sets `error` on tick 6 and calls `finish()` + `testFailed` on the
-    // NEXT tick (server tick 7, tick_count = 6).
+    // Paper: when fail() is called during tickInternal at tick_count = 5 (server tick 7),
+    // GameTestInfo sets `error` on tick 7 and calls `finish()` + `testFailed` on the
+    // NEXT tick (server tick 8, tick_count = 6).
     let registries = build_registries_with(
         vec![],
         vec![(
@@ -275,11 +275,11 @@ fn intentionally_failing_synthetic_test_paper_timing_and_reports() {
     runner.add_reporter(Box::new(SharedJUnitReporter(Arc::clone(&junit_capture))));
 
     let transcript = runner.run_to_completion(&functions, 50);
-    // setup_ticks = 0 => initial tick_count = -1.
-    // Server tick 1 => tick_count = 0 (starts, schedules callback for tick 5).
-    // Server tick 6 => tick_count = 5 (callback calls fail(), sets error).
-    // Server tick 7 => tick_count = 6 (finish() runs, testFailed fires).
-    assert_eq!(runner.current_level_tick(), 7);
+    // setup_ticks = 0, Paper spawners' startExecution(1) => initial tick_count = -2.
+    // Server tick 2 => tick_count = 0 (starts, schedules callback for tick 5).
+    // Server tick 7 => tick_count = 5 (callback calls fail(), sets error).
+    // Server tick 8 => tick_count = 6 (finish() runs, testFailed fires).
+    assert_eq!(runner.current_level_tick(), 8);
     assert!(runner.is_finished());
     assert_eq!(runner.failed_tracker().len(), 1);
 
@@ -288,8 +288,8 @@ fn intentionally_failing_synthetic_test_paper_timing_and_reports() {
     assert_eq!(transcript.failed_required_count, 1);
     let rec = &transcript.records[0];
     assert_eq!(rec.setup_tick, Some(0));
-    assert_eq!(rec.start_tick, Some(1));
-    assert_eq!(rec.end_tick, Some(7));
+    assert_eq!(rec.start_tick, Some(2));
+    assert_eq!(rec.end_tick, Some(8));
     assert_eq!(rec.outcome, GameTestOutcome::FailedRequired);
     assert!(
         rec.first_failure
@@ -302,10 +302,9 @@ fn intentionally_failing_synthetic_test_paper_timing_and_reports() {
     let logs = log_capture.lock().unwrap();
     assert_eq!(logs.entries().len(), 1);
     assert_eq!(logs.entries()[0].level, LogReportLevel::Error);
-    assert!(
-        logs.entries()[0]
-            .message
-            .contains("minecraft:synthetic_fail failed at")
+    assert_eq!(
+        logs.entries()[0].message,
+        "minecraft:synthetic_fail failed at 0, 64, 0! intentional synthetic failure on tick 5"
     );
 
     let junit = junit_capture.lock().unwrap();
@@ -322,7 +321,7 @@ fn timeout_triggers_strictly_after_max_ticks_not_at_equality() {
     // Paper: `if (this.tickCount > this.timeoutTicks)` — NOT `>=`.
     // Test A succeeds at exact tick_count == max_ticks (5) => PASSES.
     // Test B never succeeds with max_ticks == 5 => times out at tick_count == 6,
-    // finishes at server tick 8.
+    // finishes at server tick 9 (startExecution(1) => tick_count 0 on server tick 2).
     let registries = build_registries_with(
         vec![],
         vec![
@@ -375,25 +374,22 @@ fn timeout_triggers_strictly_after_max_ticks_not_at_equality() {
     let mut runner = GameTestRunner::new(infos, registries, GameTestRunnerConfig::default());
     let transcript = runner.run_to_completion(&functions, 50);
 
-    // pass_at_exact_max finishes on server tick 6 (tick_count == 5).
-    // timeout_after_5 exceeds timeout on server tick 7 (tick_count == 6 > 5)
-    // and calls finish() on server tick 8.
-    assert_eq!(runner.current_level_tick(), 8);
+    // pass_at_exact_max finishes on server tick 7 (tick_count == 5).
+    // timeout_after_5 exceeds timeout on server tick 8 (tick_count == 6 > 5)
+    // and calls finish() on server tick 9.
+    assert_eq!(runner.current_level_tick(), 9);
     assert_eq!(transcript.passed_count, 1);
     assert_eq!(transcript.failed_required_count, 1);
     assert_eq!(transcript.records[0].outcome, GameTestOutcome::Passed);
-    assert_eq!(transcript.records[0].end_tick, Some(6));
+    assert_eq!(transcript.records[0].end_tick, Some(7));
     assert_eq!(
         transcript.records[1].outcome,
         GameTestOutcome::FailedRequired
     );
-    assert_eq!(transcript.records[1].end_tick, Some(8));
-    assert!(
-        transcript.records[1]
-            .final_error
-            .as_deref()
-            .unwrap_or("")
-            .contains("test.error.timeout.no_result:5")
+    assert_eq!(transcript.records[1].end_tick, Some(9));
+    assert_eq!(
+        transcript.records[1].final_error.as_deref(),
+        Some("Didn't succeed or fail within 5 ticks")
     );
 }
 
@@ -470,9 +466,33 @@ fn flaky_test_retries_and_early_exhaustion_match_paper_report_listener() {
         ),
     ];
     let mut runner = GameTestRunner::new(infos, registries, GameTestRunnerConfig::default());
+    let log_capture = Arc::new(Mutex::new(LogTestReporter::new()));
+    struct SharedLogReporter(Arc<Mutex<LogTestReporter>>);
+    impl TestReporter for SharedLogReporter {
+        fn on_test_failed(&mut self, entry: &GameTestReportEntry) {
+            self.0.lock().unwrap().on_test_failed(entry);
+        }
+        fn on_test_success(&mut self, entry: &GameTestReportEntry) {
+            self.0.lock().unwrap().on_test_success(entry);
+        }
+    }
+    runner.add_reporter(Box::new(SharedLogReporter(Arc::clone(&log_capture))));
     runner.run_to_completion(&functions, 100);
 
     assert!(runner.is_finished());
+    // Paper `rerunTest` adds every copy to `allTestInfos`: 2 originals + 2 + 1 copies.
+    assert_eq!(runner.all_test_infos().len(), 5);
+    // Paper `GlobalTestReporter.onTestFailed(testInfo)` reports the last attempt's own
+    // error, not the `ExhaustedAttemptsException` used for chat output.
+    {
+        let logs = log_capture.lock().unwrap();
+        assert_eq!(logs.entries().len(), 1);
+        assert!(
+            logs.entries()[0].message.ends_with("! fail #1 on tick 0"),
+            "{:?}",
+            logs.entries()[0].message
+        );
+    }
     assert_eq!(flaky_counter.load(Ordering::SeqCst), 3);
     // Early exhaustion: 4 - 2 + 0 = 2 < 3, so only 2 attempts run!
     assert_eq!(fail_counter.load(Ordering::SeqCst), 2);
@@ -728,9 +748,10 @@ fn batch_hooks_all_of_reverse_teardown_and_isolation_cleanup() {
     assert!(runner.is_finished());
 
     // Grouping preserves first-seen environment order: env_a (t_a1, t_a2) then env_b (t_b1).
+    // Paper numbers batches per environment, so env_b's only batch is also index 0.
     assert_eq!(
         *batch_log.lock().unwrap(),
-        vec!["start:0", "finish:0", "start:1", "finish:1"]
+        vec!["start:0", "finish:0", "start:0", "finish:0"]
     );
     assert_eq!(
         *test_log.lock().unwrap(),
@@ -773,7 +794,8 @@ fn batch_hooks_all_of_reverse_teardown_and_isolation_cleanup() {
     );
 
     // Check isolation cleanup: Batch 0 had 2 structures cleared before Batch 1 started,
-    // and forced chunks cleared after each batch.
+    // forced chunks cleared after each batch (by position in the batch list), and
+    // nothing is cleared after the final batch.
     assert!(
         runner
             .events()
@@ -791,6 +813,14 @@ fn batch_hooks_all_of_reverse_teardown_and_isolation_cleanup() {
         runner
             .events()
             .contains(&GameTestLifecycleEvent::ForcedChunksCleared { batch_index: 1 })
+    );
+    assert_eq!(
+        runner
+            .events()
+            .iter()
+            .filter(|ev| matches!(ev, GameTestLifecycleEvent::BatchStructuresCleared { .. }))
+            .count(),
+        1
     );
 }
 
@@ -1153,42 +1183,188 @@ fn deterministic_repeated_runs_produce_identical_transcripts() {
     assert_eq!(t1, t2);
 }
 
+/// Minimal `GameTestInfo` stand-in recording what a sequence does to its parent.
+#[derive(Default)]
+struct RecordingParent {
+    tick: i32,
+    error: Option<GameTestException>,
+    succeeded: bool,
+}
+
+impl SequenceParent for RecordingParent {
+    fn tick(&self) -> i32 {
+        self.tick
+    }
+    fn fail(&mut self, error: GameTestException) {
+        self.error = Some(error);
+    }
+    fn succeed(&mut self) {
+        // Paper `GameTestInfo.succeed()` is a no-op once an error is recorded.
+        if self.error.is_none() {
+            self.succeeded = true;
+        }
+    }
+}
+
+impl RecordingParent {
+    fn error_message(&self) -> String {
+        self.error
+            .as_ref()
+            .map(GameTestException::message)
+            .unwrap_or_default()
+    }
+}
+
 #[test]
 fn sequence_terminal_failures_fail_immediately_instead_of_retrying() {
-    // 1) then_execute assertion error fails immediately instead of retrying.
+    // 1) then_execute assertion error fails the parent immediately (executeWithoutFail)
+    //    and the sequence keeps going; the later succeed() is a no-op.
+    let mut parent = RecordingParent::default();
     let mut seq = GameTestSequence::new()
         .then_execute(|tick| Err(GameTestException::assert("execute boom", tick)))
         .then_succeed();
-    let err = seq.tick_and_continue(0);
-    assert!(
-        err.is_some() && err.as_ref().unwrap().message().contains("execute boom"),
-        "then_execute error must fail immediately, got: {err:?}"
-    );
-    assert_eq!(seq.take_completed_effect(), None);
+    seq.tick_and_continue(&mut parent, 0);
+    assert_eq!(parent.error_message(), "execute boom on tick 0");
+    assert!(!parent.succeeded);
+    assert!(seq.is_empty());
 
     // 2) then_fail fails immediately instead of being swallowed as a wait.
+    let mut parent = RecordingParent::default();
     let mut seq = GameTestSequence::new()
         .then_fail(|| GameTestException::assert("explicit fail", 0))
         .then_succeed();
-    let err = seq.tick_and_continue(0);
-    assert!(
-        err.is_some() && err.as_ref().unwrap().message().contains("explicit fail"),
-        "then_fail must fail immediately, got: {err:?}"
-    );
+    seq.tick_and_continue(&mut parent, 0);
+    assert_eq!(parent.error_message(), "explicit fail on tick 0");
+    assert!(!parent.succeeded);
 
-    // 3) expected_delay mismatch fails immediately instead of popping and letting then_succeed pass.
+    // 3) expected_delay mismatch fails the parent and stops before then_succeed.
+    let mut parent = RecordingParent {
+        tick: 2,
+        ..RecordingParent::default()
+    };
     let mut seq = GameTestSequence::new()
         .then_wait_until_at(5, |_| Ok(()))
         .then_succeed();
-    let err = seq.tick_and_continue(2);
-    assert!(
-        err.is_some()
-            && err
-                .as_ref()
-                .unwrap()
-                .message()
-                .contains("Succeeded in invalid tick: expected 5, but current tick is 2"),
-        "expected_delay mismatch must fail immediately, got: {err:?}"
+    seq.tick_and_continue(&mut parent, 2);
+    assert_eq!(
+        parent.error_message(),
+        "Succeeded in invalid tick: expected 5 on tick 2"
+    );
+    assert!(!parent.succeeded);
+    assert_eq!(seq.len(), 1);
+
+    // 4) then_wait_at_least runs its assertion first, then fails with minimum_tick.
+    let ran = Arc::new(AtomicI32::new(0));
+    let ran_inner = Arc::clone(&ran);
+    let mut parent = RecordingParent {
+        tick: 1,
+        ..RecordingParent::default()
+    };
+    let mut seq = GameTestSequence::new().then_wait_at_least(3, move |_| {
+        ran_inner.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    });
+    seq.tick_and_continue(&mut parent, 1);
+    assert_eq!(ran.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        parent.error_message(),
+        "Succeeded before expected tick: expected to wait 3 on tick 1"
+    );
+}
+
+#[test]
+fn sequence_execute_for_and_idle_compare_ticks_like_paper() {
+    // thenExecuteFor(3) from lastTick 0 runs the check on ticks 0..=2 and completes
+    // on tick 3 without running it.
+    let runs = Arc::new(Mutex::new(Vec::new()));
+    let runs_inner = Arc::clone(&runs);
+    let completed = Arc::new(AtomicI32::new(-1));
+    let completed_inner = Arc::clone(&completed);
+    let mut seq = GameTestSequence::new()
+        .then_execute_for(3, move |tick| {
+            runs_inner.lock().unwrap().push(tick);
+            Ok(())
+        })
+        .then_execute(move |tick| {
+            completed_inner.store(tick, Ordering::SeqCst);
+            Ok(())
+        });
+    let mut parent = RecordingParent::default();
+    for tick in 0..=3 {
+        parent.tick = tick;
+        seq.tick_and_continue(&mut parent, tick);
+    }
+    assert_eq!(*runs.lock().unwrap(), vec![0, 1, 2]);
+    assert_eq!(completed.load(Ordering::SeqCst), 3);
+    assert!(parent.error.is_none());
+
+    // A skipped tick compares ticks rather than counting runs.
+    let runs = Arc::new(AtomicI32::new(0));
+    let runs_inner = Arc::clone(&runs);
+    let mut seq = GameTestSequence::new().then_execute_for(3, move |_| {
+        runs_inner.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    });
+    let mut parent = RecordingParent::default();
+    seq.tick_and_continue(&mut parent, 0);
+    parent.tick = 5;
+    seq.tick_and_continue(&mut parent, 5);
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+    assert!(seq.is_empty());
+
+    // At timeout an unfinished then_idle fails the parent with not_completed.
+    let mut seq = GameTestSequence::new().then_idle(3).then_succeed();
+    let mut parent = RecordingParent {
+        tick: 1,
+        ..RecordingParent::default()
+    };
+    seq.tick_and_fail_if_not_complete(&mut parent, 1);
+    assert_eq!(
+        parent.error_message(),
+        "Test timed out before sequence completed on tick 1"
+    );
+}
+
+#[test]
+fn sequence_success_on_timeout_tick_still_fails_with_no_sequences_finished() {
+    // Paper `tickInternal`: past the timeout, sequences tick via
+    // tickAndFailIfNotComplete and then `if (this.error == null) fail(...)` — a
+    // sequence that succeeds on that tick still ends as a timeout failure.
+    let registries = build_registries_with(
+        vec![],
+        vec![(
+            Identifier::with_default_namespace("late_success"),
+            fn_instance(
+                "late_success_fn",
+                TestEnvironmentRef::Key(default_environment_key()),
+                5,
+                0,
+                true,
+                1,
+                1,
+            ),
+        )],
+    );
+    let mut functions = TestFunctionRegistry::with_builtins();
+    functions.register(Identifier::with_default_namespace("late_success_fn"), |h| {
+        h.add_sequence(GameTestSequence::new().then_idle(6).then_succeed());
+        Ok(())
+    });
+    let infos = vec![make_info(
+        &registries,
+        "late_success",
+        RetryOptions::no_retries(),
+    )];
+    let mut runner = GameTestRunner::new(infos, registries, GameTestRunnerConfig::default());
+    let transcript = runner.run_to_completion(&functions, 50);
+
+    assert_eq!(transcript.failed_required_count, 1);
+    let rec = &transcript.records[0];
+    assert_eq!(rec.outcome, GameTestOutcome::FailedRequired);
+    assert_eq!(rec.final_test_tick, 6);
+    assert_eq!(
+        rec.final_error.as_deref(),
+        Some("No sequences finished within 5 ticks")
     );
 }
 
@@ -1234,7 +1410,9 @@ fn late_sequence_anchors_delays_to_parent_tick() {
 }
 
 #[test]
-fn unspawned_required_test_fails_transcript_instead_of_passing() {
+fn unspawned_batch_never_advances_and_is_not_success() {
+    // Paper fires testBatchFinished/runBatch(next) only from a tracked test's
+    // listener, so a batch in which every spawn failed never advances.
     struct RejectingSpawner;
     impl super::StructureSpawner for RejectingSpawner {
         fn on_batch_start(&mut self, _batch_index: i32) {}
@@ -1269,7 +1447,8 @@ fn unspawned_required_test_fails_transcript_instead_of_passing() {
     runner.set_spawner(Box::new(RejectingSpawner));
     let transcript = runner.run_to_completion(&functions, 20);
 
-    assert_eq!(transcript.status, GameTestRunStatus::Failed);
+    assert!(!runner.is_finished());
+    assert_eq!(transcript.status, GameTestRunStatus::Incomplete);
     assert!(!transcript.is_success());
     assert_eq!(transcript.skipped_count, 1);
     assert_eq!(transcript.executed_count, 0);
@@ -1403,4 +1582,110 @@ fn junit_xml_strips_illegal_xml_1_0_control_characters() {
     assert!(!xml.contains('\u{0000}'), "NUL must be stripped from XML");
     assert!(!xml.contains('\u{001B}'), "ESC must be stripped from XML");
     assert!(xml.contains("badnullesc\tand\nok"));
+}
+
+#[test]
+fn halt_on_error_halts_on_optional_failure() {
+    // Paper's batch tracker `testFailed` halts whenever `haltOnError` is set,
+    // without checking `isRequired()`.
+    let env_b_key = ResourceKey::create(
+        &TEST_ENVIRONMENT,
+        Identifier::with_default_namespace("env_b"),
+    );
+    let registries = build_registries_with(
+        vec![(
+            Identifier::with_default_namespace("env_b"),
+            TestEnvironmentDefinition::ClockTime {
+                clock: Identifier::with_default_namespace("overworld"),
+                time: 200,
+            },
+        )],
+        vec![
+            (
+                Identifier::with_default_namespace("optional_fail"),
+                fn_instance(
+                    "boom",
+                    TestEnvironmentRef::Key(default_environment_key()),
+                    5,
+                    0,
+                    false,
+                    1,
+                    1,
+                ),
+            ),
+            (
+                Identifier::with_default_namespace("later_batch"),
+                fn_instance(
+                    "always_pass",
+                    TestEnvironmentRef::Key(env_b_key),
+                    5,
+                    0,
+                    true,
+                    1,
+                    1,
+                ),
+            ),
+        ],
+    );
+    let mut functions = TestFunctionRegistry::with_builtins();
+    functions.register(Identifier::with_default_namespace("boom"), |h| {
+        h.fail("optional failure");
+        Ok(())
+    });
+    let infos = vec![
+        make_info(&registries, "optional_fail", RetryOptions::no_retries()),
+        make_info(&registries, "later_batch", RetryOptions::no_retries()),
+    ];
+    let config = GameTestRunnerConfig {
+        halt_on_error: true,
+        ..GameTestRunnerConfig::default()
+    };
+    let mut runner = GameTestRunner::new(infos, registries, config);
+    let transcript = runner.run_to_completion(&functions, 50);
+
+    assert!(runner.is_stopped());
+    assert_eq!(transcript.failed_optional_count, 1);
+    assert_eq!(transcript.records[1].outcome, GameTestOutcome::Skipped);
+}
+
+#[test]
+fn junit_xml_matches_jdk_transformer_output() {
+    let mut reporter = JUnitLikeTestReporter::new("2026-01-01T00:00:00Z");
+    reporter.on_test_success(&GameTestReportEntry {
+        id: Identifier::with_default_namespace("pass_it"),
+        structure: Identifier::with_default_namespace("empty"),
+        required: true,
+        rotation: Rotation::None,
+        test_block_pos: Some(BlockPos::new(1, 2, 3)),
+        run_time_ms: 1000,
+        tick_count: 20,
+        error: None,
+    });
+    reporter.on_test_failed(&GameTestReportEntry {
+        id: Identifier::with_default_namespace("opt_it"),
+        structure: Identifier::with_default_namespace("empty"),
+        required: false,
+        rotation: Rotation::None,
+        test_block_pos: Some(BlockPos::new(1, 2, 3)),
+        run_time_ms: 50,
+        tick_count: 1,
+        error: Some(GameTestException::assert("it's <bad>", 1)),
+    });
+    reporter.finish();
+    assert_eq!(
+        reporter.to_xml(),
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>\
+         <testsuite><testsuite time=\"1.05\" timestamp=\"2026-01-01T00:00:00Z\">\
+         <testcase classname=\"minecraft:empty\" name=\"minecraft:pass_it\" time=\"1.0\"/>\
+         <testcase classname=\"minecraft:empty\" name=\"minecraft:opt_it\" time=\"0.05\">\
+         <skipped message=\"(1, 2, 3) it's &lt;bad&gt; on tick 1\"/></testcase>\
+         </testsuite></testsuite>"
+    );
+
+    let empty = JUnitLikeTestReporter::new("t");
+    assert_eq!(
+        empty.to_xml(),
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>\
+         <testsuite><testsuite time=\"0.0\" timestamp=\"t\"/></testsuite>"
+    );
 }

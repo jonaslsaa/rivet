@@ -125,14 +125,17 @@ pub struct JUnitTestCase {
 
 /// `net.minecraft.gametest.framework.JUnitLikeTestReporter` (Paper 26.2).
 ///
-/// Produces Paper's exact JUnit-like XML structure:
+/// Produces the XML Paper's DOM + default JDK `Transformer` writes: an XML
+/// declaration with `standalone="no"`, no indentation, attributes in the DOM's
+/// sorted (by name) order, and childless elements self-closed:
 /// ```xml
-/// <?xml version="1.0" encoding="UTF-8"?>
+/// <?xml version="1.0" encoding="UTF-8" standalone="no"?>
 /// <testsuite>
-///   <testsuite timestamp="..." time="...">
-///     <testcase name="..." classname="..." time="...">
+///   <testsuite time="..." timestamp="...">
+///     <testcase classname="..." name="..." time="...">
 ///       <failure message="..."/> <!-- or <skipped message="..."/> for optional -->
 ///     </testcase>
+///     <testcase classname="..." name="..." time="..."/> <!-- passed -->
 ///   </testsuite>
 /// </testsuite>
 /// ```
@@ -170,28 +173,40 @@ impl JUnitLikeTestReporter {
     /// Render deterministic XML matching Paper's `JUnitLikeTestReporter.java`.
     pub fn to_xml(&self) -> String {
         let mut out = String::new();
-        out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
+        out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>");
         out.push_str("<testsuite>");
         let _ = write!(
             out,
-            "<testsuite timestamp=\"{}\" time=\"{}\">",
-            escape_xml_attr(&self.timestamp),
-            format_seconds(self.total_time_ms)
+            "<testsuite time=\"{}\" timestamp=\"{}\"",
+            format_seconds(self.total_time_ms),
+            escape_xml_attr(&self.timestamp)
         );
-        for tc in &self.test_cases {
-            let _ = write!(
-                out,
-                "<testcase name=\"{}\" classname=\"{}\" time=\"{}\">",
-                escape_xml_attr(&tc.name),
-                escape_xml_attr(&tc.classname),
-                format_seconds(tc.time_ms)
-            );
-            if let Some((tag, msg)) = &tc.failure_tag {
-                let _ = write!(out, "<{tag} message=\"{}\"/>", escape_xml_attr(msg));
+        if self.test_cases.is_empty() {
+            out.push_str("/>");
+        } else {
+            out.push('>');
+            for tc in &self.test_cases {
+                let _ = write!(
+                    out,
+                    "<testcase classname=\"{}\" name=\"{}\" time=\"{}\"",
+                    escape_xml_attr(&tc.classname),
+                    escape_xml_attr(&tc.name),
+                    format_seconds(tc.time_ms)
+                );
+                match &tc.failure_tag {
+                    Some((tag, msg)) => {
+                        let _ = write!(
+                            out,
+                            "><{tag} message=\"{}\"/></testcase>",
+                            escape_xml_attr(msg)
+                        );
+                    }
+                    None => out.push_str("/>"),
+                }
             }
-            out.push_str("</testcase>");
+            out.push_str("</testsuite>");
         }
-        out.push_str("</testsuite></testsuite>");
+        out.push_str("</testsuite>");
         out
     }
 
@@ -234,8 +249,30 @@ impl TestReporter for JUnitLikeTestReporter {
     }
 }
 
+/// Paper: `String.valueOf(ms / 1000.0)`.
 fn format_seconds(ms: i64) -> String {
-    format!("{}", (ms as f64) / 1000.0)
+    java_double_to_string((ms as f64) / 1000.0)
+}
+
+/// Java `Double.toString(double)` for finite values (JDK 19+ shortest-repr):
+/// plain decimal with at least one fractional digit for `1e-3 <= |v| < 1e7`,
+/// otherwise computerized scientific notation (`1.0E7`).
+fn java_double_to_string(v: f64) -> String {
+    if v == 0.0 {
+        return if v.is_sign_negative() { "-0.0" } else { "0.0" }.to_owned();
+    }
+    if (1e-3..1e7).contains(&v.abs()) {
+        let s = format!("{v}");
+        if s.contains('.') { s } else { format!("{s}.0") }
+    } else {
+        let s = format!("{v:e}");
+        let (mantissa, exponent) = s.split_once('e').unwrap_or((&s, "0"));
+        if mantissa.contains('.') {
+            format!("{mantissa}E{exponent}")
+        } else {
+            format!("{mantissa}.0E{exponent}")
+        }
+    }
 }
 
 fn is_valid_xml_1_0_char(ch: char) -> bool {
@@ -253,7 +290,6 @@ fn escape_xml_attr(s: &str) -> String {
             '<' => out.push_str("&lt;"),
             '>' => out.push_str("&gt;"),
             '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&apos;"),
             other if is_valid_xml_1_0_char(other) => out.push(other),
             _ => {}
         }

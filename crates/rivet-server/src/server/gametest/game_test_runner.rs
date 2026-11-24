@@ -235,6 +235,8 @@ pub struct GameTestRunnerConfig {
     pub halt_on_error: bool,
     pub clear_between_batches: bool,
     pub max_tests_per_batch: usize,
+    /// `startExecution(tickDelay)` argument. Both Paper spawners
+    /// (`StructureSpawner.IN_PLACE`, `StructureGridSpawner`) always pass `1`.
     pub tick_delay: i32,
     pub seed: i64,
     pub discovered_count: usize,
@@ -247,7 +249,7 @@ impl Default for GameTestRunnerConfig {
             halt_on_error: false,
             clear_between_batches: false,
             max_tests_per_batch: MAX_TESTS_PER_BATCH,
-            tick_delay: 0,
+            tick_delay: 1,
             seed: 0,
             discovered_count: 0,
             resource_provenance: String::new(),
@@ -453,8 +455,8 @@ impl GameTestRunner {
     /// Paper: `GameTestRunner.rerunTest(GameTestInfo)`.
     ///
     /// Creates a `copy_reset()` of `original_id`, wires it to the same logical
-    /// `ReportGameListener` state, notifies listeners, and schedules it for the
-    /// post-batch rerun pass.
+    /// `ReportGameListener` state, notifies listeners, records it in
+    /// `all_test_infos`, and schedules it for the post-batch rerun pass.
     pub fn rerun_test(&mut self, original_id: TestInfoId) -> TestInfoId {
         let copy = self.arena[original_id.0].copy_reset();
         let new_id = TestInfoId(self.arena.len());
@@ -474,13 +476,16 @@ impl GameTestRunner {
             attempt_scheduled,
         });
 
+        self.all_test_infos.push(new_id);
         self.scheduled_for_rerun.push(new_id);
         new_id
     }
 
     /// Advance the runner by a single synchronous server tick.
     ///
-    /// Mirrors Paper's tick thread driving `GameTestTicker.tick()`.
+    /// Mirrors Paper's tick thread driving `GameTestTicker.tick()`: every active
+    /// test ticks in order, and each completion runs its listeners immediately
+    /// (so a batch can finish and the next one start mid-tick).
     pub fn tick(&mut self, registry: &TestFunctionRegistry) {
         if !self.started {
             self.start();
@@ -492,32 +497,25 @@ impl GameTestRunner {
         self.current_level_tick = self.current_level_tick.wrapping_add(1);
         let level_tick = self.current_level_tick;
 
-        let mut newly_completed: Vec<(TestInfoId, GameTestTickOutcome)> = Vec::new();
-
-        let tick_result = self.ticker.tick_with(|id, _ticker| {
-            let outcome = self.arena[id.0].tick(level_tick, registry);
-            match outcome {
-                GameTestTickOutcome::Running => false,
-                GameTestTickOutcome::Passed | GameTestTickOutcome::Failed => {
-                    newly_completed.push((id, outcome));
-                    true
-                }
+        for id in self.ticker.begin_tick() {
+            // Paper: `GameTestInfo.tick` is a no-op once `isDone()`.
+            if self.arena[id.0].is_done() {
+                continue;
             }
-        });
-
-        for (id, outcome) in newly_completed {
-            self.handle_test_completion(id, outcome);
+            let outcome = self.arena[id.0].tick(level_tick, registry);
+            if outcome != GameTestTickOutcome::Running {
+                self.handle_test_completion(id, outcome);
+            }
         }
+        let arena = &self.arena;
+        let (_, halted) = self.ticker.end_tick(|id| arena[id.0].is_done());
 
-        if tick_result.halted || self.halted_on_error {
-            self.stopped = true;
+        if halted {
+            // Paper: the deferred `GameTestTicker.clear()` calls `runner.stop()`.
+            self.stop();
             self.finished = true;
-            self.teardown_current_environment();
             self.finish_reporters();
-            return;
         }
-
-        self.check_batch_completion();
     }
 
     /// Drive the synchronous tick loop until all batches and scheduled reruns
@@ -631,13 +629,16 @@ impl GameTestRunner {
             return;
         }
 
-        if self.config.clear_between_batches && !self.previous_batch_positions.is_empty() {
+        // Paper: `if (batchIndex > 0 && this.clearBetweenBatches)` clears the previous batch.
+        if batch_idx > 0 && self.config.clear_between_batches {
             let prev = std::mem::take(&mut self.previous_batch_positions);
-            let prev_batch_index = batch_idx.saturating_sub(1) as i32;
+            // RivetTodo(#474) Paper runs `StructureUtils.clearSpaceForStructure` and
+            // `level.destroyBlock(testInstanceBlockPos)` per previous-batch test; the
+            // spawner hook stands in until structure placement is ported.
             self.spawner.clear_structures(&prev);
             self.events
                 .push(GameTestLifecycleEvent::BatchStructuresCleared {
-                    batch_index: prev_batch_index,
+                    batch_index: (batch_idx - 1) as i32,
                     count: prev.len(),
                 });
         }
@@ -653,21 +654,50 @@ impl GameTestRunner {
                 batch_index: batch_logical_index,
             });
 
-        // Paper: createStructuresForBatch.
+        // Paper: createStructuresForBatch -> spawn -> prepareTestStructure ->
+        // placeStructure (fires testStructureLoaded) -> startExecution(1).
+        let level_tick = self.current_level_tick;
+        let tick_delay = self.config.tick_delay;
         let mut spawned_ids = Vec::with_capacity(batch_test_ids.len());
         let mut spawned_positions = Vec::with_capacity(batch_test_ids.len());
         for id in batch_test_ids {
-            let maybe_pos = self.spawner.spawn_structure(&mut self.arena[id.0]);
-            if let Some(pos) = maybe_pos {
-                spawned_positions.push(pos);
-                self.events.push(GameTestLifecycleEvent::StructureSpawned {
-                    id: self.arena[id.0].id().clone(),
-                    pos,
-                });
-                spawned_ids.push(id);
+            // RivetTodo(#474) Paper's `placeStructure` fails the test with
+            // `test.error.structure.failure` when `TestInstanceBlockEntity.placeStructure`
+            // fails, then encases the structure and clears block ticks/events.
+            let Some(pos) = self.spawner.spawn_structure(&mut self.arena[id.0]) else {
+                continue;
+            };
+            spawned_positions.push(pos);
+            self.events.push(GameTestLifecycleEvent::StructureSpawned {
+                id: self.arena[id.0].id().clone(),
+                pos,
+            });
+
+            // Listener order: ReportGameListener (`attempts++`) first, then the rest.
+            let logical_idx = self.info_to_logical[id.0];
+            self.logical_states[logical_idx].attempts =
+                self.logical_states[logical_idx].attempts.wrapping_add(1);
+            let attempt = self.logical_states[logical_idx].attempts;
+            for listener in &mut self.test_listeners {
+                listener.test_structure_loaded(&self.arena[id.0]);
             }
+            self.events
+                .push(GameTestLifecycleEvent::TestStructureLoaded {
+                    id: self.arena[id.0].id().clone(),
+                    attempt,
+                });
+
+            self.arena[id.0].start_execution(tick_delay, level_tick);
+            spawned_ids.push(id);
         }
         self.previous_batch_positions = spawned_positions;
+
+        tracing::info!(
+            "Running test environment '{}' batch {} ({} tests)...",
+            self.environment_identifier(&batch_env),
+            batch_logical_index,
+            spawned_ids.len()
+        );
 
         // Paper: tear down prior environment, then activate current environment.
         self.teardown_current_environment();
@@ -682,38 +712,20 @@ impl GameTestRunner {
             batch_index: batch_logical_index,
         });
 
-        // Track batch tests, notify testStructureLoaded, startExecution, and add to ticker.
+        // Paper: batch completion fires only from a tracked test's listener, so a
+        // batch in which every spawn failed never advances.
         let tracker = MultipleTestTracker::from_tests(spawned_ids.iter().copied());
         self.current_batch_index = Some(batch_idx);
         self.current_batch_tracker = Some(tracker);
-
-        let level_tick = self.current_level_tick;
-        let tick_delay = self.config.tick_delay;
         for id in spawned_ids {
-            let logical_idx = self.info_to_logical[id.0];
-            self.logical_states[logical_idx].attempts =
-                self.logical_states[logical_idx].attempts.wrapping_add(1);
-            let attempt = self.logical_states[logical_idx].attempts;
-
-            for listener in &mut self.test_listeners {
-                listener.test_structure_loaded(&self.arena[id.0]);
-            }
-            self.events
-                .push(GameTestLifecycleEvent::TestStructureLoaded {
-                    id: self.arena[id.0].id().clone(),
-                    attempt,
-                });
-
-            self.arena[id.0].start_execution(tick_delay, level_tick);
             self.ticker.add(id);
-        }
-
-        // If all tests failed to spawn, advance immediately.
-        if self.ticker.is_empty() {
-            self.check_batch_completion();
         }
     }
 
+    /// Runs the listeners attached to a just-completed test in Paper's order:
+    /// `ReportGameListener` (added first, in the runner constructor or by
+    /// `testAddedForRerun`), the registered test listeners, then the current
+    /// batch tracker's listener.
     fn handle_test_completion(&mut self, id: TestInfoId, outcome: GameTestTickOutcome) {
         let logical_idx = self.info_to_logical[id.0];
         let tick_count = self.arena[id.0].tick_count();
@@ -721,14 +733,7 @@ impl GameTestRunner {
 
         match outcome {
             GameTestTickOutcome::Passed => {
-                for listener in &mut self.test_listeners {
-                    listener.test_passed(&self.arena[id.0]);
-                }
-                self.events.push(GameTestLifecycleEvent::TestPassed {
-                    id: test_id,
-                    tick_count,
-                });
-
+                // ReportGameListener.testPassed
                 self.logical_states[logical_idx].successes =
                     self.logical_states[logical_idx].successes.wrapping_add(1);
 
@@ -748,6 +753,18 @@ impl GameTestRunner {
                 } else {
                     self.rerun_test(id);
                 }
+
+                for listener in &mut self.test_listeners {
+                    listener.test_passed(&self.arena[id.0]);
+                }
+                self.events.push(GameTestLifecycleEvent::TestPassed {
+                    id: test_id,
+                    tick_count,
+                });
+
+                // Batch tracker listener.testPassed.
+                // RivetTodo(#474) Paper calls `getTestInstanceBlockEntity().removeBarriers()`.
+                self.test_completed();
             }
             GameTestTickOutcome::Failed => {
                 let err_msg = self.arena[id.0]
@@ -758,15 +775,7 @@ impl GameTestRunner {
                     self.logical_states[logical_idx].first_failure = Some(err_msg.clone());
                 }
 
-                for listener in &mut self.test_listeners {
-                    listener.test_failed(&self.arena[id.0]);
-                }
-                self.events.push(GameTestLifecycleEvent::TestFailed {
-                    id: test_id,
-                    tick_count,
-                    error: err_msg,
-                });
-
+                // ReportGameListener.testFailed
                 let retry_opts = self.arena[id.0].retry_options();
                 let is_flaky = self.arena[id.0].is_flaky();
                 let max_attempts = self.arena[id.0].max_attempts();
@@ -795,16 +804,32 @@ impl GameTestRunner {
                     self.report_failure(id, logical_idx, Some(exhausted));
                 }
 
-                // Paper GameTestRunner.runBatch: haltOnError clears ticker and stops.
-                if self.config.halt_on_error && self.arena[id.0].is_required() {
+                for listener in &mut self.test_listeners {
+                    listener.test_failed(&self.arena[id.0]);
+                }
+                self.events.push(GameTestLifecycleEvent::TestFailed {
+                    id: test_id,
+                    tick_count,
+                    error: err_msg,
+                });
+
+                // Batch tracker listener.testFailed: `haltOnError` halts on any failure
+                // (required, optional, or a flaky attempt that will be re-run).
+                if self.config.halt_on_error {
                     self.halted_on_error = true;
+                    self.teardown_current_environment();
+                    // RivetTodo(#474) Paper unforces every force-loaded chunk here.
                     let _ = self.ticker.clear();
+                } else {
+                    self.test_completed();
                 }
             }
             GameTestTickOutcome::Running => {}
         }
     }
 
+    /// Paper: `ReportGameListener.reportPassed(testInfo, text)`.
+    // RivetTodo(#474) Paper also calls `setSuccess()` on the test instance block entity.
     fn report_passed(&mut self, id: TestInfoId, logical_idx: usize) {
         self.logical_states[logical_idx].outcome = Some(GameTestOutcome::Passed);
         self.logical_states[logical_idx].final_error = None;
@@ -814,11 +839,17 @@ impl GameTestRunner {
         }
     }
 
+    /// Paper: `ReportGameListener.reportFailure(testInfo, error)`.
+    ///
+    /// `error` (the `ExhaustedAttemptsException` for exhausted flaky tests) only
+    /// drives the chat/block-entity output, recorded here as the transcript's
+    /// `final_error`; `GlobalTestReporter.onTestFailed(testInfo)` reports the
+    /// info's own `getError()`.
     fn report_failure(
         &mut self,
         id: TestInfoId,
         logical_idx: usize,
-        override_error: Option<GameTestException>,
+        exhausted: Option<GameTestException>,
     ) {
         let is_required = self.arena[id.0].is_required();
         self.logical_states[logical_idx].outcome = Some(if is_required {
@@ -826,12 +857,13 @@ impl GameTestRunner {
         } else {
             GameTestOutcome::FailedOptional
         });
-        let mut entry = self.arena[id.0].to_report_entry();
-        if let Some(err) = override_error {
-            entry.error = Some(err);
-        }
-        self.logical_states[logical_idx].final_error =
-            entry.error.as_ref().map(GameTestException::message);
+        let entry = self.arena[id.0].to_report_entry();
+        self.logical_states[logical_idx].final_error = exhausted
+            .as_ref()
+            .or(entry.error.as_ref())
+            .map(GameTestException::message);
+        // RivetTodo(#474) Paper also calls `setErrorMessage` on the test instance block
+        // entity and `markError` for a root `GameTestAssertPosException`.
 
         self.failed_tracker
             .remember_failed_test(self.arena[id.0].test_holder().clone());
@@ -841,7 +873,9 @@ impl GameTestRunner {
         }
     }
 
-    fn check_batch_completion(&mut self) {
+    /// Paper: the batch tracker listener's `testCompleted`: once every tracked test
+    /// is done, fire `testBatchFinished`, unforce chunks, and run the next batch.
+    fn test_completed(&mut self) {
         let Some(batch_idx) = self.current_batch_index else {
             return;
         };
@@ -862,9 +896,10 @@ impl GameTestRunner {
         self.events.push(GameTestLifecycleEvent::BatchFinished {
             batch_index: batch_logical_index,
         });
+        // RivetTodo(#474) Paper unforces every force-loaded chunk of the level here.
         self.events
             .push(GameTestLifecycleEvent::ForcedChunksCleared {
-                batch_index: batch_logical_index,
+                batch_index: batch_idx as i32,
             });
 
         self.current_batch_tracker = None;
@@ -875,21 +910,20 @@ impl GameTestRunner {
     /// Paper: `GameTestRunner.runScheduledRerunTests()`.
     fn run_scheduled_rerun_tests(&mut self) {
         if self.scheduled_for_rerun.is_empty() {
-            if self.config.clear_between_batches && !self.previous_batch_positions.is_empty() {
-                let prev = std::mem::take(&mut self.previous_batch_positions);
-                let last_idx = self.batches.last().map_or(0, GameTestBatch::index);
-                self.spawner.clear_structures(&prev);
-                self.events
-                    .push(GameTestLifecycleEvent::BatchStructuresCleared {
-                        batch_index: last_idx,
-                        count: prev.len(),
-                    });
-            }
+            self.batches = Vec::new();
             self.finished = true;
             self.finish_reporters();
             return;
         }
 
+        tracing::info!(
+            "Starting re-run of tests: {}",
+            self.scheduled_for_rerun
+                .iter()
+                .map(|id| self.arena[id.0].id().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
         let rerun_ids = std::mem::take(&mut self.scheduled_for_rerun);
         let new_batches = divide_into_batches(
             rerun_ids,

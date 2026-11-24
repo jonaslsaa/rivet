@@ -9,9 +9,9 @@ use std::sync::Arc;
 use rivet_registry::core::{BlockPos, Rotation};
 use rivet_registry::{Holder, Identifier};
 
-use crate::server::gametest::exception::GameTestException;
+use crate::server::gametest::exception::{GameTestException, GameTestTimeoutException};
 use crate::server::gametest::game_test_instance::GameTestInstance;
-use crate::server::gametest::game_test_sequence::{GameTestSequence, SequenceStepEffect};
+use crate::server::gametest::game_test_sequence::{GameTestSequence, SequenceParent};
 use crate::server::gametest::registries::GameTestRegistries;
 use crate::server::gametest::reporter::GameTestReportEntry;
 use crate::server::gametest::retry_options::RetryOptions;
@@ -143,7 +143,7 @@ impl TestExecutionHandle {
     /// Paper: `GameTestHelper.startSequence()` -> `GameTestSequence(parent)` sets
     /// `lastTick = parent.getTick()`.
     pub fn add_sequence(&mut self, mut sequence: GameTestSequence) {
-        sequence.set_start_tick(i64::from(self.current_tick));
+        sequence.set_start_tick(self.current_tick);
         self.sequences.push(sequence);
     }
 }
@@ -398,7 +398,7 @@ impl GameTestInfo {
     }
 
     pub fn add_sequence(&mut self, mut sequence: GameTestSequence) {
-        sequence.set_start_tick(i64::from(self.tick_count));
+        sequence.set_start_tick(self.tick_count);
         self.sequences.push(sequence);
     }
 
@@ -406,6 +406,8 @@ impl GameTestInfo {
     pub fn succeed(&mut self, current_level_tick: i64) {
         if self.error.is_none() {
             self.finish(current_level_tick);
+            // RivetTodo(#474) Paper then discards every non-player entity inside
+            // `getStructureBounds().inflate(1.0)`; needs the level entity lookup.
         }
     }
 
@@ -448,16 +450,21 @@ impl GameTestInfo {
         }
 
         if !self.placed_structure {
-            self.fail_message("test.error.ticking_without_structure");
+            // Paper: `test.error.ticking_without_structure` (en_us).
+            self.fail_message("Ticking test before placing structure");
         }
 
         if self.test_block_pos.is_none() || self.missing_block_entity {
-            self.fail_message("test.error.missing_block_entity");
+            // Paper: `test.error.missing_block_entity` (en_us).
+            self.fail_message("Missing block entity");
         }
 
         if self.error.is_some() {
             self.finish(current_level_tick);
         } else if !self.chunks_loaded {
+            // RivetTodo(#474) Paper polls `getStructureBoundingBox().intersectingChunks()
+            // .allMatch(level::areEntitiesActuallyLoadedAndTicking)` until true; the host
+            // drives `set_chunks_loaded` until the level chunk query is ported.
             return GameTestTickOutcome::Running;
         }
 
@@ -497,61 +504,48 @@ impl GameTestInfo {
                 }
             }
 
-            if self.tick_count > self.timeout_ticks {
+            let tick = self.tick_count;
+            if tick > self.timeout_ticks {
                 if self.sequences.is_empty() {
                     self.fail(GameTestException::Timeout(
-                        crate::server::gametest::exception::GameTestTimeoutException::no_result(
-                            self.test.max_ticks(),
-                        ),
+                        GameTestTimeoutException::no_result(self.test.max_ticks()),
                     ));
                 } else {
-                    let tick = i64::from(self.tick_count);
-                    let mut first_err: Option<GameTestException> = None;
-                    let mut any_succeeded = false;
-                    for seq in &mut self.sequences {
-                        if let Some(err) = seq.tick_and_fail_if_not_complete(tick)
-                            && first_err.is_none()
-                        {
-                            first_err = Some(err);
-                        }
-                        if seq.take_completed_effect() == Some(SequenceStepEffect::Succeed) {
-                            any_succeeded = true;
-                        }
-                    }
-                    if let Some(err) = first_err {
-                        self.fail(err);
-                    } else if any_succeeded {
-                        self.succeed(current_level_tick);
-                    }
-                    if self.error.is_none() && !self.done {
+                    self.tick_sequences(current_level_tick, |seq, parent| {
+                        seq.tick_and_fail_if_not_complete(parent, tick);
+                    });
+                    if self.error.is_none() {
                         self.fail(GameTestException::Timeout(
-                            crate::server::gametest::exception::GameTestTimeoutException::no_sequences_finished(
-                                self.test.max_ticks(),
-                            ),
+                            GameTestTimeoutException::no_sequences_finished(self.test.max_ticks()),
                         ));
                     }
                 }
             } else {
-                let tick = i64::from(self.tick_count);
-                let mut first_err: Option<GameTestException> = None;
-                let mut any_succeeded = false;
-                for seq in &mut self.sequences {
-                    if let Some(err) = seq.tick_and_continue(tick)
-                        && first_err.is_none()
-                    {
-                        first_err = Some(err);
-                    }
-                    if seq.take_completed_effect() == Some(SequenceStepEffect::Succeed) {
-                        any_succeeded = true;
-                    }
-                }
-                if let Some(err) = first_err {
-                    self.fail(err);
-                } else if any_succeeded {
-                    self.succeed(current_level_tick);
-                }
+                self.tick_sequences(current_level_tick, |seq, parent| {
+                    seq.tick_and_continue(parent, tick);
+                });
             }
         }
+    }
+
+    /// Paper: `this.sequences.forEach(...)` with the sequence's parent pointing
+    /// back at this info.
+    fn tick_sequences<F>(&mut self, current_level_tick: i64, mut tick_one: F)
+    where
+        F: FnMut(&mut GameTestSequence, &mut dyn SequenceParent),
+    {
+        let mut sequences = std::mem::take(&mut self.sequences);
+        {
+            let mut parent = InfoSequenceParent {
+                info: self,
+                current_level_tick,
+            };
+            for seq in &mut sequences {
+                tick_one(seq, &mut parent);
+            }
+        }
+        sequences.append(&mut self.sequences);
+        self.sequences = sequences;
     }
 
     fn start_test(&mut self, current_level_tick: i64, registry: &TestFunctionRegistry) {
@@ -559,9 +553,12 @@ impl GameTestInfo {
             self.started = true;
             self.start_tick = Some(current_level_tick);
 
+            // RivetTodo(#474) Paper calls `getTestInstanceBlockEntity().setRunning()` here.
             match &self.test {
                 GameTestInstance::BlockBased(_) => {
-                    // Block-based tests wait for world/test block signals; no function body.
+                    // RivetTodo(#475) Paper `BlockBasedTestInstance.run` triggers the start
+                    // test block and polls accept/fail/log test blocks every tick; until
+                    // test blocks are ported a block-based test runs nothing and times out.
                 }
                 GameTestInstance::Function(func_inst) => {
                     let fn_id = func_inst.function().identifier().clone();
@@ -633,5 +630,25 @@ impl GameTestInfo {
             tick_count: self.tick_count,
             error: self.error.clone(),
         }
+    }
+}
+
+/// [`SequenceParent`] view of a [`GameTestInfo`] while its sequences tick.
+struct InfoSequenceParent<'a> {
+    info: &'a mut GameTestInfo,
+    current_level_tick: i64,
+}
+
+impl SequenceParent for InfoSequenceParent<'_> {
+    fn tick(&self) -> i32 {
+        self.info.tick_count
+    }
+
+    fn fail(&mut self, error: GameTestException) {
+        self.info.fail(error);
+    }
+
+    fn succeed(&mut self) {
+        self.info.succeed(self.current_level_tick);
     }
 }

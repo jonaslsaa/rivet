@@ -42,6 +42,9 @@ pub fn direct_test_info(
 /// partition each group into batches of at most `max_tests_per_batch`
 /// (matching Paper `GameTestBatchFactory.fromGameTestInfo(int maxTestsPerBatch)`).
 ///
+/// Batch indices come from `Streams.mapWithIndex` inside the per-environment
+/// `flatMap`, so numbering restarts at 0 for every environment group.
+///
 /// If `max_tests_per_batch == 0`, clamps to `1` to prevent empty/infinite chunks.
 pub fn divide_into_batches<T, F>(
     items: impl IntoIterator<Item = T>,
@@ -70,9 +73,9 @@ where
     }
 
     let mut batches = Vec::new();
-    let mut batch_index: i32 = 0;
 
     for (_, (env, mut group_items)) in grouped {
+        let mut batch_index: i32 = 0;
         while !group_items.is_empty() {
             let take = group_items.len().min(chunk_size);
             let chunk: Vec<T> = group_items.drain(..take).collect();

@@ -1,36 +1,41 @@
 //! `net.minecraft.gametest.framework.GameTestSequence` (Paper 26.2).
 //!
-//! Mirrors `GameTestSequence.java` and `GameTestSequence.Condition`:
-//! ordered step execution with exact delay, minimum delay, idle, execute,
-//! execute-after, execute-for, wait-until, succeed, fail, and trigger
-//! semantics.
+//! Mirrors `GameTestSequence.java`: ordered event execution where each event's
+//! assertion either throws (the sequence stops for this tick) or completes, after
+//! which the event's minimum/expected delay is checked against the tick delta.
+//! Event bodies act on the parent `GameTestInfo` through [`SequenceParent`]
+//! exactly where Paper calls `this.parent.fail(..)` / `this.parent.succeed()`.
 
 use std::collections::VecDeque;
 
 use crate::server::gametest::exception::{GameTestEvent, GameTestException};
 
-/// Callback executed for a single step in a [`GameTestSequence`].
-///
-/// Receives the current test tick (`tick_count`) and returns `Ok(SequenceStepEffect)`
-/// or `Err(GameTestException)`.
-pub type SequenceAssertion = Box<dyn FnMut(i32) -> Result<SequenceStepEffect, GameTestException>>;
+/// Paper `test.error.sequence.not_completed` (en_us).
+const SEQUENCE_NOT_COMPLETED: &str = "Test timed out before sequence completed";
 
-/// Side effect produced by a sequence step on its parent `GameTestInfo`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SequenceStepEffect {
-    None,
-    Succeed,
-    /// Immediate terminal failure on the parent `GameTestInfo` (Paper's
-    /// `executeWithoutFail` / `thenFail` / delay-check failure calling
-    /// `this.parent.fail(e)` directly rather than throwing to `tickAndContinue`).
-    Fail(GameTestException),
+/// The parent `GameTestInfo` operations a sequence event may perform
+/// (Paper: the `GameTestInfo parent` field of `GameTestSequence`).
+pub trait SequenceParent {
+    /// Paper: `parent.getTick()`.
+    fn tick(&self) -> i32;
+    /// Paper: `parent.fail(GameTestException)`.
+    fn fail(&mut self, error: GameTestException);
+    /// Paper: `parent.succeed()`.
+    fn succeed(&mut self);
 }
+
+/// Body of one [`GameTestSequence`] event (Paper: `GameTestEvent.assertion`).
+///
+/// Receives the parent and the sequence's current `lastTick`. Returning `Err`
+/// is Paper's thrown exception: the event stays queued and the sequence stops
+/// for this tick.
+pub type SequenceAssertion =
+    Box<dyn FnMut(&mut dyn SequenceParent, i32) -> Result<(), GameTestException>>;
 
 /// `net.minecraft.gametest.framework.GameTestSequence` (Paper 26.2).
 pub struct GameTestSequence {
     events: VecDeque<GameTestEvent<SequenceAssertion>>,
-    last_tick: i64,
-    completed_effect: Option<SequenceStepEffect>,
+    last_tick: i32,
 }
 
 impl Default for GameTestSequence {
@@ -39,21 +44,44 @@ impl Default for GameTestSequence {
     }
 }
 
+/// Paper: `GameTestSequence.executeWithoutFail(Runnable)` — a
+/// `GameTestAssertException` (or `GameTestAssertPosException`) fails the parent
+/// immediately; any other exception propagates.
+fn execute_without_fail<F>(
+    parent: &mut dyn SequenceParent,
+    assertion: &mut F,
+) -> Result<(), GameTestException>
+where
+    F: FnMut(i32) -> Result<(), GameTestException>,
+{
+    match assertion(parent.tick()) {
+        Ok(()) => Ok(()),
+        Err(err @ (GameTestException::Assert(_) | GameTestException::AssertPos(_))) => {
+            parent.fail(err);
+            Ok(())
+        }
+        Err(other) => Err(other),
+    }
+}
+
+fn not_completed(parent: &dyn SequenceParent) -> GameTestException {
+    GameTestException::assert(SEQUENCE_NOT_COMPLETED, parent.tick())
+}
+
 impl GameTestSequence {
     pub fn new() -> Self {
         Self::with_start_tick(0)
     }
 
     /// Paper: `GameTestSequence(GameTestInfo parent)` sets `this.lastTick = parent.getTick()`.
-    pub fn with_start_tick(start_tick: i64) -> Self {
+    pub fn with_start_tick(start_tick: i32) -> Self {
         Self {
             events: VecDeque::new(),
             last_tick: start_tick,
-            completed_effect: None,
         }
     }
 
-    pub(crate) fn set_start_tick(&mut self, start_tick: i64) {
+    pub(crate) fn set_start_tick(&mut self, start_tick: i32) {
         self.last_tick = start_tick;
     }
 
@@ -65,20 +93,14 @@ impl GameTestSequence {
         self.events.len()
     }
 
-    /// Take any terminal effect (e.g. `Succeed`) produced during ticking.
-    pub fn take_completed_effect(&mut self) -> Option<SequenceStepEffect> {
-        self.completed_effect.take()
-    }
-
     /// Paper: `thenWaitUntil(Runnable assertion)`.
     pub fn then_wait_until<F>(mut self, mut assertion: F) -> Self
     where
         F: FnMut(i32) -> Result<(), GameTestException> + 'static,
     {
         self.events
-            .push_back(GameTestEvent::create(Box::new(move |tick| {
-                assertion(tick)?;
-                Ok(SequenceStepEffect::None)
+            .push_back(GameTestEvent::create(Box::new(move |parent, _| {
+                assertion(parent.tick())
             })));
         self
     }
@@ -90,169 +112,155 @@ impl GameTestSequence {
     {
         self.events.push_back(GameTestEvent::create_at(
             expected_delay,
-            Box::new(move |tick| {
-                assertion(tick)?;
-                Ok(SequenceStepEffect::None)
-            }),
+            Box::new(move |parent, _| assertion(parent.tick())),
         ));
         self
     }
 
-    /// Paper: `thenIdle(int delta)`.
-    pub fn then_idle(mut self, delta: i32) -> Self {
+    /// Paper: `thenWaitAtLeast(long minimumDelay, Runnable assertion)`.
+    pub fn then_wait_at_least<F>(mut self, minimum_delay: i64, mut assertion: F) -> Self
+    where
+        F: FnMut(i32) -> Result<(), GameTestException> + 'static,
+    {
         self.events
             .push_back(GameTestEvent::create_with_minimum_delay(
-                i64::from(delta),
-                Box::new(|_| Ok(SequenceStepEffect::None)),
+                minimum_delay,
+                Box::new(move |parent, _| assertion(parent.tick())),
             ));
         self
     }
 
-    /// Paper: `thenExecute(Runnable task)` — wrapped in `executeWithoutFail`, so
-    /// an assertion error immediately fails the parent test instead of retrying.
-    pub fn then_execute<F>(mut self, mut task: F) -> Self
+    /// Paper: `thenIdle(int delta)` -> `thenExecuteAfter(delta, () -> {})`.
+    pub fn then_idle(self, delta: i32) -> Self {
+        self.then_execute_after(delta, |_| Ok(()))
+    }
+
+    /// Paper: `thenExecute(Runnable assertion)` — wrapped in `executeWithoutFail`.
+    pub fn then_execute<F>(mut self, mut assertion: F) -> Self
     where
         F: FnMut(i32) -> Result<(), GameTestException> + 'static,
     {
         self.events
-            .push_back(GameTestEvent::create(Box::new(move |tick| {
-                match task(tick) {
-                    Ok(()) => Ok(SequenceStepEffect::None),
-                    Err(err) => Ok(SequenceStepEffect::Fail(err)),
-                }
+            .push_back(GameTestEvent::create(Box::new(move |parent, _| {
+                execute_without_fail(parent, &mut assertion)
             })));
         self
     }
 
-    /// Paper: `thenExecuteAfter(int tick, Runnable task)`.
-    pub fn then_execute_after<F>(self, tick: i32, task: F) -> Self
+    /// Paper: `thenExecuteAfter(int delta, Runnable after)`: throws
+    /// `test.error.sequence.not_completed` while `parent.getTick() < lastTick + delta`.
+    pub fn then_execute_after<F>(mut self, delta: i32, mut after: F) -> Self
     where
         F: FnMut(i32) -> Result<(), GameTestException> + 'static,
     {
-        self.then_idle(tick).then_execute(task)
-    }
-
-    /// Paper: `thenExecuteFor(int tick, Runnable task)` — task errors fail the
-    /// parent test immediately (`executeWithoutFail`); remaining ticks wait.
-    pub fn then_execute_for<F>(mut self, ticks: i32, mut task: F) -> Self
-    where
-        F: FnMut(i32) -> Result<(), GameTestException> + 'static,
-    {
-        let mut remaining = ticks;
         self.events
-            .push_back(GameTestEvent::create(Box::new(move |tick| {
-                if remaining > 0 {
-                    if let Err(err) = task(tick) {
-                        return Ok(SequenceStepEffect::Fail(err));
-                    }
-                    remaining -= 1;
-                    if remaining > 0 {
-                        return Err(GameTestException::assert(
-                            "sequence execute_for remaining",
-                            tick,
-                        ));
-                    }
+            .push_back(GameTestEvent::create(Box::new(move |parent, last_tick| {
+                if parent.tick() < last_tick.wrapping_add(delta) {
+                    return Err(not_completed(parent));
                 }
-                Ok(SequenceStepEffect::None)
+                execute_without_fail(parent, &mut after)
             })));
         self
     }
 
-    /// Paper: `thenSucceed()`.
+    /// Paper: `thenExecuteFor(int delta, Runnable check)`: runs `check` and throws
+    /// `test.error.sequence.not_completed` while `parent.getTick() < lastTick + delta`,
+    /// completing (without running `check`) once the delta has elapsed.
+    pub fn then_execute_for<F>(mut self, delta: i32, mut check: F) -> Self
+    where
+        F: FnMut(i32) -> Result<(), GameTestException> + 'static,
+    {
+        self.events
+            .push_back(GameTestEvent::create(Box::new(move |parent, last_tick| {
+                if parent.tick() < last_tick.wrapping_add(delta) {
+                    execute_without_fail(parent, &mut check)?;
+                    return Err(not_completed(parent));
+                }
+                Ok(())
+            })));
+        self
+    }
+
+    /// Paper: `thenSucceed()` -> `parent.succeed()`.
     pub fn then_succeed(mut self) -> Self {
-        self.events.push_back(GameTestEvent::create(Box::new(|_| {
-            Ok(SequenceStepEffect::Succeed)
-        })));
+        self.events
+            .push_back(GameTestEvent::create(Box::new(|parent, _| {
+                parent.succeed();
+                Ok(())
+            })));
         self
     }
 
-    /// Paper: `thenFail(Supplier<GameTestException> e)` — immediately fails parent.
+    /// Paper: `thenFail(Supplier<GameTestException> e)` -> `parent.fail(e.get())`.
     pub fn then_fail<F>(mut self, mut error_fn: F) -> Self
     where
         F: FnMut() -> GameTestException + 'static,
     {
         self.events
-            .push_back(GameTestEvent::create(Box::new(move |_| {
-                Ok(SequenceStepEffect::Fail(error_fn()))
+            .push_back(GameTestEvent::create(Box::new(move |parent, _| {
+                parent.fail(error_fn());
+                Ok(())
             })));
         self
     }
 
-    /// Paper: `tickAndContinue(long tick)`.
+    /// Paper: `tickAndContinue(int tick)` — swallows `GameTestAssertException`
+    /// (incl. `GameTestAssertPosException`) while waiting.
     ///
-    /// Swallows wait-condition `GameTestAssertException` / `GameTestAssertPosException`
-    /// while waiting before timeout; returns `Some(err)` immediately for any
-    /// terminal parent failure (`then_execute`, `then_fail`, `then_execute_for`
-    /// assertion error, or `expected_delay` mismatch).
-    pub fn tick_and_continue(&mut self, tick: i64) -> Option<GameTestException> {
-        let res = self.execute_without_fail(tick);
-        if matches!(self.completed_effect, Some(SequenceStepEffect::Fail(_)))
-            && let Some(SequenceStepEffect::Fail(err)) = self.completed_effect.take()
-        {
-            return Some(err);
-        }
-        match res {
-            Ok(()) => None,
-            Err(GameTestException::Assert(_) | GameTestException::AssertPos(_)) => None,
-            Err(other) => Some(other),
+    /// Any other exception escapes `GameTestInfo.tick` in Paper; Rivet records it
+    /// as the parent's failure instead of unwinding the tick thread.
+    pub fn tick_and_continue(&mut self, parent: &mut dyn SequenceParent, tick: i32) {
+        match self.tick(parent, tick) {
+            Ok(()) | Err(GameTestException::Assert(_) | GameTestException::AssertPos(_)) => {}
+            Err(other) => parent.fail(other),
         }
     }
 
-    /// Paper: `tickAndFailIfNotComplete(long tick)`.
-    ///
-    /// Called when `tickCount > timeoutTicks`; returns any terminal failure or
-    /// failure from the front unfinished event instead of swallowing it.
-    pub fn tick_and_fail_if_not_complete(&mut self, tick: i64) -> Option<GameTestException> {
-        let res = self.execute_without_fail(tick);
-        if matches!(self.completed_effect, Some(SequenceStepEffect::Fail(_)))
-            && let Some(SequenceStepEffect::Fail(err)) = self.completed_effect.take()
-        {
-            return Some(err);
+    /// Paper: `tickAndFailIfNotComplete(int tick)` — any assertion thrown fails the parent.
+    pub fn tick_and_fail_if_not_complete(&mut self, parent: &mut dyn SequenceParent, tick: i32) {
+        if let Err(err) = self.tick(parent, tick) {
+            parent.fail(err);
         }
-        res.err()
     }
 
-    /// Paper: `tick(int tick)`.
-    fn execute_without_fail(&mut self, tick: i64) -> Result<(), GameTestException> {
-        let mut last_tick = self.last_tick;
-        while let Some(front) = self.events.front_mut() {
-            if let Some(min_delay) = front.minimum_delay
-                && tick.wrapping_sub(last_tick) < min_delay
-            {
-                return Ok(());
-            }
-
-            let effect = (front.assertion)(tick as i32)?;
-            let expected_delay = front.expected_delay;
-            let _ = self.events.pop_front();
-
-            let delta = tick.wrapping_sub(last_tick);
-            let prev_tick = last_tick;
-            last_tick = tick;
+    /// Paper: `GameTestSequence.tick(int tick)`.
+    fn tick(
+        &mut self,
+        parent: &mut dyn SequenceParent,
+        tick: i32,
+    ) -> Result<(), GameTestException> {
+        while let Some(event) = self.events.front_mut() {
+            (event.assertion)(parent, self.last_tick)?;
+            let Some(event) = self.events.pop_front() else {
+                break;
+            };
+            let delay = tick.wrapping_sub(self.last_tick);
+            let prev_tick = self.last_tick;
             self.last_tick = tick;
-
-            match effect {
-                SequenceStepEffect::None => {}
-                SequenceStepEffect::Succeed => {
-                    self.completed_effect = Some(SequenceStepEffect::Succeed);
-                }
-                SequenceStepEffect::Fail(err) => {
-                    self.completed_effect = Some(SequenceStepEffect::Fail(err));
-                    return Ok(());
-                }
+            if let Some(minimum_delay) = event.minimum_delay
+                && minimum_delay > i64::from(delay)
+            {
+                parent.fail(GameTestException::assert(
+                    format!(
+                        "Succeeded before expected tick: expected to wait {}",
+                        i64::from(prev_tick).wrapping_add(minimum_delay)
+                    ),
+                    tick,
+                ));
+                break;
             }
 
-            if let Some(expected) = expected_delay
-                && expected != delta
+            if let Some(expected_delay) = event.expected_delay
+                && expected_delay != i64::from(delay)
             {
-                self.completed_effect = Some(SequenceStepEffect::Fail(GameTestException::assert(
+                parent.fail(GameTestException::assert(
                     format!(
-                        "Succeeded in invalid tick: expected {}, but current tick is {tick}",
-                        prev_tick.wrapping_add(expected)
+                        "Succeeded in invalid tick: expected {}",
+                        i64::from(prev_tick).wrapping_add(expected_delay)
                     ),
-                    tick as i32,
-                )));
-                return Ok(());
+                    tick,
+                ));
+                break;
             }
         }
         Ok(())

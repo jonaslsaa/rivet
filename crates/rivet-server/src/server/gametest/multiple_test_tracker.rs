@@ -128,21 +128,8 @@ impl MultipleTestTracker {
         buf
     }
 
-    /// Paper: `MultipleTestTracker.toString()`.
+    /// Paper: `MultipleTestTracker.toString()` -> `getProgressBar()`.
     pub fn summary_string(&self, arena: &[GameTestInfo]) -> String {
-        let done = self.done_count(arena);
-        let total = self.total_count();
-        let failed_req = self.failed_required_count(arena);
-        let failed_opt = self.failed_optional_count(arena);
-        let mut s = format!("{done}/{total} tests completed");
-        if failed_req > 0 {
-            s.push_str(&format!(" ({failed_req} failed)"));
-        }
-        if failed_opt > 0 {
-            s.push_str(&format!(" ({failed_opt} optional failed)"));
-        }
-        s.push(' ');
-        s.push_str(&self.progress_bar(arena));
-        s
+        self.progress_bar(arena)
     }
 }

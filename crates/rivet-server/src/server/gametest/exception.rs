@@ -28,9 +28,10 @@ impl GameTestAssertException {
         }
     }
 
-    /// Paper: `Component.translatable("test.error.tick", this.message, this.tick)`.
+    /// Paper: `Component.translatable("test.error.tick", this.message, this.tick)`
+    /// resolved against en_us (`"%s on tick %s"`).
     pub fn description(&self) -> String {
-        format!("{} (tick {})", self.message, self.tick)
+        format!("{} on tick {}", self.message, self.tick)
     }
 }
 
@@ -64,10 +65,11 @@ impl GameTestAssertPosException {
         }
     }
 
-    /// Paper: `Component.translatable("test.error.position", message, absX, absY, absZ, relX, relY, relZ, tick)`.
+    /// Paper: `Component.translatable("test.error.position", message, absX, absY, absZ, relX, relY, relZ, tick)`
+    /// resolved against en_us (`"%s at %s, %s, %s (relative: %s, %s, %s) on tick %s"`).
     pub fn description(&self) -> String {
         format!(
-            "{} at {},{},{} (relative: {},{},{}) (tick {})",
+            "{} at {}, {}, {} (relative: {}, {}, {}) on tick {}",
             self.message,
             self.absolute_pos.get_x(),
             self.absolute_pos.get_y(),
@@ -104,16 +106,16 @@ impl GameTestTimeoutException {
         }
     }
 
-    /// Paper: `Component.translatable("test.error.timeout.no_result", maxTicks)`.
+    /// Paper: `Component.translatable("test.error.timeout.no_result", maxTicks)`
+    /// resolved against en_us.
     pub fn no_result(max_ticks: i32) -> Self {
-        Self::new(format!("test.error.timeout.no_result:{max_ticks}"))
+        Self::new(format!("Didn't succeed or fail within {max_ticks} ticks"))
     }
 
-    /// Paper: `Component.translatable("test.error.timeout.no_sequences_finished", maxTicks)`.
+    /// Paper: `Component.translatable("test.error.timeout.no_sequences_finished", maxTicks)`
+    /// resolved against en_us.
     pub fn no_sequences_finished(max_ticks: i32) -> Self {
-        Self::new(format!(
-            "test.error.timeout.no_sequences_finished:{max_ticks}"
-        ))
+        Self::new(format!("No sequences finished within {max_ticks} ticks"))
     }
 
     pub fn description(&self) -> &str {
@@ -140,9 +142,10 @@ impl UnknownGameTestException {
         }
     }
 
-    /// Paper: `Component.translatable("test.error.unknown", this.reason.getMessage())`.
+    /// Paper: `Component.translatable("test.error.unknown", this.reason.getMessage())`
+    /// resolved against en_us (`"Unknown internal error: %s"`).
     pub fn description(&self) -> String {
-        format!("test.error.unknown:{}", self.reason)
+        format!("Unknown internal error: {}", self.reason)
     }
 }
 

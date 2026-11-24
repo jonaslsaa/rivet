@@ -26,7 +26,6 @@ pub enum TickerState {
 pub struct GameTestTicker {
     test_infos: Vec<TestInfoId>,
     state: TickerState,
-    marked_for_removal: Vec<TestInfoId>,
 }
 
 /// Summary returned by [`GameTestTicker::tick_with`].
@@ -65,18 +64,44 @@ impl GameTestTicker {
 
     /// Paper: `GameTestTicker.clear()`.
     ///
-    /// If currently `Running`, transitions to `Halting` so the active tick loop
-    /// finishes safely before clearing. Returns `true` if cleared immediately.
+    /// If not `Idle`, transitions to `Halting` so the active tick loop finishes
+    /// safely before clearing. Returns `true` if cleared immediately.
     pub fn clear(&mut self) -> bool {
-        if self.state == TickerState::Running {
+        if self.state != TickerState::Idle {
             self.state = TickerState::Halting;
             false
         } else {
             self.test_infos.clear();
-            self.marked_for_removal.clear();
             self.state = TickerState::Idle;
             true
         }
+    }
+
+    /// Paper: `GameTestTicker.tick()`, first half: enters `RUNNING` and returns
+    /// the snapshot `testInfos.forEach` iterates (tests added mid-tick are not
+    /// visited until the next tick, as with Paper's `CopyOnWriteArrayList`).
+    pub fn begin_tick(&mut self) -> Vec<TestInfoId> {
+        self.state = TickerState::Running;
+        self.test_infos.clone()
+    }
+
+    /// Paper: `GameTestTicker.tick()`, second half: `removeIf(GameTestInfo::isDone)`,
+    /// back to `IDLE`, and the deferred `clear()` if `clear()` was called while
+    /// running. Returns `(removed_count, halted)`.
+    pub fn end_tick<F>(&mut self, mut is_done: F) -> (usize, bool)
+    where
+        F: FnMut(TestInfoId) -> bool,
+    {
+        let before = self.test_infos.len();
+        self.test_infos.retain(|&id| !is_done(id));
+        let removed_count = before.saturating_sub(self.test_infos.len());
+        let finishing_state = self.state;
+        self.state = TickerState::Idle;
+        let halted = finishing_state == TickerState::Halting;
+        if halted {
+            self.clear();
+        }
+        (removed_count, halted)
     }
 
     /// Paper: `GameTestTicker.tick()`.
@@ -99,36 +124,15 @@ impl GameTestTicker {
             };
         }
 
-        self.state = TickerState::Running;
-        let snapshot = self.test_infos.clone();
-        self.marked_for_removal.clear();
-
-        let mut ticked_count = 0usize;
+        let snapshot = self.begin_tick();
+        let ticked_count = snapshot.len();
+        let mut done = Vec::new();
         for id in snapshot {
-            ticked_count += 1;
-            let done = tick_fn(id, self);
-            if done {
-                self.marked_for_removal.push(id);
+            if tick_fn(id, self) {
+                done.push(id);
             }
         }
-
-        let mut removed_count = 0usize;
-        if !self.marked_for_removal.is_empty() {
-            let to_remove = std::mem::take(&mut self.marked_for_removal);
-            let before = self.test_infos.len();
-            self.test_infos.retain(|id| !to_remove.contains(id));
-            removed_count = before.saturating_sub(self.test_infos.len());
-        }
-
-        let halted = if self.state == TickerState::Halting {
-            self.test_infos.clear();
-            self.marked_for_removal.clear();
-            self.state = TickerState::Idle;
-            true
-        } else {
-            self.state = TickerState::Idle;
-            false
-        };
+        let (removed_count, halted) = self.end_tick(|id| done.contains(&id));
 
         TickerTickResult {
             ticked_count,
