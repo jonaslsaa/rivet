@@ -218,7 +218,7 @@ One comparator, used everywhere:
 | Source | Handling |
 |---|---|
 | World seed | Committed seed list; both sides read the same file (already the #175 rule). |
-| `RandomSource.create()` / `RandomSupport.generateUniqueSeed()` (time + static counter) | **Seed-injection contract.** The Java arena probe reseeds after construction: `level.random`, `level.getThreadSafeRandom()`, and each entity's `random` at spawn, with `mix(scenarioSeed, siteId, spawnOrdinal)`. Rivet exposes the same injection points behind a test-only constructor argument (never a global). The list of injection sites is a committed table; a site not on the list means the arena must not exercise it. Start with RNG-free mechanics (fluids, scheduled ticks, redstone, pistons, hoppers) so the harness lands before this contract is complete. |
+| `RandomSource.create()` / `RandomSupport.generateUniqueSeed()` (time + static counter) | **Seed-injection contract.** The authority is `tools/rivet-oracle/arenas/seed-sites.tsv`; the arena probe reseeds only at the sites listed there, with `mix(scenarioSeed, siteId, ordinal)`. Site 1 is `ServerLevel.random`, reseeded at arena placement (Rivet: `random_mut().set_seed` on the arena's own level, never a global). Site 3 is entity RNG: Paper 26.2 gives every `Entity.random` the one static `Entity.SHARED_RANDOM`, whose `setSeed` honours only the first call per JVM, so per-entity reseeding is impossible; instead each arena installs one fresh seeded `Entity.SHARED_RANDOM` before placement and every entity of that arena shares it (a Rivet entity runtime must model the same single shared source per arena). There is no `level.getThreadSafeRandom()` site (Paper 26.2 has no such source). A site not on the list means the arena must not exercise it. Start with RNG-free mechanics (fluids, scheduled ticks, redstone, pistons, hoppers) so the harness lands before this contract is complete. |
 | Random ticks, natural spawning, weather, daylight | Off by default in every arena (`randomTickSpeed 0`, spawn limits 0 via the existing `paper-world-defaults.yml`, weather/daylight gamerules off). An arena opts in explicitly and then depends on the seed contract. |
 | Tick alignment | L4: none needed, both sides are driven by tick count from the same initial state. L5: transcripts are indexed by server tick and by causal order (packet N after ack M), never wall-clock; wall-clock values are compared only as thresholds (dwell). |
 | Threads | Paper pinned to 1 worker / 1 IO thread with the boot log asserted (exists, #266). Rivet: results must be identical at rayon threads = 1 and default; that pair is itself a nightly row. |
@@ -394,6 +394,47 @@ L = several days / multiple rounds. Ordered by risk x already-ported-unverified 
 | 10 | **Brigadier differential.** Declarative dispatcher spec (JSON) built identically on both sides; corpus of command strings; compare parse result, exception message + cursor, suggestions, usage strings. | M | 11.4k LOC move from C to V2; corpus >= 500 inputs including invalid ones. |
 | 11 | **Bot rows: dig/place (#55), container click (#56).** Paper-vs-Paper first, then `--server both` as the server paths land. Reuse one Paper boot for several scenarios. | M each | Twin-run identical, negative detected, row on scoreboard. Hard cap of ~12 L5 rows total. |
 | 12 | **Differential fuzz in T3.** Drive `packet.reencode`, `nbt.decode`, `snbt.parse`, `codec.reencode` from the existing 15 fuzz targets with a fixed time budget; minimized divergences are appended to the committed corpus through record mode. | M | Nightly row with executions and divergences; every found divergence becomes a permanent recorded input. |
+
+**Status of items 2 and 3 (landed together).**
+- *Item 3, oracle ops.* `RivetReferenceOracle` has an op registry (declared result-key order, rejection
+  classes, IEEE-754 bit-hex floats) serving both `run.sh --record` and the live JSON-Lines loop; the five
+  existing ops run on it unchanged (`rivet-parity` still reports 1,995 checks, transcript byte-identical).
+  The Rust client is `rivet_harness_common::oracle_client` (boot once, pipelining, tamper hook) with
+  `closure` and `canon`; `rivet-parity ops check|live` runs the comparator (canonical lines, first
+  divergence with op/id/field, `exclusions.tsv`, per-comparator tamper negative, closure counts).
+  Recorded: `snbt.parse` 170, `nbt.decode` 40, `component.json` 62 inputs under
+  `tools/rivet-reference-oracle/fixtures/ops/`; `nbt.encode` stays on the semantic comparator (D12).
+  `ops live` is a full-gate step; the offline replay and the broken-handler negative are cargo tests.
+- *Item 2, probe regeneration.* `tools/rivet-oracle/probes.tsv` covers every `run_*.sh` plus the op
+  recorder; `rivet-oracle regen --check [--only glob] [--changed range]` (see `tools/rivet-oracle/README.md`).
+  T3: `scripts/gate.sh --nightly`. T1 path trigger: `regen --check --changed origin/main...HEAD`, to be
+  called by the merge tier once `gate.sh` grows `--tier merge` (§6.1 item 3). Rows with no committed
+  output and orphan goldens report UNVERIFIED, so the nightly row is not PASS until they are resolved.
+  `VERIFY.tsv` takes probe ownership from `probes.tsv` and has `op.<op>.recorded|live` and
+  `regen.probes` rows.
+- *First full regen run (2026-11-24, `--jobs 2`, 1,626 s wall): 88 PASS, 7 FAIL, 4 UNVERIFIED* (the
+  four `none` rows: `directory_lock`, `lighting_core`, `thread_unsafe_random`, `world_identity`).
+  No probe was nondeterministic and none crashed. All 7 failures are goldens that were edited by hand
+  after the probe ran, so they cannot be reproduced; none of them is Paper behaving differently. They
+  are findings, and the fixtures were left untouched:
+  - `block_pos_set`, `freeze_snow`, `plant_survival`, `tree_core`: the body matches byte for byte, but
+    the committed file carries 1 to 3 provenance `#` header lines that the probe does not print.
+  - `block_mutation_metadata`: `section_flags.tsv` is identical. `block_mutation_callbacks.tsv` is the
+    probe output with the 937 rows that are all `BlockBehaviour` dropped (259 of 1,196 lines kept).
+  - `block_shape_behavior`: the committed file has the same 1,779 records as the probe's
+    non-`structure_` output, in an older case order. The `structure_` cases also print by default now,
+    and `structure-block-shape.jsonl` owns them (that row PASSes).
+  - `update_shape`: `block-update-shape-owners.tsv` and `voxel-edge-faces.tsv` were split by hand from
+    the `UPDATE_OWNER`/`EDGE_FACE` stdout, with the prefixes stripped and a header added.
+
+  The fix for each is to make the probe write the committed form itself (or regenerate the golden from
+  the probe), then re-run the consumer tests. That is follow-up work, not part of this change.
+
+**Status of item 7 (arena tick-trace harness).**
+- 16 arenas under `tools/rivet-oracle/arenas/` (corpus: `arenas.tsv`; Paper twin-admitted traces in `paper/`; seed sites in `seed-sites.tsv`). Schema `rivet.arena-trace/1`; Java `ArenaTraceProbe`, Rust runner in `rivet-oracle` over rivet-server's public level API.
+- Result (VERIFY.tsv `arena.*` rows): 6 PASS, 10 FAIL; the harness row PASSes (twin admission, closure, tamper negative on every trace). PASS: `lava_source_spread`, `water_decay`, `water_falling_column`, `water_infinite_source`, `water_lava_mix`, `water_source_spread`. Named first divergences: `brewing_stand_awkward`, `furnace_smelt`, `hopper_transfer` and `spawner_idle_seeded` at t=0 (block-entity capability unavailable); `fire_tick_delay_seeded` at t=0 (FireBlock.onPlace); `piston_push` at t=0 (PistonBaseBlock.neighborChanged); `water_flow_obstacles` at t=5 (TrapDoorBlock.neighborChanged); `sand_fall` at t=2 (no Rust scheduled-tick body for sand); `bubble_column_up`/`bubble_column_down` at t=20 (Block.updateShape not implemented for bubble_column).
+- Run: `cargo run -p rivet-oracle --bin rivet-arena-trace -- check [--ledger]` (offline, Rivet vs committed Paper traces) or `-- live` (two fresh Paper boots, then Rivet; needs the Paper runtime and Temurin 25, else exit 2 UNVERIFIED); `record` regenerates the traces. Both exit 0 unless the harness breaks or a ledger-PASS arena regresses. The gate step is opt-in: `RIVET_ARENA_TRACE=1 scripts/gate.sh`.
+- Still open: spawner with seeded RNG that actually spawns (needs an arena player); only site 1 (`fire_tick_delay_seeded`) and site 3 (`sand_fall`) are exercised.
 
 Deferred, deliberately: GameTest runner parity (L6) rides on item 7 and issues #474/#475; Paper JUnit
 and the plugin corpus (L8) start with the adapter (#494, #504). Their ledger rows should be created now

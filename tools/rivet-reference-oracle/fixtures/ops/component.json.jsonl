@@ -1,0 +1,62 @@
+{"id":"component.literal-plain","ok":true,"result":{"accept":true,"canonical":"\"hello\""}}
+{"id":"component.literal-unicode","ok":true,"result":{"accept":true,"canonical":"\"héllo wörld\""}}
+{"id":"component.literal-emoji","ok":true,"result":{"accept":true,"canonical":"\"🎉\""}}
+{"id":"component.literal-empty","ok":true,"result":{"accept":true,"canonical":"\"\""}}
+{"id":"component.literal-markup","ok":true,"result":{"accept":true,"canonical":"\"<b>hi & bye</b>\""}}
+{"id":"component.literal-escapes","ok":true,"result":{"accept":true,"canonical":"\"line1\\nline2\\t\\\"quoted\\\" \\\\backslash\""}}
+{"id":"component.literal-json-tokens","ok":true,"result":{"accept":true,"canonical":"\"{}[],: true false null\""}}
+{"id":"component.literal-dashes","ok":true,"result":{"accept":true,"canonical":"\"stat.player.one\""}}
+{"id":"component.styled-bold","ok":true,"result":{"accept":true,"canonical":"{\"text\":\"bold\",\"bold\":true}"}}
+{"id":"component.styled-italic","ok":true,"result":{"accept":true,"canonical":"{\"text\":\"it\",\"italic\":true}"}}
+{"id":"component.styled-named-color","ok":true,"result":{"accept":true,"canonical":"{\"text\":\"red\",\"color\":\"red\"}"}}
+{"id":"component.styled-hex-color","ok":true,"result":{"accept":true,"canonical":"{\"text\":\"hex\",\"color\":\"#FF5555\"}"}}
+{"id":"component.styled-multi-format","ok":true,"result":{"accept":true,"canonical":"{\"text\":\"x\",\"bold\":true,\"italic\":true,\"underlined\":true,\"strikethrough\":true,\"obfuscated\":true}"}}
+{"id":"component.styled-shadow-color","ok":true,"result":{"accept":true,"canonical":"{\"text\":\"s\",\"shadow_color\":-16777216}"}}
+{"id":"component.styled-insertion","ok":true,"result":{"accept":true,"canonical":"{\"text\":\"i\",\"insertion\":\"insert me\"}"}}
+{"id":"component.styled-font","ok":true,"result":{"accept":true,"canonical":"{\"text\":\"f\",\"font\":\"minecraft:default\"}"}}
+{"id":"component.styled-negated-format","ok":true,"result":{"accept":true,"canonical":"{\"text\":\"n\",\"bold\":false}"}}
+{"id":"component.translatable-plain","ok":true,"result":{"accept":true,"canonical":"{\"translate\":\"multiplayer.player.joined\"}"}}
+{"id":"component.translatable-fallback","ok":true,"result":{"accept":true,"canonical":"{\"translate\":\"key\",\"fallback\":\"Fallback\"}"}}
+{"id":"component.translatable-with-string","ok":true,"result":{"accept":true,"canonical":"{\"translate\":\"chat.type.text\",\"with\":[\"<Steve>\"]}"}}
+{"id":"component.translatable-with-int","ok":true,"result":{"accept":true,"canonical":"{\"translate\":\"commands.give.success\",\"with\":[42,\"diamond\"]}"}}
+{"id":"component.translatable-with-float","ok":true,"result":{"accept":true,"canonical":"{\"translate\":\"custom.f\",\"with\":[3.5]}"}}
+{"id":"component.translatable-with-neg-int","ok":true,"result":{"accept":true,"canonical":"{\"translate\":\"custom.n\",\"with\":[-7]}"}}
+{"id":"component.translatable-with-bool","ok":true,"result":{"accept":true,"canonical":"{\"translate\":\"custom.b\",\"with\":[true]}"}}
+{"id":"component.translatable-with-long","ok":true,"result":{"accept":true,"canonical":"{\"translate\":\"custom.big\",\"with\":[2147483648]}"}}
+{"id":"component.translatable-with-styled-component","ok":true,"result":{"accept":true,"canonical":"{\"translate\":\"custom.c\",\"with\":[{\"text\":\"nested\",\"bold\":true}]}"}}
+{"id":"component.translatable-with-mixed","ok":true,"result":{"accept":true,"canonical":"{\"translate\":\"custom.m\",\"with\":[1,2.5,false,\"four\"]}"}}
+{"id":"component.keybind-forward","ok":true,"result":{"accept":true,"canonical":"{\"keybind\":\"key.forward\"}"}}
+{"id":"component.keybind-jump","ok":true,"result":{"accept":true,"canonical":"{\"keybind\":\"key.jump\"}"}}
+{"id":"component.score-plain","ok":true,"result":{"accept":true,"canonical":"{\"score\":{\"name\":\"Player\",\"objective\":\"obj\"}}"}}
+{"id":"component.score-dashed","ok":true,"result":{"accept":true,"canonical":"{\"score\":{\"name\":\"Team A\",\"objective\":\"scoreboard\"}}"}}
+{"id":"component.selector-plain","ok":true,"result":{"accept":true,"canonical":"{\"selector\":\"@p\"}"}}
+{"id":"component.selector-styled","ok":true,"result":{"accept":true,"canonical":"{\"selector\":\"@a[team=red]\",\"color\":\"gold\"}"}}
+{"id":"component.selector-with-separator","ok":true,"result":{"accept":true,"canonical":"{\"selector\":\"@e\",\"separator\":\",\"}"}}
+{"id":"component.selector-with-object-separator","ok":true,"result":{"accept":true,"canonical":"{\"selector\":\"@e\",\"separator\":\" | \"}"}}
+{"id":"component.nested-extra","ok":true,"result":{"accept":true,"canonical":"{\"text\":\"a\",\"extra\":[\"b\",\"c\"]}"}}
+{"id":"component.nested-extra-styled","ok":true,"result":{"accept":true,"canonical":"{\"text\":\"a\",\"extra\":[{\"text\":\"b\",\"bold\":true},{\"translate\":\"x\"}]}"}}
+{"id":"component.nested-deep","ok":true,"result":{"accept":true,"canonical":"{\"text\":\"a\",\"extra\":[{\"text\":\"b\",\"extra\":[\"c\"]}]}"}}
+{"id":"component.nested-extra-with-style","ok":true,"result":{"accept":true,"canonical":"{\"text\":\"a\",\"extra\":[\"b\",\"c\"],\"color\":\"yellow\"}"}}
+{"id":"component.nested-list-form","ok":true,"result":{"accept":true,"canonical":"{\"text\":\"a\",\"extra\":[\"b\"]}"}}
+{"id":"component.typed-text","ok":true,"result":{"accept":true,"canonical":"\"legacy\""}}
+{"id":"component.typed-translatable","ok":true,"result":{"accept":true,"canonical":"{\"translate\":\"a\",\"fallback\":\"b\"}"}}
+{"id":"component.hover-show-text","ok":true,"result":{"accept":true,"canonical":"{\"text\":\"h\",\"hover_event\":{\"value\":\"hover!\",\"action\":\"show_text\"}}"}}
+{"id":"component.click-open-url","ok":true,"result":{"accept":true,"canonical":"{\"text\":\"c\",\"click_event\":{\"url\":\"https://example.com/path?q=1&r=2\",\"action\":\"open_url\"}}"}}
+{"id":"component.click-run-command","ok":true,"result":{"accept":true,"canonical":"{\"text\":\"r\",\"click_event\":{\"command\":\"/say hi\",\"action\":\"run_command\"}}"}}
+{"id":"component.click-copy-to-clipboard","ok":true,"result":{"accept":true,"canonical":"{\"text\":\"cp\",\"click_event\":{\"value\":\"copied\",\"action\":\"copy_to_clipboard\"}}"}}
+{"id":"component.malformed-hover-show-text-wrong-key","ok":true,"result":{"accept":false}}
+{"id":"component.malformed-click-open-url-wrong-key","ok":true,"result":{"accept":false}}
+{"id":"component.malformed-click-run-command-wrong-key","ok":true,"result":{"accept":false}}
+{"id":"component.malformed-click-copy-clipboard-wrong-key","ok":true,"result":{"accept":false}}
+{"id":"component.malformed-not-json","ok":true,"result":{"accept":false}}
+{"id":"component.malformed-unclosed-object","ok":true,"result":{"accept":false}}
+{"id":"component.malformed-text-missing-key","ok":true,"result":{"accept":false}}
+{"id":"component.malformed-translate-not-string","ok":true,"result":{"accept":false}}
+{"id":"component.malformed-bold-not-bool","ok":true,"result":{"accept":false}}
+{"id":"component.malformed-extra-empty","ok":true,"result":{"accept":false}}
+{"id":"component.malformed-extra-not-list","ok":true,"result":{"accept":false}}
+{"id":"component.malformed-score-missing-objective","ok":true,"result":{"accept":false}}
+{"id":"component.malformed-score-not-object","ok":true,"result":{"accept":false}}
+{"id":"component.malformed-unknown-type","ok":true,"result":{"accept":false}}
+{"id":"component.malformed-bad-color","ok":true,"result":{"accept":false}}
+{"id":"component.malformed-with-bad-component","ok":true,"result":{"accept":false}}

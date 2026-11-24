@@ -1,15 +1,18 @@
 //! Persistent client for the Paper Java reference oracle.
 //!
-//! Spawns `tools/rivet-reference-oracle/run.sh` (a JSON-Lines process) and
-//! performs synchronous request/response calls: one stdin line per request,
-//! one stdout line per response. The oracle requires the M0-materialized Paper
-//! runtime libraries; point `RIVET_PAPER_JAR` / `RIVET_PAPER_LIBRARIES` /
-//! `RIVET_PAPER_RUNTIME_JAR` at them (see the tool README).
+//! Spawns `tools/rivet-reference-oracle/run.sh` (a JSON-Lines process) once and
+//! drives it through `rivet_harness_common::oracle_client`, the shared
+//! boot-once client (id correlation, pipelining, tamper hook). This module adds
+//! only the response envelope: `ok` + `result`, or `ok:false` + a structured
+//! error classified as a rejection verdict or unavailable evidence. The oracle
+//! requires the M0-materialized Paper runtime libraries; point
+//! `RIVET_PAPER_JAR` / `RIVET_PAPER_LIBRARIES` / `RIVET_PAPER_RUNTIME_JAR` at
+//! them (see the tool README).
 
-use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
+use rivet_harness_common::oracle_client::OracleClient;
 use serde_json::{Value, json};
 
 /// Why a reference-oracle operation did not produce a result.
@@ -32,39 +35,27 @@ impl std::fmt::Display for OracleCallError {
     }
 }
 
+/// `tools/rivet-reference-oracle/run.sh`, resolved from this crate.
+pub fn run_sh() -> Result<PathBuf, String> {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../rivet-reference-oracle/run.sh")
+        .canonicalize()
+        .map_err(|e| format!("cannot locate run.sh: {e}"))
+}
+
 /// A running reference-oracle process.
 pub struct Oracle {
-    child: Child,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
-    next_id: u64,
+    client: OracleClient,
 }
 
 impl Oracle {
     /// Spawn `run.sh` and confirm the protocol with a `ping`.
     pub fn spawn() -> Result<Oracle, String> {
-        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let run_sh = manifest_dir
-            .join("../rivet-reference-oracle/run.sh")
-            .canonicalize()
-            .map_err(|e| format!("cannot locate run.sh: {e}"))?;
-
-        let mut child = Command::new("bash")
-            .arg(&run_sh)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
+        let mut command = Command::new("bash");
+        command.arg(run_sh()?);
+        let client = OracleClient::spawn(command)
             .map_err(|e| format!("failed to spawn oracle run.sh: {e}"))?;
-
-        let stdin = child.stdin.take().ok_or("oracle stdin not captured")?;
-        let stdout = child.stdout.take().ok_or("oracle stdout not captured")?;
-        let mut oracle = Oracle {
-            child,
-            stdin,
-            stdout: BufReader::new(stdout),
-            next_id: 0,
-        };
+        let mut oracle = Oracle { client };
 
         let ping = oracle.request("ping", &[]).map_err(|e| {
             format!("oracle failed to boot (is the M0 Paper runtime materialized?): {e}")
@@ -75,31 +66,21 @@ impl Oracle {
         Ok(oracle)
     }
 
+    /// The shared line-level client (pipelining, tamper hook, counts).
+    pub fn client(&mut self) -> &mut OracleClient {
+        &mut self.client
+    }
+
     /// Send one operation and return the full JSON response object.
     pub fn request(&mut self, op: &str, fields: &[(&str, &str)]) -> Result<Value, String> {
-        self.next_id += 1;
         let mut obj = serde_json::Map::new();
-        obj.insert("id".into(), json!(self.next_id));
         obj.insert("op".into(), json!(op));
         for (key, value) in fields {
             obj.insert((*key).to_string(), json!(value));
         }
-        let line = serde_json::to_string(&Value::Object(obj))
+        let body = serde_json::to_string(&Value::Object(obj))
             .map_err(|e| format!("serialize request: {e}"))?;
-        self.stdin
-            .write_all(line.as_bytes())
-            .and_then(|_| self.stdin.write_all(b"\n"))
-            .and_then(|_| self.stdin.flush())
-            .map_err(|e| format!("oracle write: {e}"))?;
-
-        let mut response = String::new();
-        let n = self
-            .stdout
-            .read_line(&mut response)
-            .map_err(|e| format!("oracle read: {e}"))?;
-        if n == 0 {
-            return Err("oracle closed stdout (did it crash?)".to_string());
-        }
+        let response = self.client.call(&body).map_err(|e| e.to_string())?;
         serde_json::from_str(&response)
             .map_err(|e| format!("oracle returned non-JSON line: {e}: {response:?}"))
     }
@@ -146,17 +127,6 @@ fn classify_response(op: &str, response: Value) -> Result<Value, OracleCallError
         None => Err(OracleCallError::Unavailable(
             "oracle response missing boolean `ok`".to_string(),
         )),
-    }
-}
-
-impl Drop for Oracle {
-    fn drop(&mut self) {
-        // Closing stdin makes the oracle's readLine return null, but the JVM
-        // (Paper class-init) has started non-daemon threads, so it does NOT exit
-        // on EOF — `wait()` would block forever. Kill the child instead.
-        let _ = self.stdin.flush();
-        let _ = self.child.kill();
-        let _ = self.child.wait();
     }
 }
 

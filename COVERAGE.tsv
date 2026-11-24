@@ -1,6 +1,6 @@
 java_class	java_path	loc	bucket	hub	unit	current_crate	assigned_crate	rust_path	other_paths	method_total	method_covered	stub_count	rivettodo_count	status
 alternate.current.wire.LevelHelper	minecraft:alternate/current/wire/LevelHelper.java	61	A		alternate.current.wire	rivet-server	rivet-server	-		2	0	0	0	absent
-alternate.current.wire.Node	minecraft:alternate/current/wire/Node.java	113	A		alternate.current.wire	rivet-server	rivet-server	-		8	0	0	0	absent
+alternate.current.wire.Node	minecraft:alternate/current/wire/Node.java	113	A		alternate.current.wire	rivet-server	rivet-server	-	crates/rivet-entity/src/ai/navigation/node.rs	8	0	0	0	absent
 alternate.current.wire.PriorityQueue	minecraft:alternate/current/wire/PriorityQueue.java	211	A		alternate.current.wire	rivet-server	rivet-server	-		15	0	0	0	absent
 alternate.current.wire.SimpleQueue	minecraft:alternate/current/wire/SimpleQueue.java	112	A		alternate.current.wire	rivet-server	rivet-server	-		8	0	0	0	absent
 alternate.current.wire.UpdateOrder	minecraft:alternate/current/wire/UpdateOrder.java	390	A		alternate.current.wire	rivet-server	rivet-server	-		5	0	0	0	absent
@@ -980,29 +980,29 @@ net.minecraft.gametest.framework.FunctionGameTestInstance	minecraft:net/minecraf
 net.minecraft.gametest.framework.GameTestAssertException	minecraft:net/minecraft/gametest/framework/GameTestAssertException.java	24	A		mc.gametest.framework	rivet-oracle	rivet-server	-		2	0	0	0	absent
 net.minecraft.gametest.framework.GameTestAssertPosException	minecraft:net/minecraft/gametest/framework/GameTestAssertPosException.java	43	A		mc.gametest.framework	rivet-oracle	rivet-server	-		4	0	0	0	absent
 net.minecraft.gametest.framework.GameTestBatch	minecraft:net/minecraft/gametest/framework/GameTestBatch.java	12	A		mc.gametest.framework	rivet-oracle	rivet-server	-	crates/rivet-server/src/server/gametest/game_test_batch.rs	0	0	0	0	absent
-net.minecraft.gametest.framework.GameTestBatchFactory	minecraft:net/minecraft/gametest/framework/GameTestBatchFactory.java	67	A		mc.gametest.framework	rivet-oracle	rivet-server	-		4	0	0	0	absent
+net.minecraft.gametest.framework.GameTestBatchFactory	minecraft:net/minecraft/gametest/framework/GameTestBatchFactory.java	67	A		mc.gametest.framework	rivet-oracle	rivet-server	-	crates/rivet-server/src/server/gametest/game_test_batch_factory.rs	4	0	0	0	absent
 net.minecraft.gametest.framework.GameTestBatchListener	minecraft:net/minecraft/gametest/framework/GameTestBatchListener.java	7	A		mc.gametest.framework	rivet-oracle	rivet-server	-		2	0	0	0	absent
 net.minecraft.gametest.framework.GameTestEntityBuilder	minecraft:net/minecraft/gametest/framework/GameTestEntityBuilder.java	78	A		mc.gametest.framework	rivet-oracle	rivet-server	-		4	0	0	0	absent
 net.minecraft.gametest.framework.GameTestEnvironments	minecraft:net/minecraft/gametest/framework/GameTestEnvironments.java	20	A		mc.gametest.framework	rivet-oracle	rivet-server	-		2	0	0	0	absent
 net.minecraft.gametest.framework.GameTestEvent	minecraft:net/minecraft/gametest/framework/GameTestEvent.java	27	A		mc.gametest.framework	rivet-oracle	rivet-server	-		2	0	0	0	absent
 net.minecraft.gametest.framework.GameTestException	minecraft:net/minecraft/gametest/framework/GameTestException.java	11	A		mc.gametest.framework	rivet-oracle	rivet-server	-		1	0	0	0	absent
 net.minecraft.gametest.framework.GameTestHelper	minecraft:net/minecraft/gametest/framework/GameTestHelper.java	1184	A		mc.gametest.framework	rivet-oracle	rivet-server	-		107	0	0	0	absent
-net.minecraft.gametest.framework.GameTestInfo	minecraft:net/minecraft/gametest/framework/GameTestInfo.java	365	A	spine	mc.gametest.framework	rivet-oracle	rivet-server	-		41	0	0	0	absent
+net.minecraft.gametest.framework.GameTestInfo	minecraft:net/minecraft/gametest/framework/GameTestInfo.java	365	A	spine	mc.gametest.framework	rivet-oracle	rivet-server	-	crates/rivet-server/src/server/gametest/game_test_info.rs	41	0	0	0	absent
 net.minecraft.gametest.framework.GameTestInstance	minecraft:net/minecraft/gametest/framework/GameTestInstance.java	109	A	spine	mc.gametest.framework	rivet-oracle	rivet-server	-	crates/rivet-server/src/server/gametest/game_test_instance.rs	21	0	0	0	absent
 net.minecraft.gametest.framework.GameTestInstances	minecraft:net/minecraft/gametest/framework/GameTestInstances.java	28	A		mc.gametest.framework	rivet-oracle	rivet-server	-		2	0	0	0	absent
 net.minecraft.gametest.framework.GameTestListener	minecraft:net/minecraft/gametest/framework/GameTestListener.java	11	A		mc.gametest.framework	rivet-oracle	rivet-server	-		4	0	0	0	absent
 net.minecraft.gametest.framework.GameTestMainUtil	minecraft:net/minecraft/gametest/framework/GameTestMainUtil.java	134	A		mc.gametest.framework	rivet-oracle	rivet-server	-		4	0	0	0	absent
 net.minecraft.gametest.framework.GameTestMobBuilder	minecraft:net/minecraft/gametest/framework/GameTestMobBuilder.java	28	A		mc.gametest.framework	rivet-oracle	rivet-server	-		2	0	0	0	absent
-net.minecraft.gametest.framework.GameTestRunner	minecraft:net/minecraft/gametest/framework/GameTestRunner.java	261	A		mc.gametest.framework	rivet-oracle	rivet-server	-		21	0	0	0	absent
-net.minecraft.gametest.framework.GameTestSequence	minecraft:net/minecraft/gametest/framework/GameTestSequence.java	146	A		mc.gametest.framework	rivet-oracle	rivet-server	-		15	0	0	0	absent
+net.minecraft.gametest.framework.GameTestRunner	minecraft:net/minecraft/gametest/framework/GameTestRunner.java	261	A		mc.gametest.framework	rivet-oracle	rivet-server	-	crates/rivet-server/src/server/gametest/game_test_runner.rs	21	0	0	0	absent
+net.minecraft.gametest.framework.GameTestSequence	minecraft:net/minecraft/gametest/framework/GameTestSequence.java	146	A		mc.gametest.framework	rivet-oracle	rivet-server	-	crates/rivet-server/src/server/gametest/game_test_sequence.rs	15	0	0	0	absent
 net.minecraft.gametest.framework.GameTestServer	minecraft:net/minecraft/gametest/framework/GameTestServer.java	472	A		mc.gametest.framework	rivet-oracle	rivet-server	-		37	0	0	0	absent
-net.minecraft.gametest.framework.GameTestTicker	minecraft:net/minecraft/gametest/framework/GameTestTicker.java	62	A		mc.gametest.framework	rivet-oracle	rivet-server	-		4	0	0	0	absent
+net.minecraft.gametest.framework.GameTestTicker	minecraft:net/minecraft/gametest/framework/GameTestTicker.java	62	A		mc.gametest.framework	rivet-oracle	rivet-server	-	crates/rivet-server/src/server/gametest/game_test_ticker.rs	4	0	0	0	absent
 net.minecraft.gametest.framework.GameTestTimeoutException	minecraft:net/minecraft/gametest/framework/GameTestTimeoutException.java	17	A		mc.gametest.framework	rivet-oracle	rivet-server	-		1	0	0	0	absent
 net.minecraft.gametest.framework.GeneratedTest	minecraft:net/minecraft/gametest/framework/GeneratedTest.java	23	A		mc.gametest.framework	rivet-oracle	rivet-server	-		0	0	0	0	absent
 net.minecraft.gametest.framework.GlobalTestReporter	minecraft:net/minecraft/gametest/framework/GlobalTestReporter.java	21	A		mc.gametest.framework	rivet-oracle	rivet-server	-		4	0	0	0	absent
 net.minecraft.gametest.framework.JUnitLikeTestReporter	minecraft:net/minecraft/gametest/framework/JUnitLikeTestReporter.java	79	A		mc.gametest.framework	rivet-oracle	rivet-server	-		5	0	0	0	absent
 net.minecraft.gametest.framework.LogTestReporter	minecraft:net/minecraft/gametest/framework/LogTestReporter.java	23	A		mc.gametest.framework	rivet-oracle	rivet-server	-		2	0	0	0	absent
-net.minecraft.gametest.framework.MultipleTestTracker	minecraft:net/minecraft/gametest/framework/MultipleTestTracker.java	117	A		mc.gametest.framework	rivet-oracle	rivet-server	-		15	0	0	0	absent
+net.minecraft.gametest.framework.MultipleTestTracker	minecraft:net/minecraft/gametest/framework/MultipleTestTracker.java	117	A		mc.gametest.framework	rivet-oracle	rivet-server	-	crates/rivet-server/src/server/gametest/multiple_test_tracker.rs	15	0	0	0	absent
 net.minecraft.gametest.framework.ReportGameListener	minecraft:net/minecraft/gametest/framework/ReportGameListener.java	137	A		mc.gametest.framework	rivet-oracle	rivet-server	-		11	0	0	0	absent
 net.minecraft.gametest.framework.RetryOptions	minecraft:net/minecraft/gametest/framework/RetryOptions.java	23	A		mc.gametest.framework	rivet-oracle	rivet-server	-	crates/rivet-server/src/server/gametest/retry_options.rs	4	0	0	0	absent
 net.minecraft.gametest.framework.StructureGridSpawner	minecraft:net/minecraft/gametest/framework/StructureGridSpawner.java	71	A		mc.gametest.framework	rivet-oracle	rivet-server	-		2	0	0	0	absent
@@ -1425,7 +1425,7 @@ net.minecraft.network.protocol.game.ServerboundTeleportToEntityPacket	minecraft:
 net.minecraft.network.protocol.game.ServerboundTestInstanceBlockActionPacket	minecraft:net/minecraft/network/protocol/game/ServerboundTestInstanceBlockActionPacket.java	71	A		mc.network.protocol.game	rivet-protocol	rivet-protocol	-		2	0	0	0	absent
 net.minecraft.network.protocol.game.ServerboundUseItemOnPacket	minecraft:net/minecraft/network/protocol/game/ServerboundUseItemOnPacket.java	59	A		mc.network.protocol.game	rivet-protocol	rivet-protocol	-		6	0	0	0	absent
 net.minecraft.network.protocol.game.ServerboundUseItemPacket	minecraft:net/minecraft/network/protocol/game/ServerboundUseItemPacket.java	66	A		mc.network.protocol.game	rivet-protocol	rivet-protocol	-		7	0	0	0	absent
-net.minecraft.network.protocol.game.VecDeltaCodec	minecraft:net/minecraft/network/protocol/game/VecDeltaCodec.java	54	A		mc.network.protocol.game	rivet-protocol	rivet-protocol	-		8	0	0	0	absent
+net.minecraft.network.protocol.game.VecDeltaCodec	minecraft:net/minecraft/network/protocol/game/VecDeltaCodec.java	54	A		mc.network.protocol.game	rivet-protocol	rivet-protocol	-	crates/rivet-server/src/server/level/entity_tracker/vec_delta_codec.rs	8	0	0	0	absent
 net.minecraft.network.protocol.handshake.ClientIntent	minecraft:net/minecraft/network/protocol/handshake/ClientIntent.java	28	A		mc.network.protocol.handshake	rivet-protocol	rivet-protocol	-		2	0	0	0	absent
 net.minecraft.network.protocol.handshake.ClientIntentionPacket	minecraft:net/minecraft/network/protocol/handshake/ClientIntentionPacket.java	43	A		mc.network.protocol.handshake	rivet-protocol	rivet-protocol	-		4	0	0	0	absent
 net.minecraft.network.protocol.handshake.HandshakePacketTypes	minecraft:net/minecraft/network/protocol/handshake/HandshakePacketTypes.java	14	A		mc.network.protocol.handshake	rivet-protocol	rivet-protocol	-		1	0	0	0	absent
@@ -1739,7 +1739,7 @@ net.minecraft.server.level.PlayerSpawnFinder	minecraft:net/minecraft/server/leve
 net.minecraft.server.level.SectionTracker	minecraft:net/minecraft/server/level/SectionTracker.java	66	A		mc.server.level.pipeline.tracker	rivet-server	rivet-server	-		5	0	0	0	absent
 net.minecraft.server.level.ServerBossEvent	minecraft:net/minecraft/server/level/ServerBossEvent.java	145	A		mc.server.level	rivet-server	rivet-server	-		15	0	0	0	absent
 net.minecraft.server.level.ServerChunkCache	minecraft:net/minecraft/server/level/ServerChunkCache.java	840	A		mc.server.level.pipeline.servercache	rivet-server	rivet-server	-		71	0	0	0	absent
-net.minecraft.server.level.ServerEntity	minecraft:net/minecraft/server/level/ServerEntity.java	426	A		mc.server.level	rivet-server	rivet-server	-		15	0	0	0	absent
+net.minecraft.server.level.ServerEntity	minecraft:net/minecraft/server/level/ServerEntity.java	426	A		mc.server.level	rivet-server	rivet-server	-	crates/rivet-server/src/server/level/entity_tracker/server_entity.rs	15	0	0	0	absent
 net.minecraft.server.level.ServerEntityGetter	minecraft:net/minecraft/server/level/ServerEntityGetter.java	134	A		mc.server.level	rivet-server	rivet-server	-		5	0	0	0	absent
 net.minecraft.server.level.ServerLevel	minecraft:net/minecraft/server/level/ServerLevel.java	2997	A	spine	mc.server.level	rivet-server	rivet-server	crates/rivet-server/src/server/level/server_level.rs		198	6	0	2	partial
 net.minecraft.server.level.ServerPlayer	minecraft:net/minecraft/server/level/ServerPlayer.java	3141	A	spine	mc.server.level	rivet-server	rivet-server	-		211	0	0	0	absent
@@ -2468,7 +2468,7 @@ net.minecraft.util.filefix.virtualfilesystem.CopyOnWriteFileSystem	minecraft:net
 net.minecraft.util.filefix.virtualfilesystem.DirectoryNode	minecraft:net/minecraft/util/filefix/virtualfilesystem/DirectoryNode.java	87	A		mc.util.filefix.virtualfilesystem	rivet-util	rivet-util	-		8	0	0	0	absent
 net.minecraft.util.filefix.virtualfilesystem.FileMove	minecraft:net/minecraft/util/filefix/virtualfilesystem/FileMove.java	18	A		mc.util.filefix.virtualfilesystem	rivet-util	rivet-util	-		1	0	0	0	absent
 net.minecraft.util.filefix.virtualfilesystem.FileNode	minecraft:net/minecraft/util/filefix/virtualfilesystem/FileNode.java	36	A		mc.util.filefix.virtualfilesystem	rivet-util	rivet-util	-		3	0	0	0	absent
-net.minecraft.util.filefix.virtualfilesystem.Node	minecraft:net/minecraft/util/filefix/virtualfilesystem/Node.java	29	A		mc.util.filefix.virtualfilesystem	rivet-util	rivet-util	-		4	0	0	0	absent
+net.minecraft.util.filefix.virtualfilesystem.Node	minecraft:net/minecraft/util/filefix/virtualfilesystem/Node.java	29	A		mc.util.filefix.virtualfilesystem	rivet-util	rivet-util	-	crates/rivet-entity/src/ai/navigation/node.rs	4	0	0	0	absent
 net.minecraft.util.filefix.virtualfilesystem.exception.CowFSCreationException	minecraft:net/minecraft/util/filefix/virtualfilesystem/exception/CowFSCreationException.java	7	A		mc.util.filefix.virtualfilesystem.exception	rivet-util	rivet-util	-		0	0	0	0	absent
 net.minecraft.util.filefix.virtualfilesystem.exception.CowFSDirectoryNotEmptyException	minecraft:net/minecraft/util/filefix/virtualfilesystem/exception/CowFSDirectoryNotEmptyException.java	9	A		mc.util.filefix.virtualfilesystem.exception	rivet-util	rivet-util	-		0	0	0	0	absent
 net.minecraft.util.filefix.virtualfilesystem.exception.CowFSFileAlreadyExistsException	minecraft:net/minecraft/util/filefix/virtualfilesystem/exception/CowFSFileAlreadyExistsException.java	9	A		mc.util.filefix.virtualfilesystem.exception	rivet-util	rivet-util	-		0	0	0	0	absent
@@ -2480,7 +2480,7 @@ net.minecraft.util.filefix.virtualfilesystem.exception.CowFSSymlinkException	min
 net.minecraft.util.monitoring.jmx.MinecraftServerStatistics	minecraft:net/minecraft/util/monitoring/jmx/MinecraftServerStatistics.java	118	A		mc.util.monitoring.jmx	rivet-util	rivet-server	-		10	0	0	0	absent
 net.minecraft.util.parsing.packrat.Atom	minecraft:net/minecraft/util/parsing/packrat/Atom.java	12	A		mc.util.parsing.packrat	rivet-util	rivet-util	-		2	0	0	0	absent
 net.minecraft.util.parsing.packrat.CachedParseState	minecraft:net/minecraft/util/parsing/packrat/CachedParseState.java	225	A		mc.util.parsing.packrat	rivet-util	rivet-util	-		17	0	0	0	absent
-net.minecraft.util.parsing.packrat.Control	minecraft:net/minecraft/util/parsing/packrat/Control.java	18	A		mc.util.parsing.packrat	rivet-util	rivet-util	-	crates/rivet-entity/src/ai/control/mod.rs	2	0	0	0	absent
+net.minecraft.util.parsing.packrat.Control	minecraft:net/minecraft/util/parsing/packrat/Control.java	18	A		mc.util.parsing.packrat	rivet-util	rivet-util	-	crates/rivet-entity/src/ai/control/mod.rs;crates/rivet-entity/src/ai/navigation/control.rs	2	0	0	0	absent
 net.minecraft.util.parsing.packrat.DelayedException	minecraft:net/minecraft/util/parsing/packrat/DelayedException.java	18	A		mc.util.parsing.packrat	rivet-util	rivet-util	-		1	0	0	0	absent
 net.minecraft.util.parsing.packrat.Dictionary	minecraft:net/minecraft/util/parsing/packrat/Dictionary.java	94	A		mc.util.parsing.packrat	rivet-util	rivet-util	-		12	0	0	0	absent
 net.minecraft.util.parsing.packrat.ErrorCollector	minecraft:net/minecraft/util/parsing/packrat/ErrorCollector.java	97	A		mc.util.parsing.packrat	rivet-util	rivet-util	-		6	0	0	0	absent
@@ -2757,7 +2757,7 @@ net.minecraft.world.entity.SpawnPlacements	minecraft:net/minecraft/world/entity/
 net.minecraft.world.entity.SulfurCubeArchetype	minecraft:net/minecraft/world/entity/SulfurCubeArchetype.java	128	A		mc.world.entity	rivet-entity	rivet-server	-		2	0	0	0	absent
 net.minecraft.world.entity.SulfurCubeArchetypes	minecraft:net/minecraft/world/entity/SulfurCubeArchetypes.java	241	A		mc.world.entity	rivet-entity	rivet-server	-		9	0	0	0	absent
 net.minecraft.world.entity.TamableAnimal	minecraft:net/minecraft/world/entity/TamableAnimal.java	336	A		mc.world.entity	rivet-entity	rivet-server	-		32	0	0	0	absent
-net.minecraft.world.entity.Targeting	minecraft:net/minecraft/world/entity/Targeting.java	7	A		mc.world.entity	rivet-entity	rivet-server	-		1	0	0	0	absent
+net.minecraft.world.entity.Targeting	minecraft:net/minecraft/world/entity/Targeting.java	7	A		mc.world.entity	rivet-entity	rivet-server	-	crates/rivet-entity/src/ai/navigation/targeting.rs	1	0	0	0	absent
 net.minecraft.world.entity.TraceableEntity	minecraft:net/minecraft/world/entity/TraceableEntity.java	7	A		mc.world.entity	rivet-entity	rivet-server	-		1	0	0	0	absent
 net.minecraft.world.entity.WalkAnimationState	minecraft:net/minecraft/world/entity/WalkAnimationState.java	47	A		mc.world.entity	rivet-entity	rivet-server	-		6	0	0	0	absent
 net.minecraft.world.entity.ai.ActivityData	minecraft:net/minecraft/world/entity/ai/ActivityData.java	84	A		mc.world.entity.ai	rivet-entity	rivet-server	-		2	0	0	0	absent
@@ -2789,7 +2789,7 @@ net.minecraft.world.entity.ai.behavior.Croak	minecraft:net/minecraft/world/entit
 net.minecraft.world.entity.ai.behavior.CrossbowAttack	minecraft:net/minecraft/world/entity/ai/behavior/CrossbowAttack.java	99	A		mc.world.entity.ai.behavior	rivet-entity	rivet-server	-		7	0	0	0	absent
 net.minecraft.world.entity.ai.behavior.DismountOrSkipMounting	minecraft:net/minecraft/world/entity/ai/behavior/DismountOrSkipMounting.java	32	A		mc.world.entity.ai.behavior	rivet-entity	rivet-server	-		2	0	0	0	absent
 net.minecraft.world.entity.ai.behavior.DoNothing	minecraft:net/minecraft/world/entity/ai/behavior/DoNothing.java	53	A		mc.world.entity.ai.behavior	rivet-entity	rivet-server	-		6	0	0	0	absent
-net.minecraft.world.entity.ai.behavior.EntityTracker	minecraft:net/minecraft/world/entity/ai/behavior/EntityTracker.java	58	A		mc.world.entity.ai.behavior	rivet-entity	rivet-server	-		5	0	0	0	absent
+net.minecraft.world.entity.ai.behavior.EntityTracker	minecraft:net/minecraft/world/entity/ai/behavior/EntityTracker.java	58	A		mc.world.entity.ai.behavior	rivet-entity	rivet-server	-	crates/rivet-server/src/server/level/entity_tracker/mod.rs	5	0	0	0	absent
 net.minecraft.world.entity.ai.behavior.EraseMemoryIf	minecraft:net/minecraft/world/entity/ai/behavior/EraseMemoryIf.java	19	A		mc.world.entity.ai.behavior	rivet-entity	rivet-server	-		1	0	0	0	absent
 net.minecraft.world.entity.ai.behavior.FollowTemptation	minecraft:net/minecraft/world/entity/ai/behavior/FollowTemptation.java	101	A		mc.world.entity.ai.behavior	rivet-entity	rivet-server	-		7	0	0	0	absent
 net.minecraft.world.entity.ai.behavior.GateBehavior	minecraft:net/minecraft/world/entity/ai/behavior/GateBehavior.java	167	A		mc.world.entity.ai.behavior	rivet-entity	rivet-server	-		8	0	0	0	absent
@@ -2887,7 +2887,7 @@ net.minecraft.world.entity.ai.behavior.warden.Sniffing	minecraft:net/minecraft/w
 net.minecraft.world.entity.ai.behavior.warden.SonicBoom	minecraft:net/minecraft/world/entity/ai/behavior/warden/SonicBoom.java	101	A		mc.world.entity.ai.behavior.warden	rivet-entity	rivet-server	-		6	0	0	0	absent
 net.minecraft.world.entity.ai.behavior.warden.TryToSniff	minecraft:net/minecraft/world/entity/ai/behavior/warden/TryToSniff.java	33	A		mc.world.entity.ai.behavior.warden	rivet-entity	rivet-server	-		1	0	0	0	absent
 net.minecraft.world.entity.ai.control.BodyRotationControl	minecraft:net/minecraft/world/entity/ai/control/BodyRotationControl.java	64	A		mc.world.entity.ai.control	rivet-entity	rivet-server	crates/rivet-entity/src/ai/control/body_rotation_control.rs		6	5	0	0	partial
-net.minecraft.world.entity.ai.control.Control	minecraft:net/minecraft/world/entity/ai/control/Control.java	11	A		mc.world.entity.ai.control	rivet-entity	rivet-server	-		1	0	0	0	absent
+net.minecraft.world.entity.ai.control.Control	minecraft:net/minecraft/world/entity/ai/control/Control.java	11	A		mc.world.entity.ai.control	rivet-entity	rivet-server	-	crates/rivet-entity/src/ai/navigation/control.rs	1	0	0	0	absent
 net.minecraft.world.entity.ai.control.FlyingMoveControl	minecraft:net/minecraft/world/entity/ai/control/FlyingMoveControl.java	57	A		mc.world.entity.ai.control	rivet-entity	rivet-server	-		1	0	0	0	absent
 net.minecraft.world.entity.ai.control.JumpControl	minecraft:net/minecraft/world/entity/ai/control/JumpControl.java	21	A		mc.world.entity.ai.control	rivet-entity	rivet-server	-		2	0	0	0	absent
 net.minecraft.world.entity.ai.control.LookControl	minecraft:net/minecraft/world/entity/ai/control/LookControl.java	104	A		mc.world.entity.ai.control	rivet-entity	rivet-server	-		10	0	0	0	absent
@@ -4300,7 +4300,7 @@ net.minecraft.world.level.entity.PersistentEntitySectionManager	minecraft:net/mi
 net.minecraft.world.level.entity.TransientEntitySectionManager	minecraft:net/minecraft/world/level/entity/TransientEntitySectionManager.java	142	A		mc.world.level.entity	rivet-world	rivet-world	-		9	0	0	0	absent
 net.minecraft.world.level.entity.UUIDLookup	minecraft:net/minecraft/world/level/entity/UUIDLookup.java	8	A		mc.world.level.entity	rivet-world	rivet-world	-		1	0	0	0	absent
 net.minecraft.world.level.entity.UniquelyIdentifyable	minecraft:net/minecraft/world/level/entity/UniquelyIdentifyable.java	9	A		mc.world.level.entity	rivet-world	rivet-world	-		2	0	0	0	absent
-net.minecraft.world.level.entity.Visibility	minecraft:net/minecraft/world/level/entity/Visibility.java	33	A		mc.world.level.entity	rivet-world	rivet-world	-	crates/rivet-entity/src/storage/visibility.rs	3	0	0	0	absent
+net.minecraft.world.level.entity.Visibility	minecraft:net/minecraft/world/level/entity/Visibility.java	33	A		mc.world.level.entity	rivet-world	rivet-world	-	crates/rivet-entity/src/storage/visibility.rs;crates/rivet-server/src/server/level/entity_tracker/visibility.rs	3	0	0	0	absent
 net.minecraft.world.level.gameevent.BlockPositionSource	minecraft:net/minecraft/world/level/gameevent/BlockPositionSource.java	41	A		mc.world.level.gameevent	rivet-world	rivet-server	-		4	0	0	0	absent
 net.minecraft.world.level.gameevent.DynamicGameEventListener	minecraft:net/minecraft/world/level/gameevent/DynamicGameEventListener.java	57	A		mc.world.level.gameevent	rivet-world	rivet-server	-		5	0	0	0	absent
 net.minecraft.world.level.gameevent.EntityPositionSource	minecraft:net/minecraft/world/level/gameevent/EntityPositionSource.java	94	A		mc.world.level.gameevent	rivet-world	rivet-server	-		7	0	0	0	absent
@@ -4732,7 +4732,7 @@ net.minecraft.world.level.lighting.DataLayerStorageMap	minecraft:net/minecraft/w
 net.minecraft.world.level.lighting.DynamicGraphMinFixedPoint	minecraft:net/minecraft/world/level/lighting/DynamicGraphMinFixedPoint.java	170	A		mc.world.level.lighting.core	rivet-world	rivet-world	crates/rivet-world/src/lighting/dynamic_graph_min_fixed_point.rs		15	15	0	1	partial
 net.minecraft.world.level.lighting.LayerLightEventListener	minecraft:net/minecraft/world/level/lighting/LayerLightEventListener.java	53	A		mc.world.level.lighting.core	rivet-world	rivet-world	crates/rivet-world/src/lighting/layer_light_event_listener.rs		8	8	0	0	complete
 net.minecraft.world.level.lighting.LayerLightSectionStorage	minecraft:net/minecraft/world/level/lighting/LayerLightSectionStorage.java	338	A		mc.world.level.lighting.engine	rivet-world	rivet-world	-		28	0	0	0	absent
-net.minecraft.world.level.lighting.LevelLightEngine	minecraft:net/minecraft/world/level/lighting/LevelLightEngine.java	132	A		mc.world.level.lighting.engine	rivet-world	rivet-world	crates/rivet-world/src/lighting/level_light_engine.rs		20	3	0	1	partial
+net.minecraft.world.level.lighting.LevelLightEngine	minecraft:net/minecraft/world/level/lighting/LevelLightEngine.java	132	A		mc.world.level.lighting.engine	rivet-world	rivet-world	crates/rivet-world/src/lighting/level_light_engine.rs		20	10	0	1	partial
 net.minecraft.world.level.lighting.LeveledPriorityQueue	minecraft:net/minecraft/world/level/lighting/LeveledPriorityQueue.java	68	A		mc.world.level.lighting.core	rivet-world	rivet-world	crates/rivet-world/src/lighting/leveled_priority_queue.rs		5	5	0	1	partial
 net.minecraft.world.level.lighting.LightEngine	minecraft:net/minecraft/world/level/lighting/LightEngine.java	325	A		mc.world.level.lighting.engine	rivet-world	rivet-world	-		40	0	0	0	absent
 net.minecraft.world.level.lighting.LightEventListener	minecraft:net/minecraft/world/level/lighting/LightEventListener.java	23	A		mc.world.level.lighting.core	rivet-world	rivet-world	crates/rivet-world/src/lighting/light_event_listener.rs		6	6	0	0	complete
@@ -4753,12 +4753,12 @@ net.minecraft.world.level.material.WaterFluid	minecraft:net/minecraft/world/leve
 net.minecraft.world.level.pathfinder.AmphibiousNodeEvaluator	minecraft:net/minecraft/world/level/pathfinder/AmphibiousNodeEvaluator.java	113	A		mc.world.level.pathfinder	rivet-world	rivet-server	-		8	0	0	0	absent
 net.minecraft.world.level.pathfinder.BinaryHeap	minecraft:net/minecraft/world/level/pathfinder/BinaryHeap.java	147	A		mc.world.level.pathfinder	rivet-world	rivet-server	-		11	0	0	0	absent
 net.minecraft.world.level.pathfinder.FlyNodeEvaluator	minecraft:net/minecraft/world/level/pathfinder/FlyNodeEvaluator.java	343	A		mc.world.level.pathfinder	rivet-world	rivet-server	-		12	0	0	0	absent
-net.minecraft.world.level.pathfinder.Node	minecraft:net/minecraft/world/level/pathfinder/Node.java	148	A		mc.world.level.pathfinder	rivet-world	rivet-server	-		15	0	0	0	absent
+net.minecraft.world.level.pathfinder.Node	minecraft:net/minecraft/world/level/pathfinder/Node.java	148	A		mc.world.level.pathfinder	rivet-world	rivet-server	-	crates/rivet-entity/src/ai/navigation/node.rs	15	0	0	0	absent
 net.minecraft.world.level.pathfinder.NodeEvaluator	minecraft:net/minecraft/world/level/pathfinder/NodeEvaluator.java	105	A		mc.world.level.pathfinder	rivet-world	rivet-server	-		18	0	0	0	absent
-net.minecraft.world.level.pathfinder.Path	minecraft:net/minecraft/world/level/pathfinder/Path.java	208	A		mc.world.level.pathfinder	rivet-world	rivet-server	-		31	0	0	0	absent
+net.minecraft.world.level.pathfinder.Path	minecraft:net/minecraft/world/level/pathfinder/Path.java	208	A		mc.world.level.pathfinder	rivet-world	rivet-server	-	crates/rivet-entity/src/ai/navigation/path.rs	31	0	0	0	absent
 net.minecraft.world.level.pathfinder.PathComputationType	minecraft:net/minecraft/world/level/pathfinder/PathComputationType.java	7	A		mc.world.level.pathfinder	rivet-world	rivet-server	-		0	0	0	0	absent
-net.minecraft.world.level.pathfinder.PathFinder	minecraft:net/minecraft/world/level/pathfinder/PathFinder.java	192	A		mc.world.level.pathfinder	rivet-world	rivet-server	-		6	0	0	0	absent
-net.minecraft.world.level.pathfinder.PathType	minecraft:net/minecraft/world/level/pathfinder/PathType.java	41	A		mc.world.level.pathfinder	rivet-world	rivet-server	-		1	0	0	0	absent
+net.minecraft.world.level.pathfinder.PathFinder	minecraft:net/minecraft/world/level/pathfinder/PathFinder.java	192	A		mc.world.level.pathfinder	rivet-world	rivet-server	-	crates/rivet-entity/src/ai/navigation/path_finder.rs	6	0	0	0	absent
+net.minecraft.world.level.pathfinder.PathType	minecraft:net/minecraft/world/level/pathfinder/PathType.java	41	A		mc.world.level.pathfinder	rivet-world	rivet-server	-	crates/rivet-entity/src/ai/navigation/path_type.rs	1	0	0	0	absent
 net.minecraft.world.level.pathfinder.PathTypeCache	minecraft:net/minecraft/world/level/pathfinder/PathTypeCache.java	43	A		mc.world.level.pathfinder	rivet-world	rivet-server	-		5	0	0	0	absent
 net.minecraft.world.level.pathfinder.PathfindingContext	minecraft:net/minecraft/world/level/pathfinder/PathfindingContext.java	43	A		mc.world.level.pathfinder	rivet-world	rivet-server	-		4	0	0	0	absent
 net.minecraft.world.level.pathfinder.SwimNodeEvaluator	minecraft:net/minecraft/world/level/pathfinder/SwimNodeEvaluator.java	136	A		mc.world.level.pathfinder	rivet-world	rivet-server	-		11	0	0	0	absent

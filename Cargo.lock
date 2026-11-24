@@ -679,12 +679,14 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "chrono",
+ "rivet-harness-common",
  "rivet-nbt",
  "rivet-serialization",
  "rivet-text",
  "rivet-util",
  "serde_json",
  "sha2",
+ "tempfile",
 ]
 
 [[package]]

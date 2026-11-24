@@ -111,11 +111,24 @@ mkdir -p "$classes_dir"
 echo "Compiling Rivet reference oracle against $paper_implementation ($paper_commit)" >&2
 "$javac_cmd" --release 25 -cp "$classpath" -d "$classes_dir" "$source_file"
 
+# The JVM runs from target/ (Paper writes logs/ into its cwd), so make the
+# --record corpus/output directories absolute against the caller's cwd first.
+args=("$@")
+if [[ "${args[0]:-}" == "--record" ]]; then
+    for i in 1 2; do
+        if [[ -n "${args[$i]:-}" && "${args[$i]}" != /* ]]; then
+            args[i]="$PWD/${args[$i]}"
+        fi
+    done
+fi
+
 cd "$tool_dir/target"
 exec "$java_cmd" --enable-native-access=ALL-UNNAMED \
     -Drivet.paper.sha256="$paper_sha256" \
     -Drivet.paper.specification="$paper_specification" \
     -Drivet.paper.implementation="$paper_implementation" \
     -Drivet.paper.commit="$paper_commit" \
+    -Drivet.paper.pin="$expected_paper" \
+    -Drivet.oracle.source="$source_file" \
     -cp "$classes_dir:$classpath" \
-    dev.rivet.oracle.RivetReferenceOracle "$@"
+    dev.rivet.oracle.RivetReferenceOracle "${args[@]}"
