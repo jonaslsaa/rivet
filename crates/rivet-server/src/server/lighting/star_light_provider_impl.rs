@@ -800,15 +800,9 @@ impl StarLightProvider for SkyLightProvider {
         self.changes.front().is_some() || !self.pending_restores.is_empty()
     }
 
-    /// Paper's `propagateChanges()` is `void` and never throws. Drain queued
-    /// tasks, but keep the changed-chunk notifications for the owner's next
-    /// `try_run_updates`, which reports them; a refusal already retains its
-    /// task (so `has_updates` stays true) and surfaces on that explicit drain.
-    fn propagate_changes(&mut self) {
-        if let Ok(notified) = self.try_run_updates() {
-            self.pending_notifications = notified;
-        }
-    }
+    // `propagate_changes` keeps the trait's no-op: Paper's `propagateChanges()`
+    // does not drain the server light queue; queued work runs only through the
+    // owner's `try_run_updates` (the chunk-system scheduler's role).
 
     fn light_chunk(&mut self, pos: ChunkPos, empty_sections: &[Option<bool>]) {
         // Preserve the legacy no-op for a missing center; status generation
@@ -2328,22 +2322,18 @@ mod tests {
         engine.update_section_status(SectionPos::of(0, 4, 0), false);
         engine.check_block(BlockPos::new(8, 64, 8));
         assert!(engine.has_light_work());
+        // Paper returns `hadUpdates ? 1 : 0`, but `propagateChanges()` does not
+        // drain the server queue: the queued work and light stay in place.
         assert_eq!(engine.run_light_updates(), 1);
-        assert!(!engine.has_light_work());
-        assert_eq!(engine.get_block_light_value(BlockPos::new(8, 64, 8)), 14);
-        assert_eq!(engine.get_block_light_value(BlockPos::new(9, 64, 8)), 13);
-
-        // A queued check that changes no light still had work: Paper returns
-        // `hadUpdates ? 1 : 0`, independent of how many chunks changed.
-        engine.check_block(BlockPos::new(8, 64, 8));
         assert!(engine.has_light_work());
+        assert_eq!(engine.get_block_light_value(BlockPos::new(8, 64, 8)), 0);
+        assert_eq!(engine.get_block_light_value(BlockPos::new(9, 64, 8)), 0);
         assert_eq!(engine.run_light_updates(), 1);
-        assert!(!engine.has_light_work());
-        assert_eq!(engine.run_light_updates(), 0);
+        assert!(engine.has_light_work());
     }
 
     #[test]
-    fn propagate_changes_retains_notifications_for_the_owner_drain() {
+    fn propagate_changes_leaves_server_queue_for_the_owner_drain() {
         use super::super::generated_block_light_fixture::write;
         use rivet_registry::block_state::BlockState;
         use rivet_registry::generated::blocks::BlockId;
@@ -2371,10 +2361,15 @@ mod tests {
 
         provider.section_change(SectionPos::of(0, 4, 0), false);
         provider.block_change(BlockPos::new(8, 64, 8));
+        assert!(provider.has_updates());
         provider.propagate_changes();
+        assert!(provider.has_updates());
+        assert_eq!(provider.get_block_light_value(BlockPos::new(8, 64, 8)), 0);
+
+        assert_eq!(provider.try_run_updates().unwrap(), [ChunkPos::ZERO]);
         assert!(!provider.has_updates());
         assert_eq!(provider.get_block_light_value(BlockPos::new(8, 64, 8)), 14);
-        assert_eq!(provider.try_run_updates().unwrap(), [ChunkPos::ZERO]);
+        assert_eq!(provider.get_block_light_value(BlockPos::new(9, 64, 8)), 13);
         assert!(provider.try_run_updates().unwrap().is_empty());
     }
 }

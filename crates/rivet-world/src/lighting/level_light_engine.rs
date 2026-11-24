@@ -165,20 +165,20 @@ impl LevelLightEngine {
             .map_or(0, |p| p.get_block_light_value(pos))
     }
 
-    /// Paper's `LevelLightEngine.getRawBrightness(BlockPos, int amount)`:
-    /// `max(sky - amount, block)`, returning `0` for disabled channels.
-    pub fn get_raw_brightness(&self, pos: BlockPos, sky_darken: i32) -> i32 {
-        let sky = if self.has_sky_light {
-            self.get_sky_light_value(pos).wrapping_sub(sky_darken)
-        } else {
-            0
-        };
-        let block = if self.has_block_light {
-            self.get_block_light_value(pos)
-        } else {
-            0
-        };
-        block.max(sky)
+    /// Paper's `LevelLightEngine.getRawBrightness(BlockPos, int skyDampen)`,
+    /// which delegates to `StarLightInterface.getRawBrightness`: the dampen is
+    /// subtracted unconditionally (a disabled sky channel reads `0`, so the
+    /// result can exceed the block value), `15` short-circuits, otherwise
+    /// `max(sky, block)`.
+    pub fn get_raw_brightness(&self, pos: BlockPos, sky_dampen: i32) -> i32 {
+        let sky = self.get_sky_light_value(pos).wrapping_sub(sky_dampen);
+        // Don't fetch the block light level if the skylight level is 15,
+        // since the value will never be higher.
+        if sky == 15 {
+            return 15;
+        }
+        let block = self.get_block_light_value(pos);
+        sky.max(block)
     }
 
     /// Paper's `StarLightInterface.skyReader.getDataLayerData(SectionPos)`,
@@ -535,6 +535,7 @@ mod tests {
         assert_eq!(sky_only.get_sky_light_value(pos), 12);
         assert_eq!(sky_only.get_block_light_value(pos), 0);
         assert_eq!(sky_only.get_raw_brightness(pos, 5), 7);
+        assert_eq!(sky_only.get_raw_brightness(pos, 13), 0);
         assert!(sky_only.get_sky_data_layer(sec).is_some());
         assert!(sky_only.get_block_data_layer(sec).is_none());
 
@@ -553,6 +554,9 @@ mod tests {
         assert_eq!(block_only.get_sky_light_value(pos), 0);
         assert_eq!(block_only.get_block_light_value(pos), 9);
         assert_eq!(block_only.get_raw_brightness(pos, 0), 9);
+        // Paper subtracts the dampen from the (disabled, 0) sky reading too.
+        assert_eq!(block_only.get_raw_brightness(pos, -15), 15);
+        assert_eq!(block_only.get_raw_brightness(pos, -12), 12);
         assert!(block_only.get_sky_data_layer(sec).is_none());
         assert!(block_only.get_block_data_layer(sec).is_some());
     }

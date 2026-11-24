@@ -74,9 +74,12 @@ pub trait StarLightProvider {
         false
     }
 
-    /// `StarLightInterface.propagateChanges()` — run queued light updates.
-    /// Java returns `void`; `LevelLightEngine.runLightUpdates()` derives its
-    /// result from `hasUpdates()` sampled before this call.
+    /// `StarLightInterface.propagateChanges()` — drains only a client light
+    /// queue; on the server queue it is a deliberate no-op ("invalid usage,
+    /// although we won't throw"), because server tasks run through the
+    /// chunk-system scheduler instead (here, the owner's drain). Java returns
+    /// `void`; `LevelLightEngine.runLightUpdates()` derives its result from
+    /// `hasUpdates()` sampled before this call.
     fn propagate_changes(&mut self) {}
 
     /// `StarLightInterface.lightChunk(ChunkAccess, Boolean[])` — light a chunk
