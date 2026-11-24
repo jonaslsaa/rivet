@@ -1,11 +1,11 @@
 //! `net.minecraft.gametest.framework` — GameTest values, bootstrap,
-//! registries, discovery, and fail-closed resource decoding (Paper 26.2,
-//! issue #429).
+//! registries, discovery, fail-closed resource decoding (issue #429), and
+//! deterministic lifecycle, ticker, batches, retries, and reports (issue #430).
 //!
 //! Pinned Paper 26.2 commit: `0a993450f129c4942c2a9ed45ba047412b4667cf`.
 //!
 //! Scope boundary:
-//! - Landed here (#429): GameTest value types (`TestData`, `RetryOptions`,
+//! - Landed in #429: GameTest value types (`TestData`, `RetryOptions`,
 //!   `GameTestBatch`, `GeneratedTest`), environment definitions & bootstrap
 //!   (`TestEnvironmentDefinition`, `GameTestEnvironments`), instance types &
 //!   bootstrap (`GameTestInstance`, `BlockBasedTestInstance`,
@@ -14,35 +14,79 @@
 //!   registries + holder resolution, discovery (`FailedTestTracker`,
 //!   `TestInstanceFinder`, `TestPosFinder`, `TestFinder`), and fail-closed
 //!   JSON/NBT resource decoding with exact Paper 26.2 resource census.
-//! - Deferred to later issues: deterministic execution lifecycle, ticker,
-//!   batches execution, retries execution, and reports (#430); structure
-//!   placement and `TestInstanceBlockEntity` (#474); `GameTestHelper`
-//!   assertions, sequences, and coordinate helpers (#475).
+//! - Landed in #430: GameTest exceptions (`GameTestException`,
+//!   `GameTestAssertException`, `GameTestAssertPosException`,
+//!   `GameTestTimeoutException`, `UnknownGameTestException`,
+//!   `ExhaustedAttemptsException`, `GameTestEvent`), reporters and deterministic
+//!   execution transcript (`TestReporter`, `LogTestReporter`,
+//!   `JUnitLikeTestReporter`, `GameTestExecutionTranscript`), sequence state
+//!   machine (`GameTestSequence`), test lifecycle (`GameTestInfo`,
+//!   `TestExecutionHandle`, `TestFunctionRegistry`), synchronous ticker
+//!   (`GameTestTicker`, `TickerState`, `TestInfoId`), progress tracker
+//!   (`MultipleTestTracker`), deterministic batching (`GameTestBatchFactory`),
+//!   and runner/retry/batch/environment orchestration (`GameTestRunner`).
+//! - Deferred to later issues: structure placement and
+//!   `TestInstanceBlockEntity` (#474); full world-backed `GameTestHelper`
+//!   assertions and coordinate helpers (#475).
 
 pub mod discovery;
+pub mod exception;
 pub mod game_test_batch;
+pub mod game_test_batch_factory;
+pub mod game_test_info;
 pub mod game_test_instance;
+pub mod game_test_runner;
+pub mod game_test_sequence;
+pub mod game_test_ticker;
+pub mod multiple_test_tracker;
 pub mod registries;
+pub mod reporter;
 pub mod resources;
 pub mod retry_options;
 pub mod test_data;
 pub mod test_environment_definition;
 pub mod test_function_loader;
 
+#[cfg(test)]
+mod lifecycle_tests;
+
 pub use discovery::{
     EmptyFinder, FailedTestTracker, StaticTestInstanceFinder, StaticTestPosFinder, TestFinder,
     TestFinderBuilder, TestInstanceFinder, TestPosFinder,
 };
+pub use exception::{
+    ExhaustedAttemptsException, GameTestAssertException, GameTestAssertPosException, GameTestEvent,
+    GameTestException, GameTestTimeoutException, UnknownGameTestException,
+};
 pub use game_test_batch::{GameTestBatch, GameTestBatchError};
+pub use game_test_batch_factory::{
+    MAX_TESTS_PER_BATCH, direct_test_info, divide_into_batches, divide_into_default_batches,
+};
+pub use game_test_info::{
+    GameTestInfo, GameTestTickOutcome, TestBodyFn, TestExecutionHandle, TestFunctionRegistry,
+    TickCallback,
+};
 pub use game_test_instance::{
     ALWAYS_PASS_INSTANCE_NAME, BlockBasedTestInstance, EMPTY_STRUCTURE_NAME,
     FunctionGameTestInstance, GameTestInstance, GameTestInstanceType, InstanceDecodeError,
     always_pass_instance, always_pass_instance_key, instance_key,
 };
+pub use game_test_runner::{
+    DeterministicGridSpawner, EnvironmentHook, GameTestBatchListener, GameTestLifecycleEvent,
+    GameTestListener, GameTestRunner, GameTestRunnerConfig, NoopEnvironmentHook, StructureSpawner,
+};
+pub use game_test_sequence::{GameTestSequence, SequenceAssertion, SequenceParent};
+pub use game_test_ticker::{GameTestTicker, TestInfoId, TickerState, TickerTickResult};
+pub use multiple_test_tracker::MultipleTestTracker;
 pub use registries::{
     GAMETEST_REGISTRY_NAMES, GameTestRegistries, GameTestRegistryError, TEST_ENVIRONMENT,
     TEST_ENVIRONMENT_DEFINITION_TYPE, TEST_FUNCTION, TEST_INSTANCE, TEST_INSTANCE_TYPE,
     bootstrap_environment_definition_types, bootstrap_instance_types, bootstrap_test_functions,
+};
+pub use reporter::{
+    GameTestExecutionTranscript, GameTestOutcome, GameTestReportEntry, GameTestRunRecord,
+    GameTestRunStatus, JUnitLikeTestReporter, JUnitTestCase, LogReportLevel, LogReportLine,
+    LogTestReporter, TestReporter,
 };
 pub use resources::{
     EXPECTED_RESOURCES, ExpectedResource, GameTestResourceError, GameTestResourceKind,
