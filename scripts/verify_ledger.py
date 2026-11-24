@@ -544,7 +544,7 @@ def op_rows(tracked: list[str]) -> list[dict]:
                 raise SystemExit(f"op.{op}: {path} is not tracked")
         n = count_corpus([corpus], tracked)
         # A row whose every input is unavailable (unavailable.tsv) has nothing to tamper with.
-        negative = "n" if op_unavailable_counts().get(op, 0) >= n else "y"
+        negative = "n" if str(n).isdigit() and op_unavailable_counts().get(op, 0) >= int(n) else "y"
         rows.append({
             "id": f"op.{op}.recorded", "layer": "L1", "tier": "T0", "negative": negative,
             "mechanism": f"test:rivet-parity ops::tests (recorded Paper {op} vs the Rust handler, "
