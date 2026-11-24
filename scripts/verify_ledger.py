@@ -25,7 +25,12 @@ Rows
   parity.*         the five `rivet-parity` checks (L2 live op vs the Java reference
                    oracle); corpus sizes from tools/rivet-parity/fixtures/corpus-manifest.json
   probe.*          every tools/rivet-oracle/scripts/run_*_probe.sh (and the worldgen
-                   sampler): L1 recorded goldens consumed by cargo tests
+                   sampler): L1 recorded goldens consumed by cargo tests; the
+                   fixtures each owns come from tools/rivet-oracle/probes.tsv
+  op.*.recorded    every op in tools/rivet-reference-oracle/fixtures/ops/manifest.json:
+                   the recorded Paper outputs against the Rust handler, offline (L1)
+  op.*.live        the same ops against a live Paper boot (`rivet-parity ops live`, L2)
+  regen.probes     `rivet-oracle regen --check` over every probes.tsv row (L3, T3)
   oracle-kind.*    the committed fixture kinds that `rivet-oracle regen` writes and
                    `rivet-oracle verify` re-derives from a live Paper boot (L1)
   golden.*         other committed Paper-sourced goldens consumed by cargo tests (L1)
@@ -72,7 +77,7 @@ For every row whose rust consumers include cargo-test code, the tests whose
 nextest name lies in a consumer file's module (its module-tree path, so
 `#[path]` modules resolve; or that integration-test binary) decide the
 result: all passed -> PASS, any failed -> FAIL, none ran -> UNVERIFIED. matched/mismatched stay `-`: cargo reports tests, not corpus
-inputs (per-input counts arrive with the generic oracle-op framework,
+inputs (per-input counts come from the op.* rows of the oracle-op framework,
 VERIFICATION item 3). The note records the test counts.
 
 Known blind spots
@@ -86,9 +91,9 @@ Known blind spots
 - Result columns are carried over by row id and `--check` never re-derives
   them: a row stays PASS at its old last_verified_commit until the next
   `record-tests` (or `record`) run, even if its consumer tests changed.
-- Probe -> fixture ownership is the PROBE_OUTPUTS table below (the probes
-  print to stdout or an argument; nothing records which file they wrote).
-  `rivet-oracle regen --check` (VERIFICATION item 2) is the real fix.
+- Probe -> fixture ownership is tools/rivet-oracle/probes.tsv, the table
+  `rivet-oracle regen --check` (VERIFICATION item 2) executes; a probe row
+  claims what probes.tsv says it reproduces, whether or not regen passes.
 """
 
 import argparse
@@ -125,114 +130,90 @@ TIERS = {"T0", "T1", "T2", "T3"}
 BOOT_NOTE = "needs a Paper boot; not run by the ledger tool"
 NO_NEGATIVE = "no tamper negative yet, so it cannot be PASS (VERIFICATION 2.4)"
 
-# Probe script -> oracle fixtures it writes (paths under tools/rivet-oracle/fixtures
-# or repo-relative). Names follow the script except where the probe writes several
-# files or the fixture is named differently; those were matched by the probe's
-# output mode (args) and the adding commit.
-PROBE_OUTPUTS = {
-    "run_beardifier_noise_probe.sh": ["beardifier-noise.jsonl"],
-    "run_beardifier_probe.sh": ["beardifier.jsonl"],
-    "run_biome_temperature_probe.sh": ["biome-temperature"],
-    "run_block_entity_debug_probe.sh": ["block-entity-debug.jsonl"],
-    "run_block_entity_lifecycle_probe.sh": ["block-entity-lifecycle.jsonl", "spawner-entity-id.jsonl"],
-    "run_block_entity_map_order_probe.sh": ["block-entity-map-order.jsonl"],
-    "run_block_entity_ticker_probe.sh": ["block-entity-ticker.jsonl"],
-    "run_block_mutation_metadata_probe.sh": [
-        "crates/rivet-registry/src/block_state/section_flags.tsv",
-        "crates/rivet-server/src/server/level/block_mutation_callbacks.tsv",
-    ],
-    "run_block_pos_set_probe.sh": ["block-pos-set.tsv"],
-    "run_block_shape_behavior_probe.sh": ["block-shape-behavior.jsonl", "structure-block-shape.jsonl"],
-    "run_bubble_column_probe.sh": ["bubble-column.jsonl"],
-    "run_builtin_pack_repository_probe.sh": ["builtin-pack-repository.jsonl"],
-    "run_buried_treasure_generation_probe.sh": ["buried-treasure-generation.jsonl"],
-    "run_chest_minecart_load_probe.sh": ["chest-minecart-load.jsonl"],
-    "run_chest_minecart_probe.sh": ["chest-minecart.jsonl"],
-    "run_chunk_block_batch_probe.sh": ["chunk-block-batch.jsonl"],
-    "run_chunk_level_probe.sh": ["chunk-level"],
-    "run_chunk_post_process_probe.sh": ["chunk-post-process.jsonl"],
-    "run_composed_noise_probe.sh": ["composed-noise"],
-    "run_data_worldgen_probe.sh": ["data-worldgen"],
-    "run_dataconverter_probe.sh": ["dataconverter"],
-    "run_directory_lock_probe.sh": [],
-    "run_entity_lookup_probe.sh": ["entity-lookup.jsonl"],
-    "run_entity_post_load_policy_probe.sh": ["entity-post-load-policy.jsonl"],
-    "run_entity_region_probe.sh": ["entity-region.jsonl"],
-    "run_entity_tracking_probe.sh": ["entity-tracking.jsonl"],
-    "run_environment_attributes_probe.sh": [
-        "environment-attributes.jsonl", "environment-boolean-maps.jsonl",
-        "crates/rivet-world/src/biome/gameplay_environment.jsonl",
-    ],
-    "run_fallen_tree_probe.sh": ["fallen-trees.jsonl"],
-    "run_flowing_fluid_probe.sh": ["flowing-fluid.jsonl", "fluid-block-states.tsv", "fluid-collision-faces.tsv"],
-    "run_freeze_snow_probe.sh": ["freeze-snow.tsv"],
-    "run_full_activation_lifecycle_probe.sh": ["full-activation-lifecycle.jsonl"],
-    "run_generated_block_light_probe.sh": ["generated-block-light.jsonl"],
-    "run_generated_boot_settings_probe.sh": ["generated-boot-settings.jsonl"],
-    "run_generation_creature_load_probe.sh": ["generation-creature-load.jsonl"],
-    "run_generation_farm_animal_probe.sh": [
-        "generation-farm-animals.jsonl", "crates/rivet-world/src/entity/farm-variant-registries.jsonl",
-    ],
-    "run_generation_population_trace_probe.sh": [
-        "generation-population-trace.jsonl", "generation-population-positive.jsonl",
-    ],
-    "run_generation_sheep_probe.sh": ["generation-sheep.jsonl"],
-    "run_heart_tick_probe.sh": ["heart-tick.jsonl"],
-    "run_hive_storage_probe.sh": ["hive-storage.jsonl"],
-    "run_holder_readiness_probe.sh": ["holder-readiness.jsonl"],
-    "run_incremental_light_probe.sh": ["incremental-light.jsonl"],
-    "run_initial_spawn_probe.sh": ["initial-spawn.jsonl"],
-    "run_lazy_block_entity_probe.sh": ["lazy-block-entity.jsonl"],
-    "run_lazy_structure_point_probe.sh": ["lazy-structure-point.jsonl"],
-    "run_level_ticks_probe.sh": ["level-ticks.jsonl"],
-    "run_lighting_core_probe.sh": [],
-    "run_liquid_block_probe.sh": ["liquid-block.jsonl"],
-    "run_live_block_mutation_probe.sh": ["live-block-mutation.jsonl"],
-    "run_live_block_packets_probe.sh": ["live-block-packets.jsonl"],
-    "run_long_reference_set_probe.sh": ["long-reference-set.tsv"],
-    "run_mineshaft_authority_probe.sh": ["mineshaft-authority.jsonl"],
-    "run_mineshaft_chest_probe.sh": ["mineshaft-chest.jsonl"],
-    "run_mineshaft_generation_probe.sh": ["mineshaft-generation.jsonl", "mineshaft-move.jsonl"],
-    "run_mineshaft_placement_probe.sh": ["mineshaft-placement.jsonl", "structure-falling-blocks.txt"],
-    "run_moss_carpet_placement_probe.sh": ["moss-carpet-placement.jsonl"],
-    "run_neighbor_collector_probe.sh": ["neighbor-collector.jsonl"],
-    "run_placement_count_probe.sh": ["placement-count"],
-    "run_plant_survival_probe.sh": ["plant-survival.tsv"],
-    "run_poi_chunk_probe.sh": ["poi-chunk.jsonl"],
-    "run_poi_distance_probe.sh": ["poi-distance.jsonl"],
-    "run_poi_manager_probe.sh": ["poi-manager.jsonl"],
-    "run_poi_record_probe.sh": ["poi-record.jsonl"],
-    "run_poi_section_probe.sh": ["poi-section.jsonl"],
-    "run_poi_storage_probe.sh": ["poi-storage.jsonl"],
-    "run_region_deflate_probe.sh": ["region-deflate.jsonl"],
-    "run_seq_probe.sh": ["seq"],
-    "run_spawner_tick_probe.sh": ["spawner-tick.jsonl", "spawner-reload.jsonl"],
-    "run_spline_probe.sh": ["spline"],
-    "run_structure_core_probe.sh": ["structure-core.jsonl"],
-    "run_structure_event_dispatch_probe.sh": ["structure-event-dispatch.jsonl"],
-    "run_structure_placement_probe.sh": ["structure-placement.jsonl"],
-    "run_structure_references_probe.sh": ["structure-references.jsonl"],
-    "run_structure_registry_probe.sh": ["structure-registry.jsonl", "entity-types.jsonl"],
-    "run_structure_ring_probe.sh": ["structure-rings.jsonl"],
-    "run_structure_selection_probe.sh": ["structure-selection.jsonl"],
-    "run_structure_snapshot_probe.sh": ["structure-snapshots.jsonl"],
-    "run_structure_spawn_trace_probe.sh": ["structure-spawn-trace.jsonl"],
-    "run_surface_column_probe.sh": ["surface-column"],
-    "run_surface_rule_data_probe.sh": ["surface-rule-data"],
-    "run_synth_noise_probe.sh": ["synth"],
-    "run_thread_unsafe_random_probe.sh": [],
-    "run_tick_container_lifecycle_probe.sh": ["tick-container-lifecycle.jsonl"],
-    "run_timer_queue_probe.sh": ["timer-queue.jsonl", "timer-queue-codec.jsonl"],
-    "run_tree_core_probe.sh": ["tree-core.tsv"],
-    "run_tree_placement_probe.sh": ["tree-placement.jsonl"],
-    "run_update_shape_probe.sh": ["block-update-shape-owners.tsv", "voxel-edge-faces.tsv"],
-    "run_world_clock_bootstrap_probe.sh": ["world-clock-bootstrap.jsonl"],
-    "run_world_clock_probe.sh": ["world-clock.jsonl"],
-    "run_world_event_probe.sh": ["world-events.jsonl"],
-    "run_world_identity_probe.sh": [],
-    "run_world_runtime_settings_probe.sh": ["world-runtime-settings.jsonl"],
-    "run_worldgen_sampler.sh": ["worldgen"],
+PROBES_TSV = f"{ORACLE}/probes.tsv"
+OPS_DIR = "tools/rivet-reference-oracle/fixtures/ops"
+OPS_MANIFEST = f"{OPS_DIR}/manifest.json"
+
+
+def probe_table() -> list[dict[str, str]]:
+    """Rows of tools/rivet-oracle/probes.tsv, the one table of which committed
+    files each probe reproduces (`rivet-oracle regen --check` runs it)."""
+    lines = [ln for ln in (REPO / PROBES_TSV).read_text(encoding="utf-8").splitlines()
+             if ln.strip() and not ln.startswith("#")]
+    header = lines[0].split("\t")
+    return [dict(zip(header, ln.split("\t"))) for ln in lines[1:]]
+
+
+def probe_outputs(table: list[dict[str, str]]) -> dict[str, list[str]]:
+    """Probe script (basename under tools/rivet-oracle/scripts) -> the fixtures
+    its probes.tsv rows reproduce, as ledger fixture names: an output inside a
+    directory of tools/rivet-oracle/fixtures is owned as that directory,
+    anything else by its repo path."""
+    owned: dict[str, list[str]] = {}
+    prefix = f"{ORACLE}/scripts/"
+    for r in table:
+        if not r["script"].startswith(prefix):
+            continue
+        names = owned.setdefault(r["script"][len(prefix):], [])
+        for out in ([] if r["outputs"] == "-" else r["outputs"].split(",")):
+            if out.startswith(ORACLE_FIXTURES + "/"):
+                out = out[len(ORACLE_FIXTURES) + 1:].split("/", 1)[0]
+            if out not in names:
+                names.append(out)
+    return owned
+
+
+# Recorded oracle ops (tools/rivet-reference-oracle/fixtures/ops, VERIFICATION
+# item 3): op -> (Rust files its handler verifies, Paper classes). The op list
+# itself comes from the ops manifest; an op recorded there without an entry here
+# stops the generator.
+OP_SURFACES = {
+    "snbt.parse": (
+        ["crates/rivet-nbt/src/tag_parser.rs", "crates/rivet-nbt/src/snbt_grammar.rs",
+         "crates/rivet-nbt/src/snbt_operations.rs", "crates/rivet-nbt/src/string_tag_visitor.rs",
+         "crates/rivet-nbt/src/snbt_printer_tag_visitor.rs"],
+        ["net.minecraft.nbt.TagParser", "net.minecraft.nbt.SnbtGrammar", "net.minecraft.nbt.SnbtOperations",
+         "net.minecraft.nbt.StringTagVisitor", "net.minecraft.nbt.SnbtPrinterTagVisitor"]),
+    "nbt.decode": (
+        ["crates/rivet-nbt/src/nbt_io.rs", "crates/rivet-nbt/src/nbt_accounter.rs", "crates/rivet-nbt/src/*_tag.rs",
+         "crates/rivet-nbt/src/tag.rs", "crates/rivet-nbt/src/snbt_printer_tag_visitor.rs"],
+        ["net.minecraft.nbt.NbtIo", "net.minecraft.nbt.NbtAccounter", "net.minecraft.nbt.SnbtPrinterTagVisitor"]),
+    "component.json": (
+        ["crates/rivet-text/src/**"],
+        ["net.minecraft.network.chat.ComponentSerialization"]),
 }
+
+
+def op_rows(tracked: list[str]) -> list[dict]:
+    manifest = json.loads((REPO / OPS_MANIFEST).read_text(encoding="utf-8"))
+    rows = []
+    for entry in manifest["ops"]:
+        op = entry["op"]
+        if op not in OP_SURFACES:
+            raise SystemExit(f"{OPS_MANIFEST}: recorded op {op} has no OP_SURFACES entry")
+        globs, java = OP_SURFACES[op]
+        corpus = f"{OPS_DIR}/{entry['corpus']}"
+        recorded = f"{OPS_DIR}/{entry['output']}"
+        fixtures = [recorded, corpus, OPS_MANIFEST]
+        for path in fixtures:
+            if not is_tracked(path, tracked):
+                raise SystemExit(f"op.{op}: {path} is not tracked")
+        n = count_corpus([corpus], tracked)
+        rows.append({
+            "id": f"op.{op}.recorded", "layer": "L1", "tier": "T0", "negative": "y",
+            "mechanism": f"test:rivet-parity ops::tests (recorded Paper {op} vs the Rust handler, "
+                         "offline; + tamper and broken-handler negatives)",
+            "fixtures": fixtures, "corpus_n": n, "rust_globs": globs, "java_classes": java,
+            "consumers": [], "seed_status": "UNVERIFIED",
+            "note": "byte-equal canonical lines; exclusions in fixtures/ops/exclusions.tsv"})
+        rows.append({
+            "id": f"op.{op}.live", "layer": "L2", "tier": "T1", "negative": "y",
+            "mechanism": f"op:rivet-parity ops live {op} (recorded vs live Paper, Rust vs live Paper, "
+                         "+ live tamper negative; gate.sh run_oracle_ops_live)",
+            "fixtures": fixtures, "corpus_n": n, "rust_globs": globs, "java_classes": java,
+            "consumers": [], "seed_status": "UNVERIFIED", "note": BOOT_NOTE})
+    return rows
+
 
 # Fixture kinds `rivet-oracle regen` writes and `rivet-oracle verify` re-derives
 # from a live Paper boot: kind -> (fixtures, producer).
@@ -257,6 +238,7 @@ ORACLE_NON_GOLDEN = {
 }
 
 # Other Paper-sourced goldens consumed by cargo tests: id -> (fixtures, producer).
+# A file a probe writes belongs to its probe.* row (probes.tsv), never here.
 GOLDENS = {
     "protocol-join-capture-bodies": (
         ["crates/rivet-protocol/tests/fixtures"], "Paper join capture (rivet-capture)"),
@@ -267,7 +249,6 @@ GOLDENS = {
     "decode-serverbound-corpus": (
         ["tools/rivet-decode/fixtures/corpus"], "Paper-captured serverbound frames (rivet-decode)"),
     "util-mth-vectors": (["tools/rivet-codegen/data/mth_vectors.tsv"], "rivet-codegen Mth golden probe"),
-    "fluid-block-behaviors": (["crates/rivet-world/src/fluid/block_behaviors.tsv"], "rivet-codegen probe-block-behaviors"),
 }
 # Goldens whose vectors are compiled into a generated test file instead of being
 # read by path: golden id -> consumer files.
@@ -350,6 +331,12 @@ CURATED: list[dict] = [
     {"id": "reference.selftest", "layer": "L3", "tier": "T2", "negative": "n",
      "mechanism": "harness:tools/rivet-reference-oracle self-test", "fixtures": [], "corpus": None,
      "rust_globs": [], "java_classes": [], "note": BOOT_NOTE},
+    {"id": "regen.probes", "layer": "L3", "tier": "T3", "negative": "n",
+     "mechanism": "harness:rivet-oracle regen --check (every probes.tsv row run twice, byte-diffed against "
+                  "its committed output; gate.sh --nightly run_regen_check)",
+     "fixtures": [PROBES_TSV], "corpus": ("probes", None), "rust_globs": [], "java_classes": [],
+     "note": BOOT_NOTE + "; proves the committed probe goldens still come out of Paper, not Rivet parity; "
+             "its drift/nondeterminism/crash detection is covered by rivet-oracle unit tests, not a per-run negative"},
     {"id": "hash.selftest", "layer": "L3", "tier": "T2", "negative": "n",
      "mechanism": "harness:rivet-oracle hash-self-check (xxh3_64 known-answer vectors, gate.sh run_oracle_hash)",
      "fixtures": [], "corpus": None, "rust_globs": [], "java_classes": [],
@@ -509,6 +496,8 @@ def curated_corpus(spec, tracked: list[str]) -> str:
         return count_corpus([arg], tracked)
     if kind == "lines":
         return count_corpus([arg], tracked)
+    if kind == "probes":
+        return str(len(probe_table()))
     if kind == "census":
         data = json.loads((REPO / "tools/paper-junit-baseline/fixtures/baseline-census.json").read_text())
         return str(data["totals"]["executed"])
@@ -740,9 +729,11 @@ def build_rows(tree: "RustTree | None" = None) -> list[dict[str, str]]:
     scripts_dir = REPO / ORACLE / "scripts"
     probe_scripts = [n for n in tracked_entries(f"{ORACLE}/scripts", tracked)
                      if re.match(r"run_.*_probe\.sh$", n) or n == "run_worldgen_sampler.sh"]
-    unmapped = sorted(set(probe_scripts) ^ set(PROBE_OUTPUTS))
+    table = probe_table()
+    owned = probe_outputs(table)
+    unmapped = sorted(set(probe_scripts) ^ set(owned))
     if unmapped:
-        raise SystemExit(f"PROBE_OUTPUTS out of sync with tracked {ORACLE}/scripts: {unmapped}")
+        raise SystemExit(f"{PROBES_TSV} out of sync with tracked {ORACLE}/scripts: {unmapped}")
 
     claimed: set[str] = set()
     rows: list[dict] = []
@@ -774,7 +765,7 @@ def build_rows(tree: "RustTree | None" = None) -> list[dict[str, str]]:
     for script in probe_scripts:
         text = (scripts_dir / script).read_text(encoding="utf-8", errors="replace")
         name = re.sub(r"^run_|(_probe)?\.sh$", "", script).replace("_", "-")
-        outputs = PROBE_OUTPUTS[script]
+        outputs = owned[script]
         java = probe_java_classes(text, known, tracked)
         note = "" if outputs else "output fixture not identified (probe writes stdout or a test-time file)"
         rows.append(golden_row(f"probe.{name}", f"probe:{ORACLE}/scripts/{script}", outputs, java, note))
@@ -791,6 +782,8 @@ def build_rows(tree: "RustTree | None" = None) -> list[dict[str, str]]:
                 if f"{ORACLE_FIXTURES}/{e}" not in claimed and e not in ORACLE_NON_GOLDEN]
     if leftover:
         raise SystemExit(f"oracle fixtures without a producing row: {leftover}")
+
+    rows.extend(op_rows(tracked))
 
     for spec in CURATED:
         fixtures = spec["fixtures"]

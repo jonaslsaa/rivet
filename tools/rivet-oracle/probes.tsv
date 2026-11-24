@@ -102,7 +102,7 @@ tools/rivet-oracle/scripts/run_tick_container_lifecycle_probe.sh	stdout	-	-	tool
 tools/rivet-oracle/scripts/run_timer_queue_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/timer-queue.jsonl,tools/rivet-oracle/fixtures/timer-queue-codec.jsonl	stdout is the TIMER_QUEUE rows followed by the TIMER_CODEC rows; the committed goldens split them across two files
 tools/rivet-oracle/scripts/run_tree_core_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/tree-core.tsv	-
 tools/rivet-oracle/scripts/run_tree_placement_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/tree-placement.jsonl	-
-tools/rivet-oracle/scripts/run_update_shape_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/block-update-shape-owners.tsv	-
+tools/rivet-oracle/scripts/run_update_shape_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/block-update-shape-owners.tsv,tools/rivet-oracle/fixtures/voxel-edge-faces.tsv	the committed files were post-processed by hand from this stdout (a `# Paper ...` header added, the UPDATE_OWNER/EDGE_FACE prefixes stripped, split by prefix), so they cannot match byte-for-byte until the probe writes them itself
 tools/rivet-oracle/scripts/run_world_clock_bootstrap_probe.sh	files	{out0}	-	tools/rivet-oracle/fixtures/world-clock-bootstrap.jsonl	-
 tools/rivet-oracle/scripts/run_world_clock_probe.sh	files	{out0}	-	tools/rivet-oracle/fixtures/world-clock.jsonl	-
 tools/rivet-oracle/scripts/run_world_event_probe.sh	files	{out0}	-	tools/rivet-oracle/fixtures/world-events.jsonl	-
