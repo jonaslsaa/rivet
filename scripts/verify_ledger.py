@@ -4,7 +4,8 @@
 Run:  python3 scripts/verify_ledger.py                 # regenerate VERIFY.tsv
       python3 scripts/verify_ledger.py --check         # exit 1 if stale or malformed
       python3 scripts/verify_ledger.py record ID --status PASS --matched N \\
-          --mismatched M --commit SHA [--note TEXT]    # write one row's result
+          --mismatched M [--unavailable U] --commit SHA [--note TEXT]
+                                                       # write one row's result
       python3 scripts/verify_ledger.py record-tests --commit SHA LOG...
                                                        # results of L1 rows from
                                                        # `cargo nextest run` logs
@@ -14,7 +15,7 @@ Deterministic and offline. The file has two halves:
 - Structural columns (id, layer, rust_globs, java_classes, mechanism,
   fixtures, corpus_n, negative, tier) are recomputed from the tree on every
   run. A hand edit to them is overwritten and fails `--check`.
-- Result columns (status, matched, mismatched, last_verified_commit, note) are
+- Result columns (status, matched, mismatched, unavailable, last_verified_commit, note) are
   carried over from the committed VERIFY.tsv by row id; only the two `record`
   subcommands change them. A new row starts with its seed (below): `INACTIVE`
   for mechanisms that exist but never run, otherwise `UNVERIFIED`. Nothing is
@@ -125,7 +126,7 @@ ORACLE_FIXTURES = f"{ORACLE}/fixtures"
 
 COLUMNS = [
     "id", "layer", "rust_globs", "java_classes", "mechanism", "fixtures", "corpus_n",
-    "negative", "tier", "status", "matched", "mismatched", "last_verified_commit", "note",
+    "negative", "tier", "status", "matched", "mismatched", "unavailable", "last_verified_commit", "note",
 ]
 STRUCTURAL = COLUMNS[:9]
 RESULT = COLUMNS[9:]
@@ -483,7 +484,160 @@ OP_SURFACES = {
          "net.minecraft.world.item.component.Consumable", "net.minecraft.util.valueproviders.IntProviders",
          "net.minecraft.world.level.levelgen.structure.templatesystem.RuleTest",
          "net.minecraft.world.level.levelgen.synth.NormalNoise", "net.minecraft.network.chat.ComponentSerialization"]),
+    "feature.place": (
+        # What the executed inputs reach: the feature hub and region, and the module of every feature
+        # type that some executed input places (an input whose feature is not ported answers
+        # `unavailable` and exercises none of it), with the placers, providers, predicates and
+        # placement modifiers those executed configurations name.
+        [
+         "crates/rivet-world/src/levelgen/feature/abstract_huge_mushroom_feature.rs",
+         "crates/rivet-world/src/levelgen/feature/bamboo_feature.rs",
+         "crates/rivet-world/src/levelgen/feature/block_blob_feature.rs",
+         "crates/rivet-world/src/levelgen/feature/block_column_feature.rs",
+         "crates/rivet-world/src/levelgen/feature/blue_ice_feature.rs",
+         "crates/rivet-world/src/levelgen/feature/coral_claw_feature.rs",
+         "crates/rivet-world/src/levelgen/feature/coral_mushroom_feature.rs",
+         "crates/rivet-world/src/levelgen/feature/coral_tree_feature.rs",
+         "crates/rivet-world/src/levelgen/feature/disk_feature.rs",
+         "crates/rivet-world/src/levelgen/feature/fallen_tree_feature.rs",
+         "crates/rivet-world/src/levelgen/feature/feature_place_context.rs",
+         "crates/rivet-world/src/levelgen/feature/geode_feature.rs",
+         "crates/rivet-world/src/levelgen/feature/huge_brown_mushroom_feature.rs",
+         "crates/rivet-world/src/levelgen/feature/huge_red_mushroom_feature.rs",
+         "crates/rivet-world/src/levelgen/feature/iceberg_feature.rs",
+         "crates/rivet-world/src/levelgen/feature/kelp_feature.rs",
+         "crates/rivet-world/src/levelgen/feature/lake_feature.rs",
+         "crates/rivet-world/src/levelgen/feature/mod.rs",
+         "crates/rivet-world/src/levelgen/feature/monster_room_feature.rs",
+         "crates/rivet-world/src/levelgen/feature/multiface_growth_feature.rs",
+         "crates/rivet-world/src/levelgen/feature/ore_feature.rs",
+         "crates/rivet-world/src/levelgen/feature/random_boolean_selector_feature.rs",
+         "crates/rivet-world/src/levelgen/feature/random_selector_feature.rs",
+         "crates/rivet-world/src/levelgen/feature/sea_pickle_feature.rs",
+         "crates/rivet-world/src/levelgen/feature/sequence_feature.rs",
+         "crates/rivet-world/src/levelgen/feature/simple_block_feature.rs",
+         "crates/rivet-world/src/levelgen/feature/simple_random_selector_feature.rs",
+         "crates/rivet-world/src/levelgen/feature/snow_and_freeze_feature.rs",
+         "crates/rivet-world/src/levelgen/feature/spike_feature.rs",
+         "crates/rivet-world/src/levelgen/feature/spring_feature.rs",
+         "crates/rivet-world/src/levelgen/feature/tree_feature.rs",
+         "crates/rivet-world/src/levelgen/feature/tree_placer_runtime.rs",
+         "crates/rivet-world/src/levelgen/feature/underwater_magma_feature.rs",
+         "crates/rivet-world/src/levelgen/feature/vegetation_patch_feature.rs",
+         "crates/rivet-world/src/levelgen/feature/vines_feature.rs",
+         "crates/rivet-world/src/levelgen/feature/featuresize/three_layers_feature_size.rs",
+         "crates/rivet-world/src/levelgen/feature/featuresize/two_layers_feature_size.rs",
+         "crates/rivet-world/src/levelgen/feature/foliageplacers/acacia_foliage_placer.rs",
+         "crates/rivet-world/src/levelgen/feature/foliageplacers/blob_foliage_placer.rs",
+         "crates/rivet-world/src/levelgen/feature/foliageplacers/bush_foliage_placer.rs",
+         "crates/rivet-world/src/levelgen/feature/foliageplacers/cherry_foliage_placer.rs",
+         "crates/rivet-world/src/levelgen/feature/foliageplacers/dark_oak_foliage_placer.rs",
+         "crates/rivet-world/src/levelgen/feature/foliageplacers/fancy_foliage_placer.rs",
+         "crates/rivet-world/src/levelgen/feature/foliageplacers/mega_pine_foliage_placer.rs",
+         "crates/rivet-world/src/levelgen/feature/foliageplacers/pine_foliage_placer.rs",
+         "crates/rivet-world/src/levelgen/feature/foliageplacers/random_spread_foliage_placer.rs",
+         "crates/rivet-world/src/levelgen/feature/foliageplacers/spruce_foliage_placer.rs",
+         "crates/rivet-world/src/levelgen/feature/rootplacers/mangrove_root_placer.rs",
+         "crates/rivet-world/src/levelgen/feature/stateproviders/randomized_int_state_provider.rs",
+         "crates/rivet-world/src/levelgen/feature/stateproviders/rule_based_state_provider.rs",
+         "crates/rivet-world/src/levelgen/feature/stateproviders/simple_state_provider.rs",
+         "crates/rivet-world/src/levelgen/feature/stateproviders/weighted_state_provider.rs",
+         "crates/rivet-world/src/levelgen/feature/treedecorators/attached_to_leaves.rs",
+         "crates/rivet-world/src/levelgen/feature/treedecorators/creaking_heart.rs",
+         "crates/rivet-world/src/levelgen/feature/treedecorators/pale_moss.rs",
+         "crates/rivet-world/src/levelgen/feature/trunkplacers/bending_trunk_placer.rs",
+         "crates/rivet-world/src/levelgen/feature/trunkplacers/cherry_trunk_placer.rs",
+         "crates/rivet-world/src/levelgen/feature/trunkplacers/dark_oak_trunk_placer.rs",
+         "crates/rivet-world/src/levelgen/feature/trunkplacers/fancy_trunk_placer.rs",
+         "crates/rivet-world/src/levelgen/feature/trunkplacers/forking_trunk_placer.rs",
+         "crates/rivet-world/src/levelgen/feature/trunkplacers/giant_trunk_placer.rs",
+         "crates/rivet-world/src/levelgen/feature/trunkplacers/mega_jungle_trunk_placer.rs",
+         "crates/rivet-world/src/levelgen/feature/trunkplacers/straight_trunk_placer.rs",
+         "crates/rivet-world/src/levelgen/feature/trunkplacers/upwards_branching_trunk_placer.rs",
+         "crates/rivet-world/src/levelgen/blockpredicates/all_of_predicate.rs",
+         "crates/rivet-world/src/levelgen/blockpredicates/any_of_predicate.rs",
+         "crates/rivet-world/src/levelgen/blockpredicates/matching_block_tag_predicate.rs",
+         "crates/rivet-world/src/levelgen/blockpredicates/matching_blocks_predicate.rs",
+         "crates/rivet-world/src/levelgen/blockpredicates/matching_fluids_predicate.rs",
+         "crates/rivet-world/src/levelgen/blockpredicates/not_predicate.rs",
+         "crates/rivet-world/src/levelgen/blockpredicates/solid_predicate.rs",
+         "crates/rivet-world/src/levelgen/blockpredicates/would_survive_predicate.rs",
+         "crates/rivet-world/src/levelgen/placement/block_predicate_filter.rs",
+         "crates/rivet-world/src/levelgen/placement/count_placement.rs",
+         "crates/rivet-world/src/levelgen/placement/environment_scan_placement.rs",
+         "crates/rivet-world/src/levelgen/placement/placed_feature.rs",
+         "crates/rivet-world/src/levelgen/placement/placement_context.rs",
+         "crates/rivet-world/src/levelgen/placement/placement_modifier.rs",
+         "crates/rivet-world/src/levelgen/placement/random_offset_placement.rs",
+         "crates/rivet-server/src/server/level/world_gen_region.rs",
+         "crates/rivet-server/src/server/level/generated_world.rs"],
+        [
+         "net.minecraft.world.level.levelgen.feature.Feature",
+         "net.minecraft.world.level.levelgen.feature.ConfiguredFeature",
+         "net.minecraft.world.level.levelgen.feature.TreeFeature",
+         "net.minecraft.world.level.levelgen.feature.OreFeature",
+         "net.minecraft.world.level.levelgen.feature.BlockBlobFeature",
+         "net.minecraft.world.level.levelgen.feature.IcebergFeature",
+         "net.minecraft.world.level.levelgen.placement.PlacedFeature",
+         "net.minecraft.server.level.WorldGenRegion"]),
+    "carver.carve": (
+        [
+         "crates/rivet-world/src/levelgen/carver/canyon_carver_configuration.rs",
+         "crates/rivet-world/src/levelgen/carver/canyon_world_carver.rs",
+         "crates/rivet-world/src/levelgen/carver/carver_configuration.rs",
+         "crates/rivet-world/src/levelgen/carver/carving_context.rs",
+         "crates/rivet-world/src/levelgen/carver/cave_carver_configuration.rs",
+         "crates/rivet-world/src/levelgen/carver/cave_world_carver.rs",
+         "crates/rivet-world/src/levelgen/carver/configured_world_carver.rs",
+         "crates/rivet-world/src/levelgen/carver/overworld_carvers.rs",
+         "crates/rivet-world/src/levelgen/carver/world_carver.rs",
+         "crates/rivet-world/src/chunk/carving_mask.rs",
+         "crates/rivet-world/src/levelgen/noisegen/aquifer.rs"],
+        ["net.minecraft.world.level.levelgen.carver.WorldCarver",
+         "net.minecraft.world.level.levelgen.carver.CaveWorldCarver",
+         "net.minecraft.world.level.levelgen.carver.CanyonWorldCarver",
+         "net.minecraft.world.level.levelgen.carver.ConfiguredWorldCarver",
+         "net.minecraft.world.level.levelgen.carver.CarvingContext",
+         "net.minecraft.world.level.levelgen.Aquifer"]),
+    "structure.start": (
+        [
+         "crates/rivet-world/src/levelgen/structure/bounding_box.rs",
+         "crates/rivet-world/src/levelgen/structure/generation.rs",
+         "crates/rivet-world/src/levelgen/structure/mineshaft.rs",
+         "crates/rivet-world/src/levelgen/structure/pieces_container.rs",
+         "crates/rivet-world/src/levelgen/structure/placement.rs",
+         "crates/rivet-world/src/levelgen/structure/selection.rs",
+         "crates/rivet-world/src/levelgen/structure/state.rs",
+         "crates/rivet-world/src/levelgen/structure/structure_piece.rs",
+         "crates/rivet-world/src/levelgen/structure/structure_registry.rs",
+         "crates/rivet-world/src/levelgen/structure/structure_start.rs",
+         "crates/rivet-world/src/levelgen/noisegen/noise_based_chunk_generator.rs",
+         "crates/rivet-server/src/server/level/generated_world.rs"],
+        ["net.minecraft.world.level.chunk.ChunkGeneratorStructureState",
+         "net.minecraft.world.level.chunk.ChunkGenerator",
+         "net.minecraft.world.level.levelgen.structure.Structure",
+         "net.minecraft.world.level.levelgen.structure.structures.MineshaftStructure",
+         "net.minecraft.world.level.levelgen.structure.structures.BuriedTreasureStructure",
+         "net.minecraft.world.level.levelgen.structure.placement.RandomSpreadStructurePlacement"]),
 }
+
+# The worldgen sweep ops (VERIFICATION item 5): `ops live` runs their Rust handlers for these seeds
+# only (the corpus holds all eight; Paper answers all eight in every live run). The one file the Rust
+# side reads too, so the live row's count cannot drift from what `rivet-parity ops live` runs.
+WORLDGEN_OPS = ("feature.place", "carver.carve", "structure.start")
+WORLDGEN_LIVE_SEEDS = f"{OPS_DIR}/corpus-src/worldgen-live-seeds.json"
+
+
+def live_corpus_ids(corpus: Path) -> list[str]:
+    """Ids of the corpus inputs `ops live` runs the Rust handler for: all of them, except for the
+    worldgen sweep ops, whose Rust side runs the live seeds only."""
+    seeds = set(json.loads((REPO / WORLDGEN_LIVE_SEEDS).read_text(encoding="utf-8")))
+    ids = []
+    for line in corpus.read_text(encoding="utf-8").splitlines():
+        entry = json.loads(line)
+        if entry["seed"] in seeds:
+            ids.append(entry["id"])
+    return ids
 
 
 def op_rows(tracked: list[str]) -> list[dict]:
@@ -501,6 +655,12 @@ def op_rows(tracked: list[str]) -> list[dict]:
             if not is_tracked(path, tracked):
                 raise SystemExit(f"op.{op}: {path} is not tracked")
         n = count_corpus([corpus], tracked)
+        live_n, live_fixtures = n, fixtures
+        if op in WORLDGEN_OPS:
+            live_n = str(len(live_corpus_ids(REPO / corpus)))
+            live_fixtures = fixtures + [WORLDGEN_LIVE_SEEDS]
+            if not is_tracked(WORLDGEN_LIVE_SEEDS, tracked):
+                raise SystemExit(f"op.{op}: {WORLDGEN_LIVE_SEEDS} is not tracked")
         rows.append({
             "id": f"op.{op}.recorded", "layer": "L1", "tier": "T0", "negative": "y",
             "mechanism": f"test:rivet-parity ops::tests (recorded Paper {op} vs the Rust handler, "
@@ -512,7 +672,7 @@ def op_rows(tracked: list[str]) -> list[dict]:
             "id": f"op.{op}.live", "layer": "L2", "tier": "T1", "negative": "y",
             "mechanism": f"op:rivet-parity ops live {op} (recorded vs live Paper, Rust vs live Paper, "
                          "+ live tamper negative; gate.sh run_oracle_ops_live)",
-            "fixtures": fixtures, "corpus_n": n, "rust_globs": globs, "java_classes": java,
+            "fixtures": live_fixtures, "corpus_n": live_n, "rust_globs": globs, "java_classes": java,
             "consumers": [], "seed_status": "UNVERIFIED", "note": BOOT_NOTE})
     return rows
 
@@ -1166,11 +1326,11 @@ def render(rows: list[dict], previous: dict[str, dict[str, str]]) -> str:
     for r in rows:
         prev = previous.get(r["id"])
         if prev:
-            result = {k: prev.get(k, "") for k in RESULT}
+            result = {k: prev.get(k, "-" if k == "unavailable" else "") for k in RESULT}
         else:
             matched, mismatched = r.get("seed_counts", ("-", "-"))
             result = {"status": r["seed_status"], "matched": matched, "mismatched": mismatched,
-                      "last_verified_commit": "-", "note": r["note"] or "-"}
+                      "unavailable": "-", "last_verified_commit": "-", "note": r["note"] or "-"}
         cells = {
             "id": r["id"], "layer": r["layer"], "rust_globs": ";".join(r["rust_globs"]) or "-",
             "java_classes": ";".join(r["java_classes"]) or "-", "mechanism": r["mechanism"],
@@ -1184,16 +1344,16 @@ def render(rows: list[dict], previous: dict[str, dict[str, str]]) -> str:
     return buf.getvalue()
 
 
-def op_excluded_counts() -> dict[str, int]:
-    """Whole-input exclusions (`input:` / `skip:` rows) per recorded op."""
+def op_excluded_ids() -> dict[str, list[str]]:
+    """Whole-input exclusions (`input:` / `skip:` rows): the excluded input ids per recorded op."""
     path = REPO / OPS_DIR / "exclusions.tsv"
-    counts: dict[str, int] = {}
+    ids: dict[str, list[str]] = {}
     if path.exists():
         for line in path.read_text(encoding="utf-8").splitlines()[1:]:
             cells = line.split("\t")
             if len(cells) == 4 and cells[1].startswith(("input:", "skip:")):
-                counts[cells[0]] = counts.get(cells[0], 0) + 1
-    return counts
+                ids.setdefault(cells[0], []).append(cells[1].split(":", 1)[1])
+    return ids
 
 
 OP_ROW_RE = re.compile(r"^op\.(.+)\.(recorded|live)$")
@@ -1202,7 +1362,7 @@ OP_ROW_RE = re.compile(r"^op\.(.+)\.(recorded|live)$")
 def validate(text: str) -> list[str]:
     """Malformed-ledger findings for a rendered VERIFY.tsv."""
     errors = []
-    excluded = op_excluded_counts()
+    excluded = op_excluded_ids()
     lines = text.splitlines()
     if not lines or lines[0].split("\t") != COLUMNS:
         return ["header does not match the VERIFY.tsv columns"]
@@ -1224,7 +1384,7 @@ def validate(text: str) -> list[str]:
             errors.append(f"{r['id']}: negative must be y or n")
         if r["status"] not in STATUSES:
             errors.append(f"{r['id']}: bad status {r['status']}")
-        for k in ("corpus_n", "matched", "mismatched"):
+        for k in ("corpus_n", "matched", "mismatched", "unavailable"):
             if r[k] != "-" and not r[k].isdigit():
                 errors.append(f"{r['id']}: {k} must be a count or -")
         if r["status"] in ("PASS", "FAIL") and r["last_verified_commit"] in ("", "-"):
@@ -1234,14 +1394,23 @@ def validate(text: str) -> list[str]:
         if r["status"] == "PASS" and r["mismatched"] not in ("-", "0"):
             errors.append(f"{r['id']}: PASS with mismatches")
         # An op row's scoreboard count is its executed inputs: every recorded
-        # input that no exclusions row takes out. A recorded result that does
-        # not add up is stale (the corpus or the exclusions moved since).
+        # input that no exclusions row takes out and the Rust side did not
+        # decline as `unavailable` (not ported). A recorded result that does
+        # not add up is stale (the corpus or the exclusions moved since). The
+        # live row of a worldgen sweep op counts the live seeds' inputs only.
         m = OP_ROW_RE.match(r["id"])
         if m and r["status"] == "PASS" and r["corpus_n"].isdigit() and r["matched"].isdigit():
-            expected = int(r["corpus_n"]) - excluded.get(m.group(1), 0)
+            op, kind = m.groups()
+            ids = excluded.get(op, [])
+            if kind == "live" and op in WORLDGEN_OPS:
+                live = set(live_corpus_ids(REPO / OPS_DIR / "corpus" / f"{op}.jsonl"))
+                ids = [i for i in ids if i in live]
+            unavailable = int(r["unavailable"]) if r["unavailable"].isdigit() else 0
+            expected = int(r["corpus_n"]) - len(ids) - unavailable
             if int(r["matched"]) != expected:
                 errors.append(f"{r['id']}: matched={r['matched']} but corpus_n={r['corpus_n']} minus "
-                              f"{excluded.get(m.group(1), 0)} excluded inputs is {expected}: re-record the row")
+                              f"{len(ids)} excluded and {unavailable} unavailable inputs is {expected}: "
+                              "re-record the row")
     return errors
 
 
@@ -1292,7 +1461,7 @@ def record_tests(rows: list[dict], previous: dict[str, dict[str, str]], logs: li
         note = f"cargo tests in consumer files: {passed} passed, {failed} failed"
         if status == "UNVERIFIED":
             note = "no cargo test in the consumer files ran"
-        previous[r["id"]] = {"status": status, "matched": "-", "mismatched": "-",
+        previous[r["id"]] = {"status": status, "matched": "-", "mismatched": "-", "unavailable": "-",
                              "last_verified_commit": commit if status != "UNVERIFIED" else "-",
                              "note": note}
         changed += 1
@@ -1311,6 +1480,7 @@ def main() -> int:
     rec.add_argument("--status", required=True, choices=sorted(STATUSES))
     rec.add_argument("--matched", default="-")
     rec.add_argument("--mismatched", default="-")
+    rec.add_argument("--unavailable", default="-")
     rec.add_argument("--commit", default="-")
     rec.add_argument("--note", default="-")
     rt = sub.add_parser("record-tests", help="results of L1 rows from cargo nextest logs")
@@ -1326,7 +1496,8 @@ def main() -> int:
         if args.row_id not in {r["id"] for r in rows}:
             raise SystemExit(f"unknown row id {args.row_id}")
         previous[args.row_id] = {"status": args.status, "matched": args.matched,
-                                 "mismatched": args.mismatched, "last_verified_commit": args.commit,
+                                 "mismatched": args.mismatched, "unavailable": args.unavailable,
+                                 "last_verified_commit": args.commit,
                                  "note": args.note}
     elif args.cmd == "record-tests":
         n = record_tests(rows, previous, args.logs, args.commit, tree)

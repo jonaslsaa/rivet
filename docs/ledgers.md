@@ -62,8 +62,8 @@ JUnit census (`INACTIVE`, 0 of 9,653).
 
 The structural columns (`id` through `tier`) are recomputed from the tree on
 every run. The result columns (`status`, `matched`, `mismatched`,
-`last_verified_commit`, `note`) are carried over by row id. Only two
-subcommands change them:
+`unavailable`, `last_verified_commit`, `note`) are carried over by row id. Only
+two subcommands change them:
 
 ```sh
 # L1 rows: results of the cargo tests in each row's consumer files.
@@ -72,6 +72,12 @@ python3 scripts/verify_ledger.py record-tests --commit <sha> <nextest log>...
 python3 scripts/verify_ledger.py record parity.nbt.decode --status PASS \
     --matched 432 --mismatched 0 --commit <sha>
 ```
+
+`unavailable` counts the inputs of an op row that the Rust side declined
+because the thing they exercise is not ported (the worldgen sweep ops: a
+feature, carver or structure without a Rust implementation). They are neither
+matched nor mismatched, and an op row's `matched` must equal `corpus_n` minus
+its excluded and its unavailable inputs. `-` means the row has no such count.
 
 A new row starts as `UNVERIFIED` (or `INACTIVE` for a mechanism that never
 runs). Nothing is seeded `PASS`. A `PASS` at L2 to L6 without a negative
