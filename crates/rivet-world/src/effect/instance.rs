@@ -13,9 +13,15 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
+use std::sync::Arc;
+
 use rivet_nbt::compound_tag::CompoundTag;
 use rivet_nbt::tag::Tag;
+use rivet_registry::Identifier;
+use rivet_serialization::{Codec, DataResult, DynamicOps, MapLike, Number, Pair};
 use rivet_util::mth;
+
+use crate::item::codec_from_fns;
 
 use crate::effect::{EffectParticle, MobEffectDef, MobEffectId};
 
@@ -425,6 +431,151 @@ impl MobEffectInstance {
             hidden_effect,
         )
     }
+}
+
+/// `MobEffectInstance.CODEC` — `MobEffect.CODEC.fieldOf("id")` followed by the
+/// recursive `Details.MAP_CODEC` (`amplifier` as `ExtraCodecs.UNSIGNED_BYTE`,
+/// `duration`, `ambient`, `show_particles`, `show_icon`, `hidden_effect`),
+/// generic over `DynamicOps` so booleans stay booleans outside NBT.
+pub fn mob_effect_instance_codec<Ops: DynamicOps + 'static>()
+-> Arc<dyn Codec<MobEffectInstance, Ops>> {
+    codec_from_fns(
+        "mob_effect_instance",
+        |v: &MobEffectInstance, ops: &Ops| {
+            let mut entries = vec![Pair::of(
+                ops.create_string("id".to_string()),
+                ops.create_string(v.effect.identifier().to_string()),
+            )];
+            encode_details(v, ops, &mut entries);
+            DataResult::success(ops.create_map(entries))
+        },
+        |ops: &Ops, input: &Ops::Output| {
+            let map_res = ops.get_map(input);
+            let Some(map) = map_res.result() else {
+                return DataResult::error("MobEffectInstance must be a map");
+            };
+            let Some(id_in) = map.get(&ops.create_string("id".to_string())) else {
+                return DataResult::error("No key id in MapLike");
+            };
+            let Some(id_str) = ops.get_string_value(&id_in).result().cloned() else {
+                return DataResult::error("MobEffectInstance.id must be a string");
+            };
+            let effect = match Identifier::try_parse(&id_str)
+                .and_then(|id| MobEffectId::by_name(&id.to_string()))
+            {
+                Some(effect) => effect,
+                None => {
+                    return DataResult::error(format!(
+                        "Unknown registry key in ResourceKey[minecraft:root / minecraft:mob_effect]: {id_str}"
+                    ));
+                }
+            };
+            match decode_details(effect, ops, map.as_ref()) {
+                Ok(inst) => DataResult::success(inst),
+                Err(e) => DataResult::error(e),
+            }
+        },
+    )
+}
+
+/// Encode side of `MobEffectInstance.Details.MAP_CODEC` (defaults omitted;
+/// `show_icon` is always written).
+fn encode_details<Ops: DynamicOps>(
+    v: &MobEffectInstance,
+    ops: &Ops,
+    entries: &mut Vec<Pair<Ops::Output, Ops::Output>>,
+) {
+    if v.amplifier != 0 {
+        // `UNSIGNED_BYTE` encodes through `Codec.BYTE` (`integer.byteValue()`).
+        entries.push(Pair::of(
+            ops.create_string("amplifier".to_string()),
+            ops.create_byte(v.amplifier as i8),
+        ));
+    }
+    if v.duration != 0 {
+        entries.push(Pair::of(
+            ops.create_string("duration".to_string()),
+            ops.create_int(v.duration),
+        ));
+    }
+    if v.ambient {
+        entries.push(Pair::of(
+            ops.create_string("ambient".to_string()),
+            ops.create_boolean(true),
+        ));
+    }
+    if !v.visible {
+        entries.push(Pair::of(
+            ops.create_string("show_particles".to_string()),
+            ops.create_boolean(false),
+        ));
+    }
+    entries.push(Pair::of(
+        ops.create_string("show_icon".to_string()),
+        ops.create_boolean(v.show_icon),
+    ));
+    if let Some(hidden) = &v.hidden_effect {
+        let mut hidden_entries = Vec::new();
+        encode_details(hidden, ops, &mut hidden_entries);
+        entries.push(Pair::of(
+            ops.create_string("hidden_effect".to_string()),
+            ops.create_map(hidden_entries),
+        ));
+    }
+}
+
+/// Decode side of `MobEffectInstance.Details.MAP_CODEC` followed by the private
+/// `MobEffectInstance(Holder, Details)` constructor.
+fn decode_details<Ops: DynamicOps>(
+    effect: MobEffectId,
+    ops: &Ops,
+    map: &dyn MapLike<Ops::Output>,
+) -> Result<MobEffectInstance, String> {
+    let field = |key: &str| map.get(&ops.create_string(key.to_string()));
+    let number = |key: &str| -> Result<Option<Number>, String> {
+        match field(key) {
+            Some(val) => match ops.get_number_value(&val).result() {
+                Some(n) => Ok(Some(*n)),
+                None => Err(format!("MobEffectInstance.{key} must be a number")),
+            },
+            None => Ok(None),
+        }
+    };
+    let boolean = |key: &str| -> Result<Option<bool>, String> {
+        match field(key) {
+            Some(val) => match ops.get_boolean_value(&val).result() {
+                Some(b) => Ok(Some(*b)),
+                None => Err(format!("MobEffectInstance.{key} must be a boolean")),
+            },
+            None => Ok(None),
+        }
+    };
+    // `UNSIGNED_BYTE`: `Codec.BYTE` (`Number.byteValue()`) then `UnsignedBytes.toInt`.
+    let amplifier = number("amplifier")?.map_or(0, |n| i32::from(n.byte_value() as u8));
+    let duration = number("duration")?.map_or(0, |n| n.int_value());
+    let ambient = boolean("ambient")?.unwrap_or(false);
+    let show_particles = boolean("show_particles")?.unwrap_or(true);
+    // `Details.create`: `showIcon.orElse(showParticles)`.
+    let show_icon = boolean("show_icon")?.unwrap_or(show_particles);
+    let hidden_effect = match field("hidden_effect") {
+        Some(val) => {
+            let hidden_map = ops.get_map(&val);
+            let Some(hidden_map) = hidden_map.result() else {
+                return Err("MobEffectInstance.hidden_effect must be a map".to_string());
+            };
+            Some(Box::new(decode_details(effect, ops, hidden_map.as_ref())?))
+        }
+        None => None,
+    };
+    Ok(MobEffectInstance::full(
+        effect,
+        duration,
+        amplifier,
+        ambient,
+        show_particles,
+        show_icon,
+        hidden_effect,
+    ))
 }
 
 /// Exact Java `MobEffectInstance.equals()` — compares effect, duration, amplifier,
