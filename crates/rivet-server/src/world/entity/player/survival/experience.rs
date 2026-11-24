@@ -1,4 +1,4 @@
-//! No Java counterpart: the experience state `Player` ticks (`experienceLevel`,
+//! Member slice of `Player`/`ServerPlayer` awaiting their class ports (ROADMAP lane 2B), not a Java class: the experience state `Player` ticks (`experienceLevel`,
 //! `experienceProgress`, `totalExperience`), placed next to `Player`.
 
 use rivet_util::mth::{clamp, clamp_f32};

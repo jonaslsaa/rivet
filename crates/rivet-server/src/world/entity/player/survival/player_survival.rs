@@ -1,4 +1,4 @@
-//! No Java counterpart: the per-player food, exhaustion and experience state machine
+//! Member slice of `Player`/`ServerPlayer` awaiting their class ports (ROADMAP lane 2B), not a Java class: the per-player food, exhaustion and experience state machine
 //! (`Player` and `FoodData` ticking), placed next to `Player`.
 
 use super::{

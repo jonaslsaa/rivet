@@ -1,4 +1,4 @@
-//! No Java counterpart: the `LivingEntity` hurt/death bookkeeping, kept beside `DamageSource` and `CombatTracker`.
+//! Member slice of `LivingEntity` awaiting its class port (ROADMAP lane 2B), not a Java class: the `LivingEntity` hurt/death bookkeeping, kept beside `DamageSource` and `CombatTracker`.
 //!
 //! Authoritative Paper 26.2 damage, invulnerability, armor/absorption,
 //! death attribution, death timing, and drop/experience hooks.
