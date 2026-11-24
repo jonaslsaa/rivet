@@ -129,7 +129,7 @@ This applies to every Java class hierarchy with virtual methods: entities, block
 - **Routing is generated.** For every concrete class, the family scaffold (ROADMAP §2.3) generates the trait impls from the Java class graph: the accessors, the `as_*` methods, and, for each virtual method, the call to the free function of the nearest class that declares it in Java's method resolution order. A missed inherited override silently runs the base body, so routing is never written by hand: it is regenerated from the Java class graph whenever a class in the family changes. Hand-written code is the free functions: the Java bodies.
 - **Interfaces** with methods (`EntityBlock`, `Container`, `SimpleWaterloggedBlock`, `BonemealableBlock`, `Leashable`) are traits; the root value trait's `as_<iface>()` returns `Option<&dyn Iface>`.
 - **R1 readiness.** All dispatch goes through `'static` trait objects and generated `'static` rows, so a leaf family can move to a higher crate and register its rows (for block entities, its class tags' entries in the row array) at bootstrap without changing a caller.
-- There is no `AnyEntity` enum: ROADMAP Batch 3A's "generated `AnyEntity` dispatch (#487)" is this generated routing with its dispatch rows, and `CRATES.md`'s `rivet-entity` row is superseded by it.
+- There is no `AnyEntity` enum: ROADMAP Batch 3A's "generated `AnyEntity` dispatch (#487)" is this generated routing with its dispatch rows, and the `AnyEntity` enum that `CRATES.md` once described for the entity crate is superseded by it.
 
 ## Entities
 
