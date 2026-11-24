@@ -28,6 +28,15 @@ One row per Java class (per `.java` file) of the three Paper source roots that
   live type (world.entity, server, commands, ...). This moves block and item
   behaviour, block entities, menus, effects and damage, and keeps chunks,
   storage, levelgen, lighting and block-state tables in `rivet-world`.
+  This column is a one-hop approximation and is not yet compile-sound. Taking
+  the CRATES.md bottom-up order (core, util, serialization, nbt, text,
+  brigadier, registry, protocol, world, server) and the script's own class
+  references, 1,078 classes (3,818 references) in lower assigned crates still
+  reference a class assigned to a higher one: world 607 classes, registry 170,
+  protocol 128, util 119, text 37, core 7, nbt 7, brigadier 3. Those are the
+  seams D15 resolves with dispatch/`LevelCtx` and the member-level split of
+  mixed packages, which is a follow-up and not done here. The Batch 2 crate
+  move must not consume `assigned_crate` as final.
 - **rust_path**: the mirrored Rust file, or `-`. **other_paths** lists same-named
   files at non-mirrored paths: misplaced ports and duplicates.
 - **method_total / method_covered**: distinct Java method names, and how many
@@ -105,8 +114,8 @@ Thresholds (VERIFICATION 4.2) are reported in the `flag` column, not enforced:
 
 `scripts/ledger_check.sh` checks that both ledgers regenerate byte-identically
 from the tree and are well-formed, and runs the ledger tools' tests (about one
-minute of CPU, offline). It is not wired into `scripts/gate.sh` yet; this is
-the one-line step to add to the fast gate:
+minute of CPU, offline). It is not wired into `scripts/gate.sh`: nothing calls
+it yet. This is the one-line hook to add to the fast gate:
 
 ```sh
 echo "==> ledger check (scripts/ledger_check.sh)"; scripts/ledger_check.sh

@@ -2619,7 +2619,7 @@ net.minecraft.world.SimpleMenuProvider	minecraft:net/minecraft/world/SimpleMenuP
 net.minecraft.world.Stopwatch	minecraft:net/minecraft/world/Stopwatch.java	16	A		mc.world	rivet-world	rivet-world	-		2	0	0	0	absent
 net.minecraft.world.Stopwatches	minecraft:net/minecraft/world/Stopwatches.java	86	A		mc.world	rivet-world	rivet-world	-		9	0	0	0	absent
 net.minecraft.world.TickRateManager	minecraft:net/minecraft/world/TickRateManager.java	66	A		mc.world	rivet-world	rivet-world	-		12	0	0	0	absent
-net.minecraft.world.WorldlyContainer	minecraft:net/minecraft/world/WorldlyContainer.java	13	A		mc.world	rivet-world	rivet-world	-		3	0	0	0	absent
+net.minecraft.world.WorldlyContainer	minecraft:net/minecraft/world/WorldlyContainer.java	13	A		mc.world	rivet-world	rivet-world	-	crates/rivet-world/src/block_entity/processing/worldly_container.rs	3	0	0	0	absent
 net.minecraft.world.WorldlyContainerHolder	minecraft:net/minecraft/world/WorldlyContainerHolder.java	9	A		mc.world	rivet-world	rivet-world	-		1	0	0	0	absent
 net.minecraft.world.attribute.AmbientAdditionsSettings	minecraft:net/minecraft/world/attribute/AmbientAdditionsSettings.java	13	A		mc.world.attribute	rivet-world	rivet-world	-		0	0	0	0	absent
 net.minecraft.world.attribute.AmbientMoodSettings	minecraft:net/minecraft/world/attribute/AmbientMoodSettings.java	20	A		mc.world.attribute	rivet-world	rivet-world	-		0	0	0	0	absent
@@ -2696,7 +2696,7 @@ net.minecraft.world.entity.ContainerUser	minecraft:net/minecraft/world/entity/Co
 net.minecraft.world.entity.ConversionParams	minecraft:net/minecraft/world/entity/ConversionParams.java	22	A	spine	mc.world.entity	rivet-entity	rivet-server	-		3	0	0	0	absent
 net.minecraft.world.entity.ConversionType	minecraft:net/minecraft/world/entity/ConversionType.java	159	A		mc.world.entity	rivet-entity	rivet-server	-		4	0	0	0	absent
 net.minecraft.world.entity.Crackiness	minecraft:net/minecraft/world/entity/Crackiness.java	42	A		mc.world.entity	rivet-entity	rivet-server	-		2	0	0	0	absent
-net.minecraft.world.entity.Display	minecraft:net/minecraft/world/entity/Display.java	904	A		mc.world.entity	rivet-entity	rivet-server	-	crates/rivet-world/src/crafting/display.rs	72	0	0	0	absent
+net.minecraft.world.entity.Display	minecraft:net/minecraft/world/entity/Display.java	904	A		mc.world.entity	rivet-entity	rivet-server	-	crates/rivet-world/src/crafting/display.rs;crates/rivet-world/src/item/components/display.rs	72	0	0	0	absent
 net.minecraft.world.entity.DropChances	minecraft:net/minecraft/world/entity/DropChances.java	49	A		mc.world.entity	rivet-entity	rivet-server	-		6	0	0	0	absent
 net.minecraft.world.entity.ElytraAnimationState	minecraft:net/minecraft/world/entity/ElytraAnimationState.java	65	A		mc.world.entity	rivet-entity	rivet-server	-		4	0	0	0	absent
 net.minecraft.world.entity.Entity	minecraft:net/minecraft/world/entity/Entity.java	5462	A	spine	mc.world.entity	rivet-entity	rivet-server	-	crates/rivet-api/src/native/facades/entity.rs	505	0	0	0	absent
@@ -3507,7 +3507,7 @@ net.minecraft.world.item.component.BlocksAttacks	minecraft:net/minecraft/world/i
 net.minecraft.world.item.component.BookContent	minecraft:net/minecraft/world/item/component/BookContent.java	10	A		mc.world.item.component	rivet-world	rivet-world	-		2	0	0	0	absent
 net.minecraft.world.item.component.BundleContents	minecraft:net/minecraft/world/item/component/BundleContents.java	281	A		mc.world.item.component	rivet-world	rivet-world	-		23	0	0	0	absent
 net.minecraft.world.item.component.ChargedProjectiles	minecraft:net/minecraft/world/item/component/ChargedProjectiles.java	108	A		mc.world.item.component	rivet-world	rivet-world	-		7	0	0	0	absent
-net.minecraft.world.item.component.Consumable	minecraft:net/minecraft/world/item/component/Consumable.java	199	A		mc.world.item.component	rivet-world	rivet-world	-		15	0	0	0	absent
+net.minecraft.world.item.component.Consumable	minecraft:net/minecraft/world/item/component/Consumable.java	199	A		mc.world.item.component	rivet-world	rivet-world	-	crates/rivet-world/src/item/components/consumable.rs	15	0	0	0	absent
 net.minecraft.world.item.component.ConsumableListener	minecraft:net/minecraft/world/item/component/ConsumableListener.java	11	A		mc.world.item.component	rivet-world	rivet-world	-		2	0	0	0	absent
 net.minecraft.world.item.component.Consumables	minecraft:net/minecraft/world/item/component/Consumables.java	83	A		mc.world.item.component	rivet-world	rivet-world	-		2	0	0	0	absent
 net.minecraft.world.item.component.CustomData	minecraft:net/minecraft/world/item/component/CustomData.java	100	A		mc.world.item.component	rivet-world	rivet-world	-		11	0	0	0	absent
@@ -4131,10 +4131,10 @@ net.minecraft.world.level.block.entity.DispenserBlockEntity	minecraft:net/minecr
 net.minecraft.world.level.block.entity.DropperBlockEntity	minecraft:net/minecraft/world/level/block/entity/DropperBlockEntity.java	18	A		mc.world.level.block.entity	rivet-world	rivet-server	-		1	0	0	0	absent
 net.minecraft.world.level.block.entity.EnchantingTableBlockEntity	minecraft:net/minecraft/world/level/block/entity/EnchantingTableBlockEntity.java	138	A		mc.world.level.block.entity	rivet-world	rivet-server	-		9	0	0	0	absent
 net.minecraft.world.level.block.entity.EnderChestBlockEntity	minecraft:net/minecraft/world/level/block/entity/EnderChestBlockEntity.java	110	A		mc.world.level.block.entity	rivet-world	rivet-server	-		7	0	0	0	absent
-net.minecraft.world.level.block.entity.FuelValues	minecraft:net/minecraft/world/level/block/entity/FuelValues.java	152	A		mc.world.level.block.entity	rivet-world	rivet-server	-		8	0	0	0	absent
+net.minecraft.world.level.block.entity.FuelValues	minecraft:net/minecraft/world/level/block/entity/FuelValues.java	152	A		mc.world.level.block.entity	rivet-world	rivet-server	-	crates/rivet-world/src/block_entity/processing/fuel_values.rs	8	0	0	0	absent
 net.minecraft.world.level.block.entity.FurnaceBlockEntity	minecraft:net/minecraft/world/level/block/entity/FurnaceBlockEntity.java	27	A		mc.world.level.block.entity	rivet-world	rivet-server	-		2	0	0	0	absent
 net.minecraft.world.level.block.entity.HangingSignBlockEntity	minecraft:net/minecraft/world/level/block/entity/HangingSignBlockEntity.java	30	A		mc.world.level.block.entity	rivet-world	rivet-server	-		3	0	0	0	absent
-net.minecraft.world.level.block.entity.Hopper	minecraft:net/minecraft/world/level/block/entity/Hopper.java	21	A		mc.world.level.block.entity	rivet-world	rivet-server	-		5	0	0	0	absent
+net.minecraft.world.level.block.entity.Hopper	minecraft:net/minecraft/world/level/block/entity/Hopper.java	21	A		mc.world.level.block.entity	rivet-world	rivet-server	-	crates/rivet-world/src/block_entity/processing/hopper.rs	5	0	0	0	absent
 net.minecraft.world.level.block.entity.HopperBlockEntity	minecraft:net/minecraft/world/level/block/entity/HopperBlockEntity.java	779	A		mc.world.level.block.entity	rivet-world	rivet-server	-		54	0	0	0	absent
 net.minecraft.world.level.block.entity.JigsawBlockEntity	minecraft:net/minecraft/world/level/block/entity/JigsawBlockEntity.java	172	A		mc.world.level.block.entity	rivet-world	rivet-server	-		21	0	0	0	absent
 net.minecraft.world.level.block.entity.JukeboxBlockEntity	minecraft:net/minecraft/world/level/block/entity/JukeboxBlockEntity.java	214	A		mc.world.level.block.entity	rivet-world	rivet-server	-		24	0	0	0	absent

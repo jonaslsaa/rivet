@@ -36,7 +36,7 @@ Rows
   anvil.v1a        the storage-only Anvil round trip of the 432 M0 payloads
   codegen.*        the five live rivet-codegen probes (regenerate generated tables)
   scenario.*       the eight run-scenario.sh rows of gate.sh (L5)
-  reference.selftest, hash.paper, hash.diff (INACTIVE), generated-full (INACTIVE),
+  reference.selftest, hash.selftest, hash.paper, hash.diff (INACTIVE), generated-full (INACTIVE),
   junit.census     (INACTIVE 0/9,653: Paper JUnit runs against the adapter, L8)
 
 Derived columns
@@ -350,6 +350,10 @@ CURATED: list[dict] = [
     {"id": "reference.selftest", "layer": "L3", "tier": "T2", "negative": "n",
      "mechanism": "harness:tools/rivet-reference-oracle self-test", "fixtures": [], "corpus": None,
      "rust_globs": [], "java_classes": [], "note": BOOT_NOTE},
+    {"id": "hash.selftest", "layer": "L3", "tier": "T2", "negative": "n",
+     "mechanism": "harness:rivet-oracle hash-self-check (xxh3_64 known-answer vectors, gate.sh run_oracle_hash)",
+     "fixtures": [], "corpus": None, "rust_globs": [], "java_classes": [],
+     "note": "offline known-answer check, run by gate.sh, not by the ledger tool"},
     {"id": "hash.paper", "layer": "L3", "tier": "T2", "negative": "n",
      "mechanism": "harness:rivet-oracle hash-paper (rebuild committed Paper FULL-chunk manifest)",
      "fixtures": ["tools/rivet-oracle/fixtures/chunk-hash/paper"], "corpus": None,
