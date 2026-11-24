@@ -247,7 +247,11 @@ fn vec3_corpus(rng: &mut Rng, out: &mut Lines) {
                 fields.insert("b".into(), vec3_value(b));
             }
             if uses_s {
-                let s = if n < 6 { pick(rng, &SPECIAL) } else { unit(rng) * 3.0 - 1.0 };
+                let s = if n < 6 {
+                    pick(rng, &SPECIAL)
+                } else {
+                    unit(rng) * 3.0 - 1.0
+                };
                 fields.insert("s".into(), h(s));
                 if name == "closerThanXzY" {
                     fields.insert("t".into(), h(unit(rng) * 5.0));
@@ -326,7 +330,11 @@ fn aabb_corpus(rng: &mut Rng, out: &mut Lines) {
                 random_box(rng)
             };
             fields.insert("box".into(), box_value(b));
-            let second = if n % 2 == 0 { local_box(rng) } else { random_box(rng) };
+            let second = if n % 2 == 0 {
+                local_box(rng)
+            } else {
+                random_box(rng)
+            };
             fields.insert("box2".into(), box_value(second));
             let (v, v2) = if n < 18 {
                 (local_vec3(rng), local_vec3(rng))
@@ -351,9 +359,17 @@ fn aabb_corpus(rng: &mut Rng, out: &mut Lines) {
             };
             fields.insert("v".into(), vec3_value(v));
             fields.insert("v2".into(), vec3_value(v2));
-            let d = if n < 3 { random_vec3(rng) } else { local_vec3(rng) };
+            let d = if n < 3 {
+                random_vec3(rng)
+            } else {
+                local_vec3(rng)
+            };
             fields.insert("d".into(), vec3_value(d));
-            let s = if n < 3 { pick(rng, &SPECIAL) } else { unit(rng) * 2.0 - 0.5 };
+            let s = if n < 3 {
+                pick(rng, &SPECIAL)
+            } else {
+                unit(rng) * 2.0 - 0.5
+            };
             fields.insert("s".into(), h(s));
             fields.insert(
                 "pos".into(),
@@ -405,10 +421,7 @@ fn catalog(rng: &mut Rng) -> Vec<(String, Value)> {
         ("block".into(), json!({"t": "block"})),
         ("empty".into(), json!({"t": "empty"})),
         ("infinity".into(), json!({"t": "infinity"})),
-        (
-            "half-x".into(),
-            spec_box([0.0, 0.0, 0.0, 0.5, 1.0, 1.0]),
-        ),
+        ("half-x".into(), spec_box([0.0, 0.0, 0.0, 0.5, 1.0, 1.0])),
         (
             "slab-bottom".into(),
             spec_box([0.0, 0.0, 0.0, 1.0, 0.5, 1.0]),
@@ -433,10 +446,7 @@ fn catalog(rng: &mut Rng) -> Vec<(String, Value)> {
                 ],
             ),
         ),
-        (
-            "off-grid".into(),
-            spec_box([0.1, 0.2, 0.3, 0.7, 0.8, 0.9]),
-        ),
+        ("off-grid".into(), spec_box([0.1, 0.2, 0.3, 0.7, 0.8, 0.9])),
         (
             "near-full".into(),
             spec_box([0.0, 0.0, 0.0, 0.99999995, 1.0, 1.0]),
@@ -453,10 +463,7 @@ fn catalog(rng: &mut Rng) -> Vec<(String, Value)> {
             "degenerate".into(),
             spec_create([0.0, 0.0, 0.0, 1.0E-8, 1.0, 1.0]),
         ),
-        (
-            "reversed".into(),
-            spec_box([1.0, 0.0, 0.0, 0.0, 1.0, 1.0]),
-        ),
+        ("reversed".into(), spec_box([1.0, 0.0, 0.0, 0.0, 1.0, 1.0])),
         (
             "nan".into(),
             spec_create([f64::NAN, 0.0, 0.0, 1.0, 1.0, 1.0]),
@@ -674,7 +681,10 @@ fn shape_corpus(rng: &mut Rng, out: &mut Lines) {
         for op in BOOLEAN_OPS {
             for opt in [true, false] {
                 out.push(
-                    format!("pair.{n}.{a_name}.{b_name}.join.{op}.{}", if opt { "opt" } else { "raw" }),
+                    format!(
+                        "pair.{n}.{a_name}.{b_name}.join.{op}.{}",
+                        if opt { "opt" } else { "raw" }
+                    ),
                     shape_request(&spec_join(op, a, b, opt), query_none()),
                 );
             }

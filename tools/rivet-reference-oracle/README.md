@@ -33,12 +33,24 @@ The tool currently supports:
   unregistered id, a decode failure or a `DecoderException` is an input
   rejection. Paper's `GlobalConfiguration` is initialised with defaults first.
 
+- `shapes.eval` — `{kind: vec3 | aabb | shape, ...}`: evaluate `Vec3`/`AABB` members
+  (every double/float path, including `Math.round`, `atan2`/`asin` and the fuzzy
+  compares) or build a `VoxelShape` from a spec (`Shapes.box/create/join/or`,
+  `move`, `optimize`, `getFaceShape`, `Shapes.empty/block/INFINITY`) and answer a
+  query (`collide`, `clip`, `closestPointTo`, `min/max`, `join`, `equal`,
+  `occludes`) with a full shape summary (coords, voxels, AABBs, face shapes) as f64
+  bit hex. Misses are absent keys (the canonical writer drops nulls); a
+  `Shapes.joinUnoptimized` ambiguous operator is an input rejection.
+  `--dump-vanilla-shapes <out.jsonl>` writes every distinct vanilla block-state
+  collision/shape/occlusion/visual shape to `fixtures/ops/corpus-src/vanilla_shapes.jsonl`
+  (the corpus's vanilla seeds).
+
 Registry loading logs to stdout, so the first `codec.reencode`/`packet.reencode`
 request silences log4j until the registries are ready (live mode speaks JSON
 Lines on that stream). `harvest_datapack.py` extracts `codec.reencode` seeds
 from the vanilla data pack in the Paper jar into `fixtures/ops/corpus-src/`.
 
-All seven operations live in one op registry (`OPS` in
+All operations live in one op registry (`OPS` in
 `RivetReferenceOracle.java`). Each op declares its result-key order (the
 canonical-JSON contract: results are re-emitted in exactly that order, an
 undeclared key or a raw floating-point number is an `unavailable` fault — floats

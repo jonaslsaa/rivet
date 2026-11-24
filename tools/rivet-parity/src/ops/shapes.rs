@@ -73,7 +73,7 @@ fn parse_f32(value: &Value) -> Result<f32, String> {
         .map_err(|e| e.to_string())
 }
 
-fn array<'a>(value: &'a Value, len: usize) -> Result<&'a Vec<Value>, String> {
+fn array(value: &Value, len: usize) -> Result<&Vec<Value>, String> {
     match value.as_array() {
         Some(items) if items.len() == len => Ok(items),
         _ => Err(format!("expected an array of {len}")),
@@ -295,10 +295,7 @@ fn vec3(request: &Map<String, Value>) -> Result<Map<String, Value>, String> {
         "toString" => single("s", json!(need_a()?.to_string())),
         "rotation" => {
             let rotation = need_a()?.rotation();
-            single(
-                "f",
-                json!([f32_bits(rotation.x), f32_bits(rotation.y)]),
-            )
+            single("f", json!([f32_bits(rotation.x), f32_bits(rotation.y)]))
         }
         other => return Err(format!("unknown vec3 fn {other}")),
     })

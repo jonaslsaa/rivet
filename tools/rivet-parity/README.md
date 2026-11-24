@@ -174,7 +174,9 @@ side is `RivetReferenceOracle`'s op registry; the Rust twins are
 `tools/rivet-reference-oracle/fixtures/ops/` (`corpus/<op>.jsonl`,
 `<op>.jsonl`, `manifest.json`, `exclusions.tsv`). Recorded today:
 `snbt.parse` (170 inputs), `nbt.decode` (40), `component.json` (62),
-`packet.reencode` (2,654) and `codec.reencode` (12,309), with corpora derived
+`packet.reencode` (2,654), `codec.reencode` (12,309) and `shapes.eval` (14,660: Vec3/AABB
+cases, a shape catalogue, all 16 `BooleanOp`s over shape pairs, and every vanilla block-state
+shape), with corpora derived
 from this tool's own corpus, the join capture, seeded generators and the
 committed data-pack seeds (`ops emit-corpus`; a test pins the committed files
 to it). The last two print per-subject tallies (one per ported packet struct

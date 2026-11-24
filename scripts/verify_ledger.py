@@ -483,6 +483,22 @@ OP_SURFACES = {
          "net.minecraft.world.item.component.Consumable", "net.minecraft.util.valueproviders.IntProviders",
          "net.minecraft.world.level.levelgen.structure.templatesystem.RuleTest",
          "net.minecraft.world.level.levelgen.synth.NormalNoise", "net.minecraft.network.chat.ComponentSerialization"]),
+    "shapes.eval": (
+        # The canonical phys value hubs and the collision shape engine (Batch 1B): Vec3/AABB, the
+        # VoxelShape family with its Moonrise caches, Shapes/BooleanOp/the IndexMerger family, and the
+        # Java Math/Guava helpers they lean on.
+        ["crates/rivet-registry/src/world/phys/**",
+         "crates/rivet-world/src/phys/**",
+         "crates/rivet-world/src/spottedleaf/moonrise/patches/collisions/**",
+         "crates/rivet-util/src/java_math.rs",
+         "crates/rivet-util/src/guava_math.rs",
+         "crates/rivet-util/src/double_list.rs",
+         "crates/rivet-util/src/java_bit_set.rs"],
+        ["net.minecraft.world.phys.Vec3", "net.minecraft.world.phys.AABB",
+         "net.minecraft.world.phys.shapes.Shapes", "net.minecraft.world.phys.shapes.VoxelShape",
+         "net.minecraft.world.phys.shapes.BooleanOp",
+         "net.minecraft.world.phys.shapes.BitSetDiscreteVoxelShape",
+         "ca.spottedleaf.moonrise.patches.collisions.CollisionUtil"]),
 }
 
 

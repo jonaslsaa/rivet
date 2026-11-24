@@ -116,6 +116,7 @@ current crate is the package's majority MANIFEST.tsv `crate` (ties by name).
      effects and damage move; chunks, storage, levelgen, lighting, block-state
      tables and item value types (crafting, component) stay in rivet-world.
   4. Every other package keeps its current crate.
+  5. CLASS_CRATES overrides single classes (split classes, dependency floors).
 Class references are resolved imports (longest matching class prefix, so
 nested and static imports land on the outer class), wildcard imports and
 same-package classes matched by simple-name token, and inline fully
@@ -183,13 +184,38 @@ MOUNTS = {
     "rivet-text": [("net.minecraft.network.chat", "")],
     "rivet-brigadier": [("com.mojang.brigadier", "")],
     "rivet-registry": [("net.minecraft.core", ""), ("net.minecraft.resources", ""),
-                       ("net.minecraft.tags", "")],
+                       ("net.minecraft.tags", ""), ("net.minecraft.world", "world")],
     "rivet-protocol": [("net.minecraft.network", "")],
     "rivet-world": [("net.minecraft.world", ""), ("net.minecraft.world.level", "")],
     "rivet-server": [("net.minecraft", ""),
                      ("ca.spottedleaf.dataconverter", "server/dataconverter")],
 }
 
+
+# Class-level D15 homes that differ from the package's assignment (the
+# "split classes" exception, D15). Each is a dependency floor or a live class
+# in a package that is otherwise below the live-game crate, found by the
+# Rust crate graph, never chosen per call site:
+#   - rivet-registry: `rivet-protocol` (packets) and `rivet-registry` (`core`)
+#     use these value types and `rivet-world` depends on `rivet-protocol`, so
+#     the one definition cannot live in `rivet-world`. Their members that need a
+#     live type are `<Class>Live` extension traits in `rivet-server` at the
+#     same mirrored path (`HitResultLive::distance_to(Entity)`,
+#     `InteractionHandLive::as_equipment_slot`).
+#   - rivet-server: classes that hold an `Entity`, so they cannot compile
+#     below the live-game crate (`EntityHitResult`, the entity collision
+#     contexts); the rest of `phys.shapes` stays in `rivet-world`.
+CLASS_CRATES = {
+    "net.minecraft.world.InteractionHand": "rivet-registry",
+    "net.minecraft.world.phys.AABB": "rivet-registry",
+    "net.minecraft.world.phys.BlockHitResult": "rivet-registry",
+    "net.minecraft.world.phys.HitResult": "rivet-registry",
+    "net.minecraft.world.phys.Vec2": "rivet-registry",
+    "net.minecraft.world.phys.Vec3": "rivet-registry",
+    "net.minecraft.world.phys.EntityHitResult": "rivet-server",
+    "net.minecraft.world.phys.shapes.EntityCollisionContext": "rivet-server",
+    "net.minecraft.world.phys.shapes.MinecartCollisionContext": "rivet-server",
+}
 
 OBJECT_ALIASES = {
     "toString": ["fmt", "to_string"],
@@ -768,7 +794,7 @@ def build_rows(detail: str | None = None) -> list[dict[str, str]]:
                 print_detail(c, row, None)
             rows.append(row)
             continue
-        assigned = pkg_crate[c.pkg]
+        assigned = CLASS_CRATES.get(c.fqn, pkg_crate[c.pkg])
         cands = by_key.get(c.name.lower(), [])
         best = None
         best_key = None

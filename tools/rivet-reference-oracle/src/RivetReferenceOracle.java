@@ -174,6 +174,13 @@ public final class RivetReferenceOracle {
             (request, dec) -> packetReencode(request),
             error -> error instanceof PacketRejection
         ));
+        // `shapes.eval`: Vec3 / AABB / VoxelShape / Shapes, as Paper runs them.
+        register(ops, new Op(
+            "shapes.eval",
+            List.of("out"),
+            (request, dec) -> shapesEval(request),
+            error -> error instanceof IllegalArgumentException || error instanceof UnsupportedOperationException
+        ));
         return Collections.unmodifiableMap(ops);
     }
 
@@ -274,7 +281,18 @@ public final class RivetReferenceOracle {
                 RAW_STDOUT.flush();
                 System.exit(0);
             }
-            System.err.println("Usage: run.sh [--self-test | --record <corpus-dir> <out-dir>]");
+            if (args.length == 2 && args[0].equals("--dump-vanilla-shapes")) {
+                try {
+                    dumpVanillaShapes(Path.of(args[1]));
+                } catch (Exception error) {
+                    System.err.println("dump failed: " + error);
+                    System.err.flush();
+                    System.exit(1);
+                }
+                RAW_STDOUT.flush();
+                System.exit(0);
+            }
+            System.err.println("Usage: run.sh [--self-test | --record <corpus-dir> <out-dir> | --dump-vanilla-shapes <out.jsonl>]");
             System.exit(64);
         }
 
@@ -1173,5 +1191,440 @@ public final class RivetReferenceOracle {
         if (!expected.equals(actual)) {
             throw new IllegalStateException(label + ": expected " + expected + ", got " + actual);
         }
+    }
+
+    /**
+     * {@code --dump-vanilla-shapes <out.jsonl>}: every distinct collision,
+     * outline, occlusion and visual shape of every vanilla block state, as its
+     * {@code toAabbs()} box list. One line per distinct box list, in block-state
+     * registry order, naming the first state and shape kind that produced it.
+     * This is the seed list of the {@code shapes.eval} vanilla corpus; the
+     * Rust corpus generator rebuilds each shape from its boxes.
+     */
+    private static void dumpVanillaShapes(final Path out) throws Exception {
+        java.util.Map<String, JsonObject> distinct = new LinkedHashMap<>();
+        for (net.minecraft.world.level.block.state.BlockState state : net.minecraft.world.level.block.Block.BLOCK_STATE_REGISTRY) {
+            net.minecraft.world.phys.shapes.VoxelShape[] shapes = {
+                state.getCollisionShape(net.minecraft.world.level.EmptyBlockGetter.INSTANCE, net.minecraft.core.BlockPos.ZERO),
+                state.getShape(net.minecraft.world.level.EmptyBlockGetter.INSTANCE, net.minecraft.core.BlockPos.ZERO),
+                state.getOcclusionShape(),
+                state.getVisualShape(net.minecraft.world.level.EmptyBlockGetter.INSTANCE, net.minecraft.core.BlockPos.ZERO,
+                    net.minecraft.world.phys.shapes.CollisionContext.empty()),
+            };
+            String[] kinds = {"collision", "shape", "occlusion", "visual"};
+            for (int i = 0; i < shapes.length; i++) {
+                JsonArray boxes = new JsonArray();
+                for (net.minecraft.world.phys.AABB box : shapes[i].toAabbs()) {
+                    boxes.add(aabbBits(box));
+                }
+                String key = boxes.toString();
+                if (!distinct.containsKey(key)) {
+                    JsonObject line = new JsonObject();
+                    line.addProperty("from", state.toString() + ":" + kinds[i]);
+                    line.add("boxes", boxes);
+                    distinct.put(key, line);
+                }
+            }
+        }
+        StringBuilder text = new StringBuilder();
+        for (JsonObject line : distinct.values()) {
+            text.append(GSON.toJson(line)).append('\n');
+        }
+        Files.writeString(out, text.toString(), StandardCharsets.UTF_8);
+        JsonObject summary = new JsonObject();
+        summary.addProperty("ok", true);
+        summary.addProperty("distinct", distinct.size());
+        RAW_STDOUT.println(GSON.toJson(summary));
+    }
+
+    // ---- shapes.eval ------------------------------------------------------
+    //
+    // `shapes.eval`: net.minecraft.world.phys (Vec3, AABB) and
+    // net.minecraft.world.phys.shapes (Shapes, VoxelShape, BooleanOp) as run by
+    // Paper (with the Moonrise collision patches). A request names a `kind`:
+    //
+    //   vec3   {fn, a, b, s, f}      one Vec3 function
+    //   aabb   {fn, box, box2, v, v2, d, s, boxes, pos}   one AABB function
+    //   shape  {spec, query}         build a shape from a `spec` tree and
+    //                                answer its summary plus one `query`
+    //
+    // Every double/float travels as IEEE-754 bit hex (`0x...`), so a request and
+    // an answer are exact; the answer is `{"out": ...}` with every double again
+    // as bit hex. IllegalArgumentException (Shapes.box with min > max) and
+    // UnsupportedOperationException (a join operator with (false,false) -> true)
+    // are input-rejection verdicts.
+
+    private static double hexF64(final JsonElement element) {
+        String text = element.getAsString();
+        if (!text.startsWith("0x") || text.length() != 18) {
+            throw new IllegalStateException("bad f64 bits " + text);
+        }
+        return Double.longBitsToDouble(Long.parseUnsignedLong(text.substring(2), 16));
+    }
+
+    private static float hexF32(final JsonElement element) {
+        String text = element.getAsString();
+        if (!text.startsWith("0x") || text.length() != 10) {
+            throw new IllegalStateException("bad f32 bits " + text);
+        }
+        return Float.intBitsToFloat(Integer.parseUnsignedInt(text.substring(2), 16));
+    }
+
+    private static net.minecraft.world.phys.Vec3 hexVec3(final JsonElement element) {
+        JsonArray a = element.getAsJsonArray();
+        return new net.minecraft.world.phys.Vec3(hexF64(a.get(0)), hexF64(a.get(1)), hexF64(a.get(2)));
+    }
+
+    private static net.minecraft.world.phys.AABB hexAabb(final JsonElement element) {
+        JsonArray a = element.getAsJsonArray();
+        return new net.minecraft.world.phys.AABB(
+            hexF64(a.get(0)), hexF64(a.get(1)), hexF64(a.get(2)), hexF64(a.get(3)), hexF64(a.get(4)), hexF64(a.get(5)));
+    }
+
+    private static net.minecraft.core.BlockPos intPos(final JsonElement element) {
+        JsonArray a = element.getAsJsonArray();
+        return new net.minecraft.core.BlockPos(a.get(0).getAsInt(), a.get(1).getAsInt(), a.get(2).getAsInt());
+    }
+
+    private static JsonArray bitsOf(final double... values) {
+        JsonArray array = new JsonArray();
+        for (double value : values) {
+            array.add(f64Bits(value));
+        }
+        return array;
+    }
+
+    private static JsonArray vec3Bits(final net.minecraft.world.phys.Vec3 v) {
+        return bitsOf(v.x, v.y, v.z);
+    }
+
+    private static JsonArray aabbBits(final net.minecraft.world.phys.AABB b) {
+        return bitsOf(b.minX, b.minY, b.minZ, b.maxX, b.maxY, b.maxZ);
+    }
+
+    private static net.minecraft.core.Direction directionOf(final JsonElement element) {
+        return net.minecraft.core.Direction.valueOf(element.getAsString());
+    }
+
+    private static net.minecraft.core.Direction.Axis axisOf(final JsonElement element) {
+        return net.minecraft.core.Direction.Axis.valueOf(element.getAsString());
+    }
+
+    private static JsonObject shapesEval(final JsonObject request) throws Exception {
+        String kind = requiredString(request, "kind");
+        JsonObject out = new JsonObject();
+        switch (kind) {
+            case "vec3" -> shapesVec3(request, out);
+            case "aabb" -> shapesAabb(request, out);
+            case "shape" -> shapesShape(request, out);
+            default -> throw new IllegalStateException("unknown shapes.eval kind " + kind);
+        }
+        JsonObject result = new JsonObject();
+        result.add("out", out);
+        return result;
+    }
+
+    private static void putVec3(final JsonObject out, final net.minecraft.world.phys.Vec3 v) {
+        out.add("v", vec3Bits(v));
+    }
+
+    private static void shapesVec3(final JsonObject request, final JsonObject out) {
+        String fn = requiredString(request, "fn");
+        net.minecraft.world.phys.Vec3 a = request.has("a") ? hexVec3(request.get("a")) : null;
+        net.minecraft.world.phys.Vec3 b = request.has("b") ? hexVec3(request.get("b")) : null;
+        double s = request.has("s") ? hexF64(request.get("s")) : 0.0;
+        float f = request.has("f") ? hexF32(request.get("f")) : 0.0f;
+        float g = request.has("g") ? hexF32(request.get("g")) : 0.0f;
+        switch (fn) {
+            case "add" -> putVec3(out, a.add(b));
+            case "addScalar" -> putVec3(out, a.add(s));
+            case "subtract" -> putVec3(out, a.subtract(b));
+            case "subtractScalar" -> putVec3(out, a.subtract(s));
+            case "multiply" -> putVec3(out, a.multiply(b));
+            case "scale" -> putVec3(out, a.scale(s));
+            case "cross" -> putVec3(out, a.cross(b));
+            case "vectorTo" -> putVec3(out, a.vectorTo(b));
+            case "normalize" -> putVec3(out, a.normalize());
+            case "reverse" -> putVec3(out, a.reverse());
+            case "horizontal" -> putVec3(out, a.horizontal());
+            case "lerp" -> putVec3(out, a.lerp(b, s));
+            case "xRot" -> putVec3(out, a.xRot(f));
+            case "yRot" -> putVec3(out, a.yRot(f));
+            case "zRot" -> putVec3(out, a.zRot(f));
+            case "rotateClockwise90" -> putVec3(out, a.rotateClockwise90());
+            case "projectedOn" -> putVec3(out, a.projectedOn(b));
+            case "addLocalCoordinates" -> putVec3(out, a.addLocalCoordinates(b));
+            case "directionFromRotation" -> putVec3(out, net.minecraft.world.phys.Vec3.directionFromRotation(f, g));
+            case "dot" -> out.addProperty("n", f64Bits(a.dot(b)));
+            case "length" -> out.addProperty("n", f64Bits(a.length()));
+            case "lengthSqr" -> out.addProperty("n", f64Bits(a.lengthSqr()));
+            case "distanceTo" -> out.addProperty("n", f64Bits(a.distanceTo(b)));
+            case "distanceToSqr" -> out.addProperty("n", f64Bits(a.distanceToSqr(b)));
+            case "horizontalDistance" -> out.addProperty("n", f64Bits(a.horizontalDistance()));
+            case "horizontalDistanceSqr" -> out.addProperty("n", f64Bits(a.horizontalDistanceSqr()));
+            case "closerThan" -> out.addProperty("b", a.closerThan(b, s));
+            case "closerThanXzY" -> out.addProperty("b", a.closerThan(b, s, hexF64(request.get("t"))));
+            case "isFinite" -> out.addProperty("b", a.isFinite());
+            case "equals" -> out.addProperty("b", a.equals(b));
+            case "hashCode" -> out.addProperty("i", a.hashCode());
+            case "toString" -> out.addProperty("s", a.toString());
+            case "rotation" -> {
+                net.minecraft.world.phys.Vec2 rotation = a.rotation();
+                JsonArray bits = new JsonArray();
+                bits.add(f32Bits(rotation.x));
+                bits.add(f32Bits(rotation.y));
+                out.add("f", bits);
+            }
+            default -> throw new IllegalStateException("unknown vec3 fn " + fn);
+        }
+    }
+
+    private static void shapesAabb(final JsonObject request, final JsonObject out) {
+        String fn = requiredString(request, "fn");
+        net.minecraft.world.phys.AABB box = hexAabb(request.get("box"));
+        net.minecraft.world.phys.AABB box2 = request.has("box2") ? hexAabb(request.get("box2")) : null;
+        net.minecraft.world.phys.Vec3 v = request.has("v") ? hexVec3(request.get("v")) : null;
+        net.minecraft.world.phys.Vec3 v2 = request.has("v2") ? hexVec3(request.get("v2")) : null;
+        net.minecraft.world.phys.Vec3 d = request.has("d") ? hexVec3(request.get("d")) : null;
+        double s = request.has("s") ? hexF64(request.get("s")) : 0.0;
+        switch (fn) {
+            case "new" -> out.add("box", aabbBits(box));
+            case "move" -> out.add("box", aabbBits(box.move(d.x, d.y, d.z)));
+            case "moveVec" -> out.add("box", aabbBits(box.move(d)));
+            case "moveBlockPos" -> out.add("box", aabbBits(box.move(intPos(request.get("pos")))));
+            case "inflate3" -> out.add("box", aabbBits(box.inflate(d.x, d.y, d.z)));
+            case "inflate" -> out.add("box", aabbBits(box.inflate(s)));
+            case "deflate3" -> out.add("box", aabbBits(box.deflate(d.x, d.y, d.z)));
+            case "deflate" -> out.add("box", aabbBits(box.deflate(s)));
+            case "contract" -> out.add("box", aabbBits(box.contract(d.x, d.y, d.z)));
+            case "expandTowards" -> out.add("box", aabbBits(box.expandTowards(d)));
+            case "expandTowards3" -> out.add("box", aabbBits(box.expandTowards(d.x, d.y, d.z)));
+            case "intersect" -> out.add("box", aabbBits(box.intersect(box2)));
+            case "minmax" -> out.add("box", aabbBits(box.minmax(box2)));
+            case "setMinX" -> out.add("box", aabbBits(box.setMinX(s)));
+            case "setMaxY" -> out.add("box", aabbBits(box.setMaxY(s)));
+            case "setMinZ" -> out.add("box", aabbBits(box.setMinZ(s)));
+            case "intersects" -> out.addProperty("b", box.intersects(box2));
+            case "intersectsVecs" -> out.addProperty("b", box.intersects(v, v2));
+            case "intersectsBlockPos" -> out.addProperty("b", box.intersects(intPos(request.get("pos"))));
+            case "contains" -> out.addProperty("b", box.contains(v));
+            case "hasNaN" -> out.addProperty("b", box.hasNaN());
+            case "equals" -> out.addProperty("b", box.equals(box2));
+            case "hashCode" -> out.addProperty("i", box.hashCode());
+            case "toString" -> out.addProperty("s", box.toString());
+            case "getSize" -> out.addProperty("n", f64Bits(box.getSize()));
+            case "getXsize" -> out.addProperty("n", f64Bits(box.getXsize()));
+            case "getYsize" -> out.addProperty("n", f64Bits(box.getYsize()));
+            case "getZsize" -> out.addProperty("n", f64Bits(box.getZsize()));
+            case "distanceToSqrVec" -> out.addProperty("n", f64Bits(box.distanceToSqr(v)));
+            case "distanceToSqrBox" -> out.addProperty("n", f64Bits(box.distanceToSqr(box2)));
+            case "getCenter" -> putVec3(out, box.getCenter());
+            case "getBottomCenter" -> putVec3(out, box.getBottomCenter());
+            case "getMinPosition" -> putVec3(out, box.getMinPosition());
+            case "getMaxPosition" -> putVec3(out, box.getMaxPosition());
+            case "clip" -> {
+                java.util.Optional<net.minecraft.world.phys.Vec3> hit = box.clip(v, v2);
+                out.add("hit", hit.isPresent() ? vec3Bits(hit.get()) : com.google.gson.JsonNull.INSTANCE);
+            }
+            case "clipAll" -> {
+                List<net.minecraft.world.phys.AABB> boxes = new ArrayList<>();
+                for (JsonElement element : request.getAsJsonArray("boxes")) {
+                    boxes.add(hexAabb(element));
+                }
+                putBlockHit(out, net.minecraft.world.phys.AABB.clip(boxes, v, v2, intPos(request.get("pos"))));
+            }
+            case "collidedAlongVector" -> {
+                List<net.minecraft.world.phys.AABB> boxes = new ArrayList<>();
+                for (JsonElement element : request.getAsJsonArray("boxes")) {
+                    boxes.add(hexAabb(element));
+                }
+                out.addProperty("b", box.collidedAlongVector(v, boxes));
+            }
+            case "ofSize" -> out.add("box", aabbBits(net.minecraft.world.phys.AABB.ofSize(v, d.x, d.y, d.z)));
+            default -> throw new IllegalStateException("unknown aabb fn " + fn);
+        }
+    }
+
+    private static void putBlockHit(final JsonObject out, final net.minecraft.world.phys.BlockHitResult hit) {
+        if (hit == null) {
+            out.add("hit", com.google.gson.JsonNull.INSTANCE);
+            return;
+        }
+        JsonObject object = new JsonObject();
+        object.add("loc", vec3Bits(hit.getLocation()));
+        object.addProperty("dir", hit.getDirection().name());
+        object.addProperty("inside", hit.isInside());
+        net.minecraft.core.BlockPos pos = hit.getBlockPos();
+        JsonArray at = new JsonArray();
+        at.add(pos.getX());
+        at.add(pos.getY());
+        at.add(pos.getZ());
+        object.add("pos", at);
+        out.add("hit", object);
+    }
+
+    private static net.minecraft.world.phys.shapes.BooleanOp booleanOp(final String name) throws Exception {
+        return (net.minecraft.world.phys.shapes.BooleanOp) net.minecraft.world.phys.shapes.BooleanOp.class
+            .getField(name).get(null);
+    }
+
+    private static net.minecraft.world.phys.shapes.VoxelShape buildShape(final JsonObject spec) throws Exception {
+        String type = requiredString(spec, "t");
+        switch (type) {
+            case "box": {
+                JsonArray b = spec.getAsJsonArray("b");
+                return net.minecraft.world.phys.shapes.Shapes.box(
+                    hexF64(b.get(0)), hexF64(b.get(1)), hexF64(b.get(2)), hexF64(b.get(3)), hexF64(b.get(4)), hexF64(b.get(5)));
+            }
+            case "create": {
+                JsonArray b = spec.getAsJsonArray("b");
+                return net.minecraft.world.phys.shapes.Shapes.create(
+                    hexF64(b.get(0)), hexF64(b.get(1)), hexF64(b.get(2)), hexF64(b.get(3)), hexF64(b.get(4)), hexF64(b.get(5)));
+            }
+            case "block":
+                return net.minecraft.world.phys.shapes.Shapes.block();
+            case "empty":
+                return net.minecraft.world.phys.shapes.Shapes.empty();
+            case "infinity":
+                return net.minecraft.world.phys.shapes.Shapes.INFINITY;
+            case "join": {
+                net.minecraft.world.phys.shapes.VoxelShape a = buildShape(spec.getAsJsonObject("a"));
+                net.minecraft.world.phys.shapes.VoxelShape b = buildShape(spec.getAsJsonObject("b"));
+                net.minecraft.world.phys.shapes.BooleanOp op = booleanOp(requiredString(spec, "op"));
+                return spec.get("opt").getAsBoolean()
+                    ? net.minecraft.world.phys.shapes.Shapes.join(a, b, op)
+                    : net.minecraft.world.phys.shapes.Shapes.joinUnoptimized(a, b, op);
+            }
+            case "or": {
+                net.minecraft.world.phys.shapes.VoxelShape first = buildShape(spec.getAsJsonObject("a"));
+                JsonArray rest = spec.getAsJsonArray("rest");
+                net.minecraft.world.phys.shapes.VoxelShape[] others = new net.minecraft.world.phys.shapes.VoxelShape[rest.size()];
+                for (int i = 0; i < others.length; i++) {
+                    others[i] = buildShape(rest.get(i).getAsJsonObject());
+                }
+                return net.minecraft.world.phys.shapes.Shapes.or(first, others);
+            }
+            case "move": {
+                net.minecraft.world.phys.Vec3 d = hexVec3(spec.get("d"));
+                return buildShape(spec.getAsJsonObject("s")).move(d.x, d.y, d.z);
+            }
+            case "optimize":
+                return buildShape(spec.getAsJsonObject("s")).optimize();
+            case "face":
+                return buildShape(spec.getAsJsonObject("s")).getFaceShape(directionOf(spec.get("dir")));
+            case "clamped":
+                return ((ca.spottedleaf.moonrise.patches.collisions.shape.CollisionVoxelShape) buildShape(spec.getAsJsonObject("s")))
+                    .moonrise$getFaceShapeClamped(directionOf(spec.get("dir")));
+            case "single":
+                return buildShape(spec.getAsJsonObject("s")).singleEncompassing();
+            default:
+                throw new IllegalStateException("unknown shape spec " + type);
+        }
+    }
+
+    /** The cheap per-shape digest: emptiness, caches' booleans and the box list. */
+    private static JsonObject shapeLite(final net.minecraft.world.phys.shapes.VoxelShape shape) {
+        JsonObject lite = new JsonObject();
+        lite.addProperty("empty", shape.isEmpty());
+        ca.spottedleaf.moonrise.patches.collisions.shape.CollisionVoxelShape collision =
+            (ca.spottedleaf.moonrise.patches.collisions.shape.CollisionVoxelShape) shape;
+        lite.addProperty("full", collision.moonrise$isFullBlock());
+        lite.addProperty("occludes", collision.moonrise$occludesFullBlock());
+        JsonArray aabbs = new JsonArray();
+        for (net.minecraft.world.phys.AABB box : shape.toAabbs()) {
+            aabbs.add(aabbBits(box));
+        }
+        lite.add("aabbs", aabbs);
+        return lite;
+    }
+
+    private static JsonObject shapeSummary(final net.minecraft.world.phys.shapes.VoxelShape shape) {
+        JsonObject summary = shapeLite(shape);
+        summary.add("bounds", shape.isEmpty() ? com.google.gson.JsonNull.INSTANCE : aabbBits(shape.bounds()));
+        net.minecraft.world.phys.shapes.DiscreteVoxelShape grid = shape.shape;
+        JsonArray size = new JsonArray();
+        size.add(grid.getXSize());
+        size.add(grid.getYSize());
+        size.add(grid.getZSize());
+        summary.add("size", size);
+        JsonObject coords = new JsonObject();
+        for (net.minecraft.core.Direction.Axis axis : net.minecraft.core.Direction.Axis.VALUES) {
+            coords.add(axis.name(), bitsOf(shape.getCoords(axis).toDoubleArray()));
+        }
+        summary.add("coords", coords);
+        StringBuilder voxels = new StringBuilder();
+        for (int x = 0; x < grid.getXSize(); x++) {
+            for (int y = 0; y < grid.getYSize(); y++) {
+                for (int z = 0; z < grid.getZSize(); z++) {
+                    voxels.append(grid.isFull(x, y, z) ? '1' : '0');
+                }
+            }
+        }
+        summary.addProperty("voxels", voxels.toString());
+        JsonArray min = new JsonArray();
+        JsonArray max = new JsonArray();
+        for (net.minecraft.core.Direction.Axis axis : net.minecraft.core.Direction.Axis.VALUES) {
+            min.add(f64Bits(shape.min(axis)));
+            max.add(f64Bits(shape.max(axis)));
+        }
+        summary.add("min", min);
+        summary.add("max", max);
+        JsonObject faces = new JsonObject();
+        JsonObject clamped = new JsonObject();
+        for (net.minecraft.core.Direction direction : net.minecraft.core.Direction.values()) {
+            faces.add(direction.name(), shapeLite(shape.getFaceShape(direction)));
+            clamped.add(direction.name(), shapeLite(
+                ((ca.spottedleaf.moonrise.patches.collisions.shape.CollisionVoxelShape) shape).moonrise$getFaceShapeClamped(direction)));
+        }
+        summary.add("faces", faces);
+        summary.add("clamped", clamped);
+        return summary;
+    }
+
+    private static void shapesShape(final JsonObject request, final JsonObject out) throws Exception {
+        net.minecraft.world.phys.shapes.VoxelShape shape = buildShape(request.getAsJsonObject("spec"));
+        out.add("summary", shapeSummary(shape));
+        JsonObject query = request.getAsJsonObject("query");
+        JsonObject answer = new JsonObject();
+        switch (requiredString(query, "t")) {
+            case "none" -> {
+            }
+            case "collide" -> answer.addProperty("v", f64Bits(shape.collide(
+                axisOf(query.get("axis")), hexAabb(query.get("box")), hexF64(query.get("move")))));
+            case "clip" -> putBlockHit(answer, shape.clip(hexVec3(query.get("from")), hexVec3(query.get("to")), intPos(query.get("pos"))));
+            case "closest" -> {
+                java.util.Optional<net.minecraft.world.phys.Vec3> point = shape.closestPointTo(hexVec3(query.get("p")));
+                answer.add("p", point.isPresent() ? vec3Bits(point.get()) : com.google.gson.JsonNull.INSTANCE);
+            }
+            case "minmax" -> {
+                net.minecraft.core.Direction.Axis axis = axisOf(query.get("axis"));
+                double b = hexF64(query.get("b"));
+                double c = hexF64(query.get("c"));
+                answer.addProperty("min", f64Bits(shape.min(axis, b, c)));
+                answer.addProperty("max", f64Bits(shape.max(axis, b, c)));
+            }
+            case "join" -> {
+                net.minecraft.world.phys.shapes.VoxelShape other = buildShape(query.getAsJsonObject("spec2"));
+                net.minecraft.world.phys.shapes.BooleanOp op = booleanOp(requiredString(query, "op"));
+                answer.addProperty("nonEmpty", net.minecraft.world.phys.shapes.Shapes.joinIsNotEmpty(shape, other, op));
+                answer.add("joined", shapeLite(net.minecraft.world.phys.shapes.Shapes.join(shape, other, op)));
+                answer.add("unoptimized", shapeLite(net.minecraft.world.phys.shapes.Shapes.joinUnoptimized(shape, other, op)));
+            }
+            case "equal" -> {
+                net.minecraft.world.phys.shapes.VoxelShape other = buildShape(query.getAsJsonObject("spec2"));
+                answer.addProperty("equal", net.minecraft.world.phys.shapes.Shapes.equal(shape, other));
+            }
+            case "occludes" -> {
+                net.minecraft.world.phys.shapes.VoxelShape other = buildShape(query.getAsJsonObject("spec2"));
+                net.minecraft.core.Direction direction = directionOf(query.get("dir"));
+                answer.addProperty("block", net.minecraft.world.phys.shapes.Shapes.blockOccludes(shape, other, direction));
+                answer.addProperty("merged", net.minecraft.world.phys.shapes.Shapes.mergedFaceOccludes(shape, other, direction));
+                answer.addProperty("face", net.minecraft.world.phys.shapes.Shapes.faceShapeOccludes(shape, other));
+                answer.add("or", shapeLite(((ca.spottedleaf.moonrise.patches.collisions.shape.CollisionVoxelShape) shape)
+                    .moonrise$orUnoptimized(other)));
+            }
+            default -> throw new IllegalStateException("unknown shape query " + requiredString(query, "t"));
+        }
+        out.add("query", answer);
     }
 }
