@@ -33,6 +33,8 @@ pub mod brigadier_corpus;
 pub mod codec;
 pub mod codec_corpus;
 pub mod compare;
+pub mod entity;
+pub mod entity_corpus;
 pub mod handlers;
 pub mod packet;
 pub mod packet_corpus;
@@ -711,14 +713,16 @@ pub fn emit_corpus() -> Result<Vec<(&'static str, String)>, String> {
         );
     }
 
-    Ok(vec![
+    let mut corpora = vec![
         ("brigadier.dispatch", brigadier_corpus::emit()?),
         ("codec.reencode", codec_corpus::emit()?),
         ("component.json", component),
         ("nbt.decode", decode),
         ("packet.reencode", packet_corpus::emit()?),
         ("snbt.parse", snbt),
-    ])
+    ];
+    corpora.extend(entity_corpus::emit());
+    Ok(corpora)
 }
 
 fn print_rows(rows: &[OpRow]) {

@@ -4,7 +4,7 @@
   "paper": "26.2-DEV-main@0a99345",
   "paper_commit": "0a99345",
   "op_source": "tools/rivet-reference-oracle/src",
-  "op_source_sha256": "f32b216610f99526a23477769491d29cb5080ec25796e13e7d7aba1ca85a01cb",
+  "op_source_sha256": "bc7d1e08f27e3d336302b3ee86f240a0d0624fabac0a7899bc3f8709a36c420b",
   "ops": [
     {
       "op": "brigadier.dispatch",
@@ -34,6 +34,33 @@
       "output_n": 62
     },
     {
+      "op": "damage.calc",
+      "corpus": "corpus/damage.calc.jsonl",
+      "corpus_sha256": "d3b3da6c37c9dee219a414509caa6d92d9bf05e9fe879b247c878720c121f0d9",
+      "corpus_n": 10233,
+      "output": "damage.calc.jsonl",
+      "output_sha256": "c715b7b3ea7a9af3e31e7658d62f0e4b6c78e9ea1bbb579c052211f109267931",
+      "output_n": 10233
+    },
+    {
+      "op": "damage_source.scaling",
+      "corpus": "corpus/damage_source.scaling.jsonl",
+      "corpus_sha256": "0d5575e79d070ceba1c60222b371b8089e949b8ba3db45f39278694734b961f7",
+      "corpus_n": 1764,
+      "output": "damage_source.scaling.jsonl",
+      "output_sha256": "782962c2c27361343a585217533c775f741c08e2c33b5d875ad3366b130e0fd0",
+      "output_n": 1764
+    },
+    {
+      "op": "food.exhaustion",
+      "corpus": "corpus/food.exhaustion.jsonl",
+      "corpus_sha256": "0878bcc433ec930e436cedf7a580d5466fcf5adbe3897332349db5b6c28d9cf4",
+      "corpus_n": 518,
+      "output": "food.exhaustion.jsonl",
+      "output_sha256": "5d6c5d5ec04314804027cd472a016818993f6ec9e258bc93dad9acb5e4227c79",
+      "output_n": 518
+    },
+    {
       "op": "nbt.decode",
       "corpus": "corpus/nbt.decode.jsonl",
       "corpus_sha256": "8c233c96125fca5a4350fe951d7ca1f3fdbca83984468927efb671fbd6d05cca",
@@ -59,6 +86,15 @@
       "output": "snbt.parse.jsonl",
       "output_sha256": "263c55f8b330f1953d6b9e666bc8b9e620ed48abeb357cf28df80e40dc8958a8",
       "output_n": 170
+    },
+    {
+      "op": "xp.curves",
+      "corpus": "corpus/xp.curves.jsonl",
+      "corpus_sha256": "5a7eb8f3ef93f33ba97f31470815933ed713b7c1d122f7c250480f697ee881b4",
+      "corpus_n": 955,
+      "output": "xp.curves.jsonl",
+      "output_sha256": "1252ac0666b73a0204cd3072a01d710dd2e736ca048be3ce19f725cc9c750723",
+      "output_n": 955
     }
   ]
 }

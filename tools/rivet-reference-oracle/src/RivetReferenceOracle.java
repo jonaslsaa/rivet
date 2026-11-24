@@ -112,11 +112,11 @@ public final class RivetReferenceOracle {
 
     /** Runs an op on one request. {@code dec} receives optional human-readable decimals for float fields. */
     @FunctionalInterface
-    private interface Handler {
+    interface Handler {
         JsonObject run(JsonObject request, JsonObject dec) throws Exception;
     }
 
-    private record Op(String name, List<String> resultKeys, Handler handler, Predicate<Exception> rejection) {
+    record Op(String name, List<String> resultKeys, Handler handler, Predicate<Exception> rejection) {
     }
 
     private static final List<String> TAG_KEYS = List.of("tag_id", "tag_type", "snbt", "pretty_snbt");
@@ -187,6 +187,9 @@ public final class RivetReferenceOracle {
             (request, dec) -> BrigadierDispatchOp.run(request),
             BrigadierDispatchOp::isRejection
         ));
+        for (Op op : EntityOps.ops()) {
+            register(ops, op);
+        }
         return Collections.unmodifiableMap(ops);
     }
 
@@ -726,7 +729,7 @@ public final class RivetReferenceOracle {
      * from the vanilla data pack: static registries plus the worldgen layer.
      * Initialized on first use so ops that need no registry never pay for it.
      */
-    private static final class ServerRegistries {
+    static final class ServerRegistries {
         /**
          * Loading logs to the process's stdout ("Found new data pack ...");
          * live mode speaks JSON Lines on that stream, so logging is switched

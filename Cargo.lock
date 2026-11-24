@@ -674,6 +674,7 @@ dependencies = [
  "rivet-protocol",
  "rivet-registry",
  "rivet-serialization",
+ "rivet-server",
  "rivet-text",
  "rivet-util",
  "rivet-world",
