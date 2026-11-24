@@ -174,7 +174,7 @@ fn process_remove_binomial<R: RandomSource>(p: f32, random: &mut R, n: f32) -> f
     if !use_bernoulli {
         let miu = f64::from(n * p).floor();
         let sigma = f64::from(n * p * (1.0_f32 - p)).sqrt();
-        let rounded = java_round_f64(miu + random.next_gaussian() * sigma) as i32;
+        let rounded = rivet_util::java_math::round(miu + random.next_gaussian() * sigma) as i32;
         drop = rounded.clamp(0, n as i32);
     } else {
         let mut y: i32 = 0;
@@ -186,20 +186,6 @@ fn process_remove_binomial<R: RandomSource>(p: f32, random: &mut R, n: f32) -> f
         }
     }
     n - (drop as f32)
-}
-
-/// Java `Math.round(double)` — `floor(x + 0.5)` for finite values, `0` for NaN.
-#[inline]
-pub(crate) fn java_round_f64(x: f64) -> i64 {
-    if x.is_nan() {
-        0
-    } else if x >= i64::MAX as f64 {
-        i64::MAX
-    } else if x <= i64::MIN as f64 {
-        i64::MIN
-    } else {
-        (x + 0.5_f64).floor() as i64
-    }
 }
 
 /// Java `Math.round(float)` — `floor(x + 0.5)` for finite values, `0` for NaN.
