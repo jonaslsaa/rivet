@@ -174,7 +174,7 @@ side is `RivetReferenceOracle`'s op registry; the Rust twins are
 `tools/rivet-reference-oracle/fixtures/ops/` (`corpus/<op>.jsonl`,
 `<op>.jsonl`, `manifest.json`, `exclusions.tsv`). Recorded today:
 `snbt.parse` (170 inputs), `nbt.decode` (40), `component.json` (62),
-`packet.reencode` (2,654) and `codec.reencode` (10,081), with corpora derived
+`packet.reencode` (2,654) and `codec.reencode` (12,309), with corpora derived
 from this tool's own corpus, the join capture, seeded generators and the
 committed data-pack seeds (`ops emit-corpus`; a test pins the committed files
 to it). The last two print per-subject tallies (one per ported packet struct
@@ -196,8 +196,11 @@ text and human decimals never compared) and must be byte-equal. A Rust panic or
 a Paper answer without a verdict is a mismatch. The first divergence names the
 op, the input id and the differing fields. Exclusions come only from the
 committed `exclusions.tsv` (`op`, `field`, `reason`, `issue`): `field` is a
-path under `result.` (Paper differs from itself) or `input:<id>` (a known Rivet
-divergence filed as a GitHub issue number; the input is not handed to Rust and
-is counted as excluded, never as matched). Each op row asserts closure (declared == executed + excluded, zero executed
+path under `result.` (Paper differs from itself), `input:<id>` (a known Rivet
+divergence filed as a GitHub issue number: counted as excluded, never as
+matched; the Rust handler still runs it and the row FAILs as stale once Rivet
+answers it exactly as Paper does) or `skip:<id>` (an input the Rust handler is
+never given: Rivet cannot survive it or its answer is random). Whole-input rows
+describe Rivet, so `ops live`'s recorded-vs-live comparison ignores them. Each op row asserts closure (declared == executed + excluded, zero executed
 is UNVERIFIED) and needs its detected tamper negative to PASS. Exit codes are
 the usual 0 PASS / 1 FAIL / 3 UNVERIFIED.

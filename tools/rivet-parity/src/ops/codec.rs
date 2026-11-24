@@ -122,17 +122,18 @@ macro_rules! entry {
 
 /// Every ported registry-free codec exposed to the op.
 ///
-/// STUB (deliberately omitted): the ported codecs that need a `RegistryOpsLookup` (holders, tags,
-/// `RegistryFileCodec`: configured features, placers, predicates, processors,
-/// biomes, density functions, the registry-bound `WorldPreset`/`LevelStem` forms),
-/// the item-component codecs that carry holder sets or sound events (`Tool`,
-/// `Repairable`, `BlocksAttacks`, `KineticWeapon`, ...), and the MapCodec-only
-/// constructors that no Java `Codec` constant wraps are not in this table.
-/// Running them needs a Rust `RegistryAccess` built to mirror Paper's frozen
-/// registries (tracked by #803); the table grows with it. Polymorphic roots
-/// (`IntProviders.CODEC`, `RuleTest.CODEC`, `ItemStack.CODEC`, ...) reach every
-/// variant codec registered under them, so those variants are verified through
-/// their root rather than listed one by one.
+/// STUB (deliberately omitted): (1) the ported codecs that need a `RegistryOpsLookup` (holders,
+/// tags, `RegistryFileCodec`: configured features, placers, predicates, processors, biomes,
+/// density functions, the registry-bound `WorldPreset`/`LevelStem` forms, and the item components
+/// that carry holder sets or sound events such as `Tool`, `Repairable`, `BlocksAttacks`,
+/// `DamageResistant`, `MapDecorations`): running them needs a Rust `RegistryAccess` that mirrors
+/// Paper's frozen registries (tracked by #803), which is a port, not a fixture; (2) the
+/// MapCodec-only constructors that no Java `Codec` constant wraps; (3) registry-free codecs not
+/// triaged into this table yet (`ClickEvent`, the `ServerStatus` forms, `NameAndId`,
+/// `WorldClocks`, `GeodeBlockSettings`, flat-world settings, ...). Polymorphic roots
+/// (`IntProviders.CODEC`, `RuleTest.CODEC`, `ItemStack.CODEC`, ...) reach every variant codec
+/// registered under them, so those variants are verified through their root rather than listed
+/// one by one.
 pub fn entries() -> Vec<Entry> {
     use rivet_registry::block_state_codec::block_state_codec;
     use rivet_registry::core::block_pos_codec;

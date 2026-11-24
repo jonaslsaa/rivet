@@ -2,8 +2,11 @@
 """Harvest codec.reencode seeds from the vanilla data pack inside the Paper jar.
 
 Writes fixtures/ops/corpus-src/codec-datapack.jsonl: {"codec", "source", "json"}
-lines, deterministic (sorted by source file). Every distinct document the
-vanilla pack feeds a codec is kept: nothing is sampled or size-capped. The Rust corpus generator
+lines, deterministic (sorted by source file). Every distinct document this script
+routes to a table codec is kept: nothing is sampled or size-capped. Routing is by
+data-pack folder and, for configured features and placement modifiers, by `type`
+(see the tables below); codecs without a router here, or without vanilla JSON,
+are covered by hand-typed corpus inputs only. The Rust corpus generator
 (rivet-parity ops emit-corpus) reads that file, so regenerating the corpus needs
 no jar; only refreshing the seeds does.
 
