@@ -122,7 +122,7 @@ macro_rules! entry {
 
 /// Every ported registry-free codec exposed to the op.
 ///
-/// STUB (deliberately omitted; the full list is #812): (1) the ported codecs that need a
+/// RivetTodo(#812): codecs deliberately not in this table: (1) the ported codecs that need a
 /// `RegistryOpsLookup` (holders, tags, `RegistryFileCodec`: configured and placed features,
 /// trunk and root placers, block predicates, state providers, processors, density functions,
 /// `GeodeBlockSettings`, the flat-world settings), tracked by #803; (2) the MapCodec-only
