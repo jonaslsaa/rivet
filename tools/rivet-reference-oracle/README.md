@@ -32,14 +32,25 @@ The tool currently supports:
   `ProtocolInfo`, decode the hex body, re-encode and answer `{name, body}`; an
   unregistered id, a decode failure or a `DecoderException` is an input
   rejection. Paper's `GlobalConfiguration` is initialised with defaults first.
+- `brigadier.dispatch` (`BrigadierDispatchOp.java`) — `{spec, input, cursor, want}`:
+  build a `CommandDispatcher<String>` from a declarative JSON spec (literals,
+  arguments with Brigadier's built-in types and bounds, `requires` as a fixed
+  boolean, `executes` result codes, redirect/fork/forward with fixed modifiers,
+  fixed suggestion providers), then answer the requested facets for `input`:
+  `run` (parse result, execute result or exception, result-consumer calls),
+  `suggestions` (at `cursor`), `usage` (`getAllUsage`/`getSmartUsage` of the node
+  at `usage_path`) and `ambiguities` (`findAmbiguities`). Brigadier's own
+  `CommandSyntaxException`s are data in the result, so the op never rejects; the
+  message text is Paper's runtime one (`SharedConstants` installs
+  `net.minecraft.commands.BrigadierExceptions`).
 
 Registry loading logs to stdout, so the first `codec.reencode`/`packet.reencode`
 request silences log4j until the registries are ready (live mode speaks JSON
 Lines on that stream). `harvest_datapack.py` extracts `codec.reencode` seeds
 from the vanilla data pack in the Paper jar into `fixtures/ops/corpus-src/`.
 
-All seven operations live in one op registry (`OPS` in
-`RivetReferenceOracle.java`). Each op declares its result-key order (the
+Every operation lives in one op registry (`OPS` in
+`RivetReferenceOracle.java`; an op may keep its handler in its own file next to it). Each op declares its result-key order (the
 canonical-JSON contract: results are re-emitted in exactly that order, an
 undeclared key or a raw floating-point number is an `unavailable` fault — floats
 travel as IEEE-754 bit hex via `f32Bits`/`f64Bits`, with human decimals only in
@@ -71,9 +82,9 @@ tools/rivet-reference-oracle/run.sh --record tools/rivet-reference-oracle/fixtur
 the Rust handlers with the recordings; `ops live` streams the corpora through a
 live oracle and also requires Paper to still reproduce the recordings;
 `rivet-oracle regen --check --only rivet-reference-oracle` re-records into scratch twice and
-byte-diffs (see `tools/rivet-oracle/README.md`). Editing this Java file changes
-the op source SHA-256 the manifest pins, so the offline check fails until the
-ops are re-recorded.
+byte-diffs (see `tools/rivet-oracle/README.md`). Editing any `src/*.java` file changes
+the op source SHA-256 the manifest pins (the SHA-256 of the `sha256sum src/*.java`
+listing), so the offline check fails until the ops are re-recorded.
 
 It compiles against `working/Paper/paper-server/build/libs/paper-server-*.jar`
 and uses libraries materialized by the M0 Paper run under

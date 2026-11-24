@@ -28,6 +28,8 @@
 //! deliberately broken Rust handler and passes only when the comparator
 //! detects and names it.
 
+pub mod brigadier;
+pub mod brigadier_corpus;
 pub mod codec;
 pub mod codec_corpus;
 pub mod compare;
@@ -54,10 +56,30 @@ pub fn ops_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../rivet-reference-oracle/fixtures/ops")
 }
 
-/// The Java file holding every op's source (its SHA-256 is pinned per recording).
+/// The directory holding the oracle's Java sources (its digest is pinned per recording).
 pub fn op_source() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../rivet-reference-oracle/src/RivetReferenceOracle.java")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../rivet-reference-oracle/src")
+}
+
+/// The op source digest `RivetReferenceOracle.sourceDigest` pins: the SHA-256
+/// of the `<sha256>  <file name>\n` listing of the directory's `*.java` files in
+/// name order (what `sha256sum src/*.java | sha256sum` prints).
+fn source_digest(dir: &Path) -> Result<String, String> {
+    let mut names = Vec::new();
+    for entry in fs::read_dir(dir).map_err(|e| format!("cannot list {}: {e}", dir.display()))? {
+        let name = entry.map_err(|e| e.to_string())?.file_name();
+        if name.to_string_lossy().ends_with(".java") {
+            names.push(name);
+        }
+    }
+    names.sort();
+    let mut listing = String::new();
+    for name in names {
+        let path = dir.join(&name);
+        let bytes = fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        listing += &format!("{}  {}\n", sha256_hex(&bytes), name.to_string_lossy());
+    }
+    Ok(sha256_hex(listing.as_bytes()))
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -196,14 +218,14 @@ pub fn load_fixtures(dir: &Path, op_source: &Path) -> Result<Vec<OpFixture>, Loa
             "ops manifest is not format-1 `oracle-ops`".into(),
         ));
     }
-    let source = fs::read(op_source).map_err(|e| {
+    let source = source_digest(op_source).map_err(|e| {
         LoadError::Invalid(format!(
             "cannot read op source {}: {e}",
             op_source.display()
         ))
     })?;
     let pinned_source = manifest_str(&manifest, "op_source_sha256")?;
-    if sha256_hex(&source) != pinned_source {
+    if source != pinned_source {
         return Err(LoadError::Invalid(format!(
             "op source {} changed since the ops were recorded (manifest pins {pinned_source}); re-record with `tools/rivet-reference-oracle/run.sh --record`",
             op_source.display()
@@ -570,11 +592,10 @@ pub fn live(
         // the first input that matched, have the hook corrupt that response
         // line, and require the comparator to detect and name the input.
         let clean = compare::compare(&fixture.op, &paper, &actual, exclusions);
-        let negative = match fixture
-            .corpus
-            .iter()
-            .position(|entry| !clean.mismatched_ids.contains(&entry.id))
-        {
+        let negative = match fixture.corpus.iter().position(|entry| {
+            !clean.mismatched_ids.contains(&entry.id)
+                && !compare::input_excluded(&fixture.op, &entry.id, exclusions)
+        }) {
             Some(index) => {
                 oracle
                     .client()
@@ -691,6 +712,7 @@ pub fn emit_corpus() -> Result<Vec<(&'static str, String)>, String> {
     }
 
     Ok(vec![
+        ("brigadier.dispatch", brigadier_corpus::emit()?),
         ("codec.reencode", codec_corpus::emit()?),
         ("component.json", component),
         ("nbt.decode", decode),
@@ -1130,7 +1152,7 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let source = scratch.path().join("RivetReferenceOracle.java");
         fs::write(&source, "// edited without re-recording\n").unwrap();
-        match load_fixtures(&ops_dir(), &source) {
+        match load_fixtures(&ops_dir(), scratch.path()) {
             Err(LoadError::Invalid(m)) => {
                 assert!(m.contains("changed since the ops were recorded"), "{m}")
             }

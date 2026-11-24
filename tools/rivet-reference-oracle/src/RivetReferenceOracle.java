@@ -69,8 +69,12 @@ public final class RivetReferenceOracle {
     private static final int MAX_BASE64_CHARS = ((MAX_NBT_BYTES + 2) / 3) * 4;
     private static final Gson GSON = new GsonBuilder().disableHtmlEscaping().create();
     private static final Gson PRETTY = new GsonBuilder().disableHtmlEscaping().setPrettyPrinting().create();
-    /** Repo-relative path of this file: every op's Java source lives here, so its SHA-256 is the op source hash. */
-    private static final String OP_SOURCE = "tools/rivet-reference-oracle/src/RivetReferenceOracle.java";
+    /**
+     * Repo-relative directory of the oracle's Java sources. The op source hash is the SHA-256 of
+     * the listing {@code <sha256>  <file name>\n} of its {@code *.java} files in name order
+     * (what {@code sha256sum src/*.java | sha256sum} prints), so an op may live in its own file.
+     */
+    private static final String OP_SOURCE = "tools/rivet-reference-oracle/src";
     private static final TagParser<Tag> SNBT_PARSER = TagParser.create(NbtOps.INSTANCE);
 
     /**
@@ -173,6 +177,15 @@ public final class RivetReferenceOracle {
             List.of("name", "body"),
             (request, dec) -> packetReencode(request),
             error -> error instanceof PacketRejection
+        ));
+        // `brigadier.dispatch`: a declarative dispatcher spec, one command
+        // string, facets parse/execute, suggestions, usage, ambiguities.
+        // Brigadier's own exceptions are data inside the result.
+        register(ops, new Op(
+            "brigadier.dispatch",
+            BrigadierDispatchOp.RESULT_KEYS,
+            (request, dec) -> BrigadierDispatchOp.run(request),
+            BrigadierDispatchOp::isRejection
         ));
         return Collections.unmodifiableMap(ops);
     }
@@ -390,7 +403,7 @@ public final class RivetReferenceOracle {
         manifest.addProperty("paper", requiredProperty("rivet.paper.pin"));
         manifest.addProperty("paper_commit", requiredProperty("rivet.paper.commit"));
         manifest.addProperty("op_source", OP_SOURCE);
-        manifest.addProperty("op_source_sha256", sha256(Files.readAllBytes(Path.of(requiredProperty("rivet.oracle.source")))));
+        manifest.addProperty("op_source_sha256", sourceDigest(Path.of(requiredProperty("rivet.oracle.source"))));
         manifest.add("ops", entries);
         Files.writeString(outDir.resolve("manifest.json"), PRETTY.toJson(manifest) + "\n", StandardCharsets.UTF_8);
 
@@ -424,6 +437,18 @@ public final class RivetReferenceOracle {
             line.add("detail", detail);
         }
         return line;
+    }
+
+    private static String sourceDigest(final Path sourceDir) throws Exception {
+        List<Path> files;
+        try (var listing = Files.list(sourceDir)) {
+            files = listing.filter(path -> path.getFileName().toString().endsWith(".java")).sorted().toList();
+        }
+        StringBuilder entries = new StringBuilder();
+        for (Path file : files) {
+            entries.append(sha256(Files.readAllBytes(file))).append("  ").append(file.getFileName()).append('\n');
+        }
+        return sha256(entries.toString().getBytes(StandardCharsets.UTF_8));
     }
 
     private static String sha256(final byte[] bytes) throws Exception {

@@ -1,0 +1,14 @@
+{"name":"usage","commands":[
+{"literal":"chain","children":[{"literal":"a","children":[{"literal":"b","children":[{"literal":"c","executes":1}]}]}]},
+{"literal":"opt","executes":0,"children":[{"argument":"x","type":{"kind":"integer"},"executes":1,"children":[{"argument":"y","type":{"kind":"integer"},"executes":2,"children":[{"argument":"z","type":{"kind":"integer"},"executes":3}]}]}]},
+{"literal":"branch","children":[{"literal":"left","executes":1},{"literal":"right","executes":2},{"argument":"any","type":{"kind":"string","mode":"word"},"executes":3}]},
+{"literal":"same","children":[{"literal":"one","children":[{"argument":"n","type":{"kind":"integer"},"executes":1}]},{"literal":"two","children":[{"argument":"n","type":{"kind":"integer"},"executes":2}]}]},
+{"literal":"optmulti","executes":0,"children":[{"literal":"a","executes":1},{"literal":"b","executes":2}]},
+{"literal":"mixed","children":[{"argument":"x","type":{"kind":"integer"},"children":[{"literal":"p","executes":1},{"literal":"q","executes":2}]},{"literal":"lit","children":[{"argument":"y","type":{"kind":"string","mode":"word"},"executes":3}]}]},
+{"literal":"restricted","children":[{"literal":"open","executes":1},{"literal":"closed","requires":false,"executes":2},{"argument":"arg","type":{"kind":"integer"},"requires":false,"executes":3}]},
+{"literal":"allclosed","requires":false,"children":[{"literal":"x","executes":1},{"literal":"y","executes":2}]},
+{"literal":"redir","redirect":{"to":"chain","kind":"plain"}},
+{"literal":"redirroot","redirect":{"to":"root","kind":"plain"}},
+{"literal":"withredir","executes":1,"children":[{"literal":"sub","redirect":{"to":"opt","kind":"plain"}},{"literal":"tail","redirect":{"to":"root","kind":"plain"}}]},
+{"literal":"deepopt","executes":0,"children":[{"literal":"a","executes":1,"children":[{"literal":"b","executes":2}]}]}
+]}

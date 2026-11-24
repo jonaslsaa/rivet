@@ -41,6 +41,7 @@ pub fn handler(op: &str) -> Option<Handler> {
         "component.json" => Some(component_json),
         "packet.reencode" => Some(super::packet::packet_reencode),
         "codec.reencode" => Some(super::codec::codec_reencode),
+        "brigadier.dispatch" => Some(super::brigadier::brigadier_dispatch),
         _ => None,
     }
 }
@@ -51,6 +52,7 @@ pub fn subject(op: &str, request: &Map<String, Value>) -> Option<String> {
     match op {
         "packet.reencode" => super::packet::subject_of(request),
         "codec.reencode" => super::codec::subject_of(request),
+        "brigadier.dispatch" => super::brigadier::subject_of(request),
         _ => None,
     }
 }
