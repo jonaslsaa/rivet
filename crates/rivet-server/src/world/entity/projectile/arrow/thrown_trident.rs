@@ -13,17 +13,22 @@
 //! - `DealtDamage` NBT persistence
 
 use rivet_nbt::compound_tag::CompoundTag;
+use rivet_registry::world::phys::HitResultBehavior;
+use rivet_registry::world::phys::hit_result::Type as HitResultType;
 use rivet_util::random::RandomSource;
 
+use crate::world::entity::entity_id::EntityId;
 use crate::world::entity::projectile::arrow::abstract_arrow::{AbstractArrow, ArrowHooks, Pickup};
-use crate::world::entity::projectile::phys::{
-    BlockHitResult, ClipBlock, Direction, EntityHitResult, EntityId, HitResult, Vec3,
-};
+use crate::world::entity::projectile::phys::{ClipBlock, HitResult};
 use crate::world::entity::projectile::projectile_deflection::ProjectileDeflection;
 use crate::world::entity::projectile::projectile_util;
 use crate::world::entity::projectile::world_view::{
     DamageHandoff, DamageKind, EntitySnapshot, PickupItem, ProjectileWorld,
 };
+use crate::world::phys::entity_hit_result::EntityHitResult;
+use rivet_registry::core::Direction;
+use rivet_registry::world::phys::BlockHitResult;
+use rivet_registry::world::phys::Vec3;
 
 /// `TridentItem.BASE_DAMAGE`.
 pub const TRIDENT_BASE_DAMAGE: f32 = 8.0;
@@ -97,7 +102,7 @@ impl ThrownTrident {
                     .abstract_arrow
                     .projectile
                     .position
-                    .distance_to(owner.eye_position)
+                    .distance_to(&owner.eye_position)
                     < owner.bb_width + 1.0
             {
                 self.abstract_arrow.projectile.discard();
@@ -107,7 +112,7 @@ impl ThrownTrident {
             self.abstract_arrow.set_no_physics(true);
             let vec = owner
                 .eye_position
-                .subtract(self.abstract_arrow.projectile.position);
+                .subtract(&self.abstract_arrow.projectile.position);
             let new_pos = self.abstract_arrow.projectile.position.add_xyz(
                 0.0,
                 vec.y * 0.015 * loyalty as f64,
@@ -121,7 +126,7 @@ impl ThrownTrident {
                 .projectile
                 .delta_movement
                 .scale(0.95)
-                .add(vec.normalize().scale(acc));
+                .add(&vec.normalize().scale(acc));
             self.client_side_return_trident_tick_count =
                 self.client_side_return_trident_tick_count.wrapping_add(1);
         }
@@ -145,8 +150,10 @@ impl ThrownTrident {
         }
 
         if self.abstract_arrow.in_ground && physics_enabled {
-            let block_pos = crate::world::entity::projectile::phys::BlockPos::containing(
-                self.abstract_arrow.projectile.position,
+            let block_pos = rivet_registry::core::BlockPos::containing(
+                self.abstract_arrow.projectile.position.x,
+                self.abstract_arrow.projectile.position.y,
+                self.abstract_arrow.projectile.position.z,
             );
             let current_state = world.get_block_state_id(block_pos);
             if self.abstract_arrow.last_block_state_id != current_state
@@ -164,7 +171,7 @@ impl ThrownTrident {
 
         let initial_position = self.abstract_arrow.projectile.position;
         let movement = self.abstract_arrow.projectile.delta_movement;
-        let next_position = initial_position.add(movement);
+        let next_position = initial_position.add(&movement);
 
         let block_hit = if physics_enabled {
             world.clip_including_border(
@@ -177,14 +184,18 @@ impl ThrownTrident {
             BlockHitResult::miss(
                 next_position,
                 Direction::Up,
-                crate::world::entity::projectile::phys::BlockPos::containing(next_position),
+                rivet_registry::core::BlockPos::containing(
+                    next_position.x,
+                    next_position.y,
+                    next_position.z,
+                ),
             )
         };
 
-        let target_pos = if block_hit.miss {
+        let target_pos = if block_hit.get_type() == HitResultType::Miss {
             next_position
         } else {
-            block_hit.location
+            block_hit.get_location()
         };
 
         let entity_hit = if self.dealt_damage {
@@ -194,7 +205,7 @@ impl ThrownTrident {
                 .abstract_arrow
                 .projectile
                 .bounding_box
-                .expand_towards(movement)
+                .expand_towards(&movement)
                 .inflate(1.0);
             let margin = projectile_util::compute_margin(self.abstract_arrow.projectile.tick_count);
             projectile_util::get_entity_hit_result(
@@ -215,11 +226,11 @@ impl ThrownTrident {
                 .projectile
                 .evaluate_deflection_or_world_border(world, &hit, true, random);
             if deflection == ProjectileDeflection::None {
-                self.abstract_arrow.projectile.set_pos(eh.location);
+                self.abstract_arrow.projectile.set_pos(eh.get_location());
                 self.on_hit_entity(world, random, eh);
                 self.abstract_arrow.projectile.on_hit_common(world, &hit);
             }
-        } else if !block_hit.miss {
+        } else if !(block_hit.get_type() == HitResultType::Miss) {
             let hit = HitResult::Block(block_hit);
             let deflection = self
                 .abstract_arrow
@@ -275,7 +286,7 @@ impl ThrownTrident {
             knockback_z: self.abstract_arrow.projectile.delta_movement.z,
         };
 
-        let outcome = world.hurt_entity(entity_hit.entity_id, handoff);
+        let outcome = world.hurt_entity(entity_hit.get_entity(), handoff);
         if outcome.hurt_applied && outcome.target_is_enderman {
             return;
         }
@@ -284,7 +295,7 @@ impl ThrownTrident {
         let current_owner = self.abstract_arrow.projectile.owner;
         self.abstract_arrow.projectile.deflect(
             ProjectileDeflection::Reverse,
-            world.get_entity(entity_hit.entity_id).as_ref(),
+            world.get_entity(entity_hit.get_entity()).as_ref(),
             current_owner,
             false,
             random,
@@ -293,7 +304,7 @@ impl ThrownTrident {
             .abstract_arrow
             .projectile
             .delta_movement
-            .multiply(0.02, 0.2, 0.02);
+            .multiply_xyz(0.02, 0.2, 0.02);
     }
 
     /// `ThrownTrident.tickDespawn()`: loyal tridents with `Pickup::Allowed` never despawn.

@@ -4,16 +4,20 @@
 //! `ThrownTrident`, etc.) per `OWNERSHIP.md` composition rules.
 
 use rivet_nbt::compound_tag::CompoundTag;
+use rivet_registry::world::phys::HitResultBehavior;
+use rivet_registry::world::phys::hit_result::Type as HitResultType;
 use rivet_util::mth;
 use rivet_util::random::RandomSource;
 
-use crate::world::entity::projectile::phys::{
-    Aabb, BlockHitResult, EntityId, EntityUuid, HitResult, Vec3,
-};
+use crate::world::entity::entity_id::EntityId;
+use crate::world::entity::projectile::phys::{EntityUuid, HitResult};
 use crate::world::entity::projectile::projectile_deflection::ProjectileDeflection;
 use crate::world::entity::projectile::world_view::{
     EntitySnapshot, ProjectileGameEvent, ProjectileWorld,
 };
+use rivet_registry::world::phys::AABB;
+use rivet_registry::world::phys::BlockHitResult;
+use rivet_registry::world::phys::Vec3;
 
 /// Paper `EntityReference<Entity>`: stores persistent UUID and optional cached runtime ID.
 ///
@@ -50,7 +54,7 @@ pub struct ProjectileState {
     pub delta_movement: Vec3,
     pub bb_width: f64,
     pub bb_height: f64,
-    pub bounding_box: Aabb,
+    pub bounding_box: AABB,
     pub y_rot: f32,
     pub x_rot: f32,
     pub y_rot_o: f32,
@@ -71,7 +75,8 @@ pub struct ProjectileState {
 
 impl ProjectileState {
     pub fn new(id: EntityId, position: Vec3, bb_width: f64, bb_height: f64) -> Self {
-        let bounding_box = Aabb::from_entity_pos(position, bb_width, bb_height);
+        let bounding_box =
+            crate::world::entity::projectile::phys::bounding_box_at(position, bb_width, bb_height);
         Self {
             id,
             position,
@@ -100,7 +105,11 @@ impl ProjectileState {
     /// Updates `position` and recomputes `bounding_box` around it (`Entity.setPos`).
     pub fn set_pos(&mut self, pos: Vec3) {
         self.position = pos;
-        self.bounding_box = Aabb::from_entity_pos(pos, self.bb_width, self.bb_height);
+        self.bounding_box = crate::world::entity::projectile::phys::bounding_box_at(
+            pos,
+            self.bb_width,
+            self.bb_height,
+        );
     }
 
     /// Marks the projectile discarded (`Entity.discard`).
@@ -255,7 +264,7 @@ impl ProjectileState {
 
         let search = self
             .bounding_box
-            .expand_towards(self.delta_movement)
+            .expand_towards(&self.delta_movement)
             .inflate(1.0);
         for entity in world.get_entities(self.id, search) {
             if !entity.spectator
@@ -314,7 +323,7 @@ impl ProjectileState {
     ) -> ProjectileDeflection {
         match hit_result {
             HitResult::Entity(entity_hit) => {
-                if let Some(target) = world.get_entity(entity_hit.entity_id)
+                if let Some(target) = world.get_entity(entity_hit.get_entity())
                     && target.deflection != ProjectileDeflection::None
                 {
                     let new_owner = Some(EntityReference::from_snapshot(&target));
@@ -325,7 +334,7 @@ impl ProjectileState {
                 ProjectileDeflection::None
             }
             HitResult::Block(block_hit) => {
-                if should_bounce_on_world_border && block_hit.world_border_hit {
+                if should_bounce_on_world_border && block_hit.is_world_border_hit() {
                     let current_owner = self.owner;
                     if self.deflect(
                         ProjectileDeflection::Reverse,
@@ -349,7 +358,7 @@ impl ProjectileState {
     pub fn on_hit_common<W: ProjectileWorld>(&self, world: &mut W, hit_result: &HitResult) {
         match hit_result {
             HitResult::Entity(entity_hit) => {
-                if let Some(target) = world.get_entity(entity_hit.entity_id)
+                if let Some(target) = world.get_entity(entity_hit.get_entity())
                     && target.is_redirectable_projectile
                 {
                     let owner_id = self.get_owner(world).map(|o| o.id);
@@ -357,14 +366,14 @@ impl ProjectileState {
                 }
                 world.emit_game_event(ProjectileGameEvent::ProjectileLandEntity {
                     projectile_id: self.id,
-                    location: entity_hit.location,
+                    location: entity_hit.get_location(),
                 });
             }
             HitResult::Block(block_hit) => {
-                let state_id = world.get_block_state_id(block_hit.block_pos);
+                let state_id = world.get_block_state_id(block_hit.get_block_pos());
                 world.emit_game_event(ProjectileGameEvent::ProjectileLandBlock {
                     projectile_id: self.id,
-                    block_pos: block_hit.block_pos,
+                    block_pos: block_hit.get_block_pos(),
                     block_state_id: state_id,
                 });
             }
@@ -429,7 +438,7 @@ fn java_round_f32(x: f32) -> i32 {
 
 /// Helper to construct a block hit result in tests or callers.
 pub fn block_hit_to_result(hit: BlockHitResult) -> HitResult {
-    if hit.miss {
+    if hit.get_type() == HitResultType::Miss {
         HitResult::Miss(hit)
     } else {
         HitResult::Block(hit)

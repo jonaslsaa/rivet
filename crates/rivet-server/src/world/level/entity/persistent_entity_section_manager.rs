@@ -8,7 +8,7 @@
 //! passenger tree reconstruction on save, and observable `LevelCallback` events.
 
 use crate::world::entity::entity_record::{
-    Aabb, EntityRemovalReason, EntityStorageError, StoredEntityRecord,
+    EntityRemovalReason, EntityStorageError, StoredEntityRecord,
 };
 use crate::world::level::chunk::storage::entity_storage::{EntityRegionBackend, EntityStorage};
 use crate::world::level::entity::chunk_entities::ChunkEntities;
@@ -16,7 +16,10 @@ use crate::world::level::entity::entity_lookup::EntityLookup;
 use crate::world::level::entity::entity_section::{EntitySectionStorage, IterationControl};
 use crate::world::level::entity::visibility::Visibility;
 use indexmap::IndexMap;
-use rivet_registry::core::{ChunkPos, Vec3};
+use rivet_registry::core::ChunkPos;
+
+use rivet_registry::world::phys::AABB;
+use rivet_registry::world::phys::Vec3;
 use rivet_util::mth::Uuid;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
@@ -539,7 +542,7 @@ impl<B: EntityRegionBackend> PersistentEntitySectionManager<B> {
     /// Queries accessible entities whose bounding boxes intersect `bounds`, using
     /// Paper's `EntitySectionStorage.forEachAccessibleNonEmptySection` bounds expansion.
     #[must_use]
-    pub fn get_entities_in_bounds(&self, bounds: Aabb) -> Vec<&StoredEntityRecord> {
+    pub fn get_entities_in_bounds(&self, bounds: AABB) -> Vec<&StoredEntityRecord> {
         let mut results = Vec::new();
         self.section_storage.for_each_accessible_non_empty_section(
             bounds,

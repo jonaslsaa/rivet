@@ -1,6 +1,6 @@
 //! Port of `net.minecraft.world.entity.EntityAttachment` and `EntityAttachments` (Paper 26.2, commit `0a993450f129c4942c2a9ed45ba047412b4667cf`).
 
-use rivet_registry::core::Vec3;
+use rivet_registry::world::phys::Vec3;
 use rivet_util::mth;
 
 /// Port of `net.minecraft.world.entity.EntityAttachment`.

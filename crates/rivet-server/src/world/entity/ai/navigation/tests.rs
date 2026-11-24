@@ -9,11 +9,13 @@ use crate::world::entity::ai::control::control::{
     BodyRotationControl, FlyingMoveControl, JumpControl, LookControl, MoveControl, MoveOperation,
     SmoothSwimmingLookControl, SmoothSwimmingMoveControl, rotate_towards, rotlerp,
 };
-use crate::world::entity::ai::goal::context::{BlockPos, EntityId, GoalRandom, Vec3};
+use crate::world::entity::ai::goal::context::BlockPos;
+use crate::world::entity::ai::goal::context::GoalRandom;
 use crate::world::entity::ai::navigation::path_navigation::PathNavigation;
 use crate::world::entity::ai::targeting::targeting_conditions::{
     Difficulty, TargetEntityView, TargetingConditions,
 };
+use crate::world::entity::entity_id::EntityId;
 use crate::world::level::pathfinder::node::{BinaryHeap, Node, NodeArena, Target};
 use crate::world::level::pathfinder::node_evaluator::{
     AmphibiousNodeEvaluator, FlyNodeEvaluator, SwimNodeEvaluator, WalkNodeEvaluator,
@@ -25,6 +27,7 @@ use crate::world::level::pathfinder::path_type::{PathType, PathTypeCache};
 use crate::world::level::pathfinder::world_view::{
     BlockPathInfo, MobPathingState, PathWorldView, PathfindingContext,
 };
+use rivet_registry::world::phys::{AABB, Vec3};
 
 struct TestWorld {
     blocks: HashMap<BlockPos, BlockPathInfo>,
@@ -98,7 +101,7 @@ impl PathWorldView for TestWorld {
 
     /// Block shapes are `[0, 1] x [0, collision_max_y] x [0, 1]` boxes. The
     /// fixture's world border filters targets only and has no collision shape.
-    fn is_aabb_collision_free(&self, aabb: crate::world::entity::ai::goal::context::Aabb) -> bool {
+    fn is_aabb_collision_free(&self, aabb: rivet_registry::world::phys::AABB) -> bool {
         use rivet_util::mth;
 
         let min_x = mth::floor_d(aabb.min_x + 1.0e-7);
@@ -145,7 +148,7 @@ impl PathWorldView for TestWorld {
 /// `VoxelShape.clip(from, to, pos) != null` for the single box
 /// `[0, 1] x [0, height] x [0, 1]` offset by `pos`.
 fn voxel_box_clips(pos: BlockPos, height: f64, from: Vec3, to: Vec3) -> bool {
-    use crate::world::entity::projectile::phys::{Aabb as PhysAabb, Vec3 as PhysVec3};
+    use rivet_registry::world::phys::{AABB as PhysAabb, Vec3 as PhysVec3};
 
     let (dx, dy, dz) = (to.x - from.x, to.y - from.y, to.z - from.z);
     if dx * dx + dy * dy + dz * dz < 1.0e-7 {
@@ -158,11 +161,11 @@ fn voxel_box_clips(pos: BlockPos, height: f64, from: Vec3, to: Vec3) -> bool {
         from.y + dy * 0.001,
         from.z + dz * 0.001,
     );
-    shape.contains(test_point)
+    shape.contains(&test_point)
         || shape
             .clip(
-                PhysVec3::new(from.x, from.y, from.z),
-                PhysVec3::new(to.x, to.y, to.z),
+                &PhysVec3::new(from.x, from.y, from.z),
+                &PhysVec3::new(to.x, to.y, to.z),
             )
             .is_some()
 }
@@ -1193,15 +1196,13 @@ fn ground_navigation_does_not_prematurely_cut_corner_around_wall() {
 
 #[test]
 fn walk_collision_cache_distinguishes_aabbs_with_same_min_corner() {
-    use crate::world::entity::ai::goal::Aabb;
-
     let mut world = TestWorld::flat(0);
     // Low ceiling block at (0, 3, 0)
     world.set(0, 3, 0, BlockPathInfo::SOLID);
 
     let mut eval = WalkNodeEvaluator::new();
-    let short_box = Aabb::new(0.2, 1.0, 0.2, 0.8, 2.8, 0.8);
-    let tall_box = Aabb::new(0.2, 1.0, 0.2, 0.8, 3.5, 0.8);
+    let short_box = AABB::new(0.2, 1.0, 0.2, 0.8, 2.8, 0.8);
+    let tall_box = AABB::new(0.2, 1.0, 0.2, 0.8, 3.5, 0.8);
 
     assert!(!eval.has_collisions(&world, short_box));
     assert!(eval.has_collisions(&world, tall_box));
@@ -1245,18 +1246,16 @@ fn wall_climber_fallback_keeps_climbing_toward_elevated_target() {
 
 #[test]
 fn aabb_collision_free_detects_protruding_fence_top_from_cell_below() {
-    use crate::world::entity::ai::goal::Aabb;
-
     let mut world = TestWorld::flat(0);
     // Fence at (0, 1, 0) protrudes to y = 2.5
     world.set(0, 1, 0, BlockPathInfo::FENCE);
 
     // Box starts at y = 2.1 (in cell y = 2, above fence's cell y = 1) and overlaps 2.1..2.5
-    let overlapping = Aabb::new(0.2, 2.1, 0.2, 0.8, 3.0, 0.8);
+    let overlapping = AABB::new(0.2, 2.1, 0.2, 0.8, 3.0, 0.8);
     assert!(!world.is_aabb_collision_free(overlapping));
 
     // Box starting at y = 2.5 is clear of the fence top
-    let clear = Aabb::new(0.2, 2.5, 0.2, 0.8, 3.5, 0.8);
+    let clear = AABB::new(0.2, 2.5, 0.2, 0.8, 3.5, 0.8);
     assert!(world.is_aabb_collision_free(clear));
 }
 
@@ -1825,12 +1824,10 @@ fn controls_store_x_rot_through_entity_set_x_rot() {
 
 #[test]
 fn unloaded_region_cells_read_as_empty_chunk_air_outside_path_type() {
-    use crate::world::entity::ai::goal::Aabb;
-
     let mut world = TestWorld::flat(0);
     world.set(1, 1, 0, BlockPathInfo::UNLOADED);
     // `EmptyLevelChunk` adds no collision.
-    assert!(world.is_aabb_collision_free(Aabb::new(1.2, 1.0, 0.2, 1.8, 1.9, 0.8)));
+    assert!(world.is_aabb_collision_free(AABB::new(1.2, 1.0, 0.2, 1.8, 1.9, 0.8)));
 
     // SwimNodeEvaluator: an unloaded (air) cell above water is BREACH.
     use crate::world::level::pathfinder::node_evaluator::NodeEvaluator;

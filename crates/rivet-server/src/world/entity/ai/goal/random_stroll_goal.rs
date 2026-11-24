@@ -1,8 +1,9 @@
 //! Mirrors `net.minecraft.world.entity.ai.goal.RandomStrollGoal` and
 //! `net.minecraft.world.entity.ai.goal.WaterAvoidingRandomStrollGoal`.
 
-use super::context::{GoalContext, GoalRandom, Vec3};
+use super::context::{GoalContext, GoalRandom};
 use super::goal::{Goal, GoalFlags, reduced_tick_delay};
+use rivet_registry::world::phys::Vec3;
 
 /// Mirrors `net.minecraft.world.entity.ai.goal.RandomStrollGoal`.
 #[derive(Debug, Clone)]

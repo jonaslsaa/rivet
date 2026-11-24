@@ -4463,7 +4463,7 @@ fn run_spawn_population(
                         }
                     };
                     entity.snap_to(
-                        rivet_registry::core::Vec3::new(fx, y as f64, fz),
+                        rivet_registry::world::phys::Vec3::new(fx, y as f64, fz),
                         random.next_float() * 360.0,
                         0.0,
                     );

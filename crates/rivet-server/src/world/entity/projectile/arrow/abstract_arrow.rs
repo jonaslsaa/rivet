@@ -2,7 +2,7 @@
 //!
 //! Preserves exact Paper semantics for:
 //! - Deterministic `stepMoveAndHit`: block clip first, multi-entity sweep with
-//!   `ProjectileUtil::compute_margin`, stable sort by `initial_position.distance_to_sqr(entity.position)`
+//!   `ProjectileUtil::compute_margin`, stable sort by `initial_position.distance_to_sqr(&entity.position)`
 //! - Piercing (`pierce_level`, `pierced_entity_ids` preserving insertion order via `IndexSet`)
 //! - Damage calculation (`Mth::ceil_d(Mth::clamp_f64(pow * base_damage, 0.0, i32::MAX))` + crit bonus)
 //! - Block sticking (`in_ground`, `last_block_state_id`, backoff by `signum(movement) * 0.05`,
@@ -15,18 +15,23 @@
 
 use indexmap::IndexSet;
 use rivet_nbt::compound_tag::CompoundTag;
+use rivet_registry::world::phys::HitResultBehavior;
+use rivet_registry::world::phys::hit_result::Type as HitResultType;
 use rivet_util::mth;
 use rivet_util::random::RandomSource;
 
-use crate::world::entity::projectile::phys::{
-    BlockHitResult, BlockPos, ClipBlock, EntityHitResult, EntityId, HitResult, Vec3, java_signum,
-};
+use crate::world::entity::entity_id::EntityId;
+use crate::world::entity::projectile::phys::{ClipBlock, HitResult, java_signum};
 use crate::world::entity::projectile::projectile::ProjectileState;
 use crate::world::entity::projectile::projectile_deflection::ProjectileDeflection;
 use crate::world::entity::projectile::projectile_util;
 use crate::world::entity::projectile::world_view::{
     DamageHandoff, DamageKind, EntitySnapshot, PickupItem, ProjectileWorld,
 };
+use crate::world::phys::entity_hit_result::EntityHitResult;
+use rivet_registry::core::BlockPos;
+use rivet_registry::world::phys::BlockHitResult;
+use rivet_registry::world::phys::Vec3;
 
 /// `AbstractArrow.ARROW_BASE_DAMAGE`.
 pub const ARROW_BASE_DAMAGE: f64 = 2.0;
@@ -176,7 +181,7 @@ impl AbstractArrow {
     pub fn start_falling<R: RandomSource>(&mut self, random: &mut R) {
         self.in_ground = false;
         let delta = self.projectile.delta_movement;
-        self.projectile.delta_movement = delta.multiply(
+        self.projectile.delta_movement = delta.multiply_xyz(
             (random.next_float() * 0.2_f32) as f64,
             (random.next_float() * 0.2_f32) as f64,
             (random.next_float() * 0.2_f32) as f64,
@@ -230,7 +235,11 @@ impl AbstractArrow {
             self.projectile.x_rot_o = self.projectile.x_rot;
         }
 
-        let block_pos = BlockPos::containing(self.projectile.position);
+        let block_pos = BlockPos::containing(
+            self.projectile.position.x,
+            self.projectile.position.y,
+            self.projectile.position.z,
+        );
         let current_state = world.get_block_state_id(block_pos);
 
         if self.shake_time > 0 {
@@ -256,7 +265,7 @@ impl AbstractArrow {
         }
 
         let initial_position = self.projectile.position;
-        let next_position = initial_position.add(movement);
+        let next_position = initial_position.add(&movement);
         let block_hit = if physics_enabled {
             world.clip_including_border(
                 initial_position,
@@ -267,8 +276,8 @@ impl AbstractArrow {
         } else {
             BlockHitResult::miss(
                 next_position,
-                crate::world::entity::projectile::phys::Direction::Up,
-                BlockPos::containing(next_position),
+                rivet_registry::core::Direction::Up,
+                BlockPos::containing(next_position.x, next_position.y, next_position.z),
             )
         };
 
@@ -288,10 +297,10 @@ impl AbstractArrow {
     ///
     /// Exact Paper collision ordering:
     /// 1. Start with `block_hit` from `initial_position` to `initial_position + delta`.
-    /// 2. If `block_hit` is not a miss, truncate `target_pos` to `block_hit.location`.
+    /// 2. If `block_hit` is not a miss, truncate `target_pos` to `block_hit.get_location()`.
     /// 3. Collect all candidate entities along `[initial_position, target_pos]` with
     ///    `compute_margin(tick_count)` and `include_inside = false`.
-    /// 4. Sort `entities_hit` stably by `initial_position.distance_to_sqr(entity.position)`
+    /// 4. Sort `entities_hit` stably by `initial_position.distance_to_sqr(&entity.position)`
     ///    (Java `List.sort` / TimSort).
     /// 5. Process each entity hit in sorted order until discarded, deflected, or non-piercing hit.
     /// 6. If still alive, not deflected, and `block_hit` was not a miss (and no entity stopped it),
@@ -306,16 +315,16 @@ impl AbstractArrow {
     ) {
         let initial_position = self.projectile.position;
         let movement = self.projectile.delta_movement;
-        let target_pos = if block_hit.miss {
-            initial_position.add(movement)
+        let target_pos = if block_hit.get_type() == HitResultType::Miss {
+            initial_position.add(&movement)
         } else {
-            block_hit.location
+            block_hit.get_location()
         };
 
         let search_area = self
             .projectile
             .bounding_box
-            .expand_towards(movement)
+            .expand_towards(&movement)
             .inflate(1.0);
         let margin = projectile_util::compute_margin(self.projectile.tick_count);
 
@@ -335,11 +344,11 @@ impl AbstractArrow {
         // Rust's `slice::sort_by` is stable (matching Java's TimSort on equal distances).
         entities_hit.sort_by(|a, b| {
             let da = world
-                .get_entity(a.entity_id)
-                .map_or(f64::MAX, |e| initial_position.distance_to_sqr(e.position));
+                .get_entity(a.get_entity())
+                .map_or(f64::MAX, |e| initial_position.distance_to_sqr(&e.position));
             let db = world
-                .get_entity(b.entity_id)
-                .map_or(f64::MAX, |e| initial_position.distance_to_sqr(e.position));
+                .get_entity(b.get_entity())
+                .map_or(f64::MAX, |e| initial_position.distance_to_sqr(&e.position));
             da.total_cmp(&db)
         });
 
@@ -359,7 +368,7 @@ impl AbstractArrow {
                 break;
             }
 
-            self.projectile.set_pos(entity_hit.location);
+            self.projectile.set_pos(entity_hit.get_location());
             self.on_hit_entity(world, random, hooks, entity_hit);
             self.projectile.on_hit_common(world, &hit);
 
@@ -373,7 +382,7 @@ impl AbstractArrow {
             return;
         }
 
-        if !block_hit.miss {
+        if !(block_hit.get_type() == HitResultType::Miss) {
             let hit = HitResult::Block(block_hit);
             let deflection = self
                 .projectile
@@ -428,7 +437,7 @@ impl AbstractArrow {
                 self.projectile.discard();
                 return;
             }
-            self.pierced_entity_ids.insert(entity_hit.entity_id);
+            self.pierced_entity_ids.insert(entity_hit.get_entity());
         }
 
         let causing_entity = self.projectile.get_effect_source(world);
@@ -441,13 +450,13 @@ impl AbstractArrow {
             knockback_z: self.projectile.delta_movement.z,
         };
 
-        let outcome = world.hurt_entity(entity_hit.entity_id, handoff);
+        let outcome = world.hurt_entity(entity_hit.get_entity(), handoff);
         if outcome.hurt_applied {
             if outcome.target_is_enderman {
                 return;
             }
             if outcome.target_is_living {
-                hooks.post_hurt_effects(self, world, entity_hit.entity_id);
+                hooks.post_hurt_effects(self, world, entity_hit.get_entity());
             }
             if self.pierce_level == 0 {
                 self.projectile.discard();
@@ -457,7 +466,7 @@ impl AbstractArrow {
             let current_owner = self.projectile.owner;
             self.projectile.deflect(
                 ProjectileDeflection::Reverse,
-                world.get_entity(entity_hit.entity_id).as_ref(),
+                world.get_entity(entity_hit.get_entity()).as_ref(),
                 current_owner,
                 false,
                 random,
@@ -478,8 +487,8 @@ impl AbstractArrow {
 
     /// `AbstractArrow.onHitBlock(BlockHitResult)`.
     pub fn on_hit_block<W: ProjectileWorld>(&mut self, world: &W, block_hit: BlockHitResult) {
-        self.last_block_state_id = world.get_block_state_id(block_hit.block_pos);
-        let movement = block_hit.location.subtract(self.projectile.position);
+        self.last_block_state_id = world.get_block_state_id(block_hit.get_block_pos());
+        let movement = block_hit.get_location().subtract(&self.projectile.position);
         self.projectile.delta_movement = movement;
         let offset = Vec3::new(
             java_signum(movement.x),
@@ -487,7 +496,8 @@ impl AbstractArrow {
             java_signum(movement.z),
         )
         .scale(0.05);
-        self.projectile.set_pos(block_hit.location.subtract(offset));
+        self.projectile
+            .set_pos(block_hit.get_location().subtract(&offset));
         self.in_ground = true;
         self.shake_time = SHAKE_TIME;
         self.crit_arrow = false;

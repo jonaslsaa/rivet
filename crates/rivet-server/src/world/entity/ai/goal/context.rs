@@ -7,9 +7,10 @@
 //! [`GoalContext`] into [`crate::world::entity::ai::goal::GoalSelector::tick`], and entity
 //! references are plain [`EntityId`] handles.
 
-/// Opaque entity identifier within a world tick.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct EntityId(pub u64);
+use rivet_registry::world::interaction_hand::InteractionHand;
+use rivet_registry::world::phys::{AABB, Vec3};
+
+use crate::world::entity::entity_id::EntityId;
 
 /// Opaque team identifier for scoreboard team equality checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -55,63 +56,6 @@ pub struct DamageTypeTagId(pub u32);
 /// Default `DamageTypeTags.PANIC_CAUSES` tag identifier.
 pub const DAMAGE_TYPE_TAG_PANIC_CAUSES: DamageTypeTagId = DamageTypeTagId(1);
 
-/// 3D floating-point position/velocity vector (`net.minecraft.world.phys.Vec3`).
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub struct Vec3 {
-    pub x: f64,
-    pub y: f64,
-    pub z: f64,
-}
-
-impl Vec3 {
-    pub const ZERO: Self = Self {
-        x: 0.0,
-        y: 0.0,
-        z: 0.0,
-    };
-
-    pub const fn new(x: f64, y: f64, z: f64) -> Self {
-        Self { x, y, z }
-    }
-
-    pub fn length_sqr(self) -> f64 {
-        self.x * self.x + self.y * self.y + self.z * self.z
-    }
-
-    pub fn length(self) -> f64 {
-        self.length_sqr().sqrt()
-    }
-
-    /// Mirrors `Vec3.normalize()` in Minecraft 26.2 (`length < 1.0E-5F ? ZERO : scale(1/length)`).
-    pub fn normalize(self) -> Self {
-        let len = self.length();
-        if len < 1.0e-5_f32 as f64 {
-            Self::ZERO
-        } else {
-            Self::new(self.x / len, self.y / len, self.z / len)
-        }
-    }
-
-    pub fn scale(self, factor: f64) -> Self {
-        Self::new(self.x * factor, self.y * factor, self.z * factor)
-    }
-
-    pub fn distance_to_sqr(self, other: Self) -> f64 {
-        let dx = self.x - other.x;
-        let dy = self.y - other.y;
-        let dz = self.z - other.z;
-        dx * dx + dy * dy + dz * dz
-    }
-}
-
-impl std::ops::Add for Vec3 {
-    type Output = Self;
-
-    fn add(self, other: Self) -> Self {
-        Self::new(self.x + other.x, self.y + other.y, self.z + other.z)
-    }
-}
-
 /// Integer block coordinates (`net.minecraft.core.BlockPos`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct BlockPos {
@@ -124,61 +68,6 @@ impl BlockPos {
     pub const fn new(x: i32, y: i32, z: i32) -> Self {
         Self { x, y, z }
     }
-}
-
-/// Axis-aligned bounding box (`net.minecraft.world.phys.AABB`).
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub struct Aabb {
-    pub min_x: f64,
-    pub min_y: f64,
-    pub min_z: f64,
-    pub max_x: f64,
-    pub max_y: f64,
-    pub max_z: f64,
-}
-
-impl Aabb {
-    pub const fn new(
-        min_x: f64,
-        min_y: f64,
-        min_z: f64,
-        max_x: f64,
-        max_y: f64,
-        max_z: f64,
-    ) -> Self {
-        Self {
-            min_x,
-            min_y,
-            min_z,
-            max_x,
-            max_y,
-            max_z,
-        }
-    }
-
-    /// Mirrors `AABB.unitCubeFromLowerCorner(Vec3)`.
-    pub fn unit_cube_from_lower_corner(pos: Vec3) -> Self {
-        Self::new(pos.x, pos.y, pos.z, pos.x + 1.0, pos.y + 1.0, pos.z + 1.0)
-    }
-
-    /// Mirrors `AABB.inflate(double x, double y, double z)`.
-    pub fn inflate(self, x: f64, y: f64, z: f64) -> Self {
-        Self::new(
-            self.min_x - x,
-            self.min_y - y,
-            self.min_z - z,
-            self.max_x + x,
-            self.max_y + y,
-            self.max_z + z,
-        )
-    }
-}
-
-/// Mirrors `net.minecraft.world.InteractionHand`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum InteractionHand {
-    MainHand,
-    OffHand,
 }
 
 /// Mirrors `net.minecraft.world.entity.EquipmentSlot`.
@@ -316,7 +205,7 @@ pub trait GoalContext {
     fn pos(&self) -> Vec3;
     fn eye_y(&self) -> f64;
     fn block_pos(&self) -> BlockPos;
-    fn bounding_box(&self) -> Aabb;
+    fn bounding_box(&self) -> AABB;
     fn delta_movement(&self) -> Vec3;
     fn set_delta_movement(&mut self, vx: f64, vy: f64, vz: f64);
     fn on_ground(&self) -> bool;
@@ -370,7 +259,7 @@ pub trait GoalContext {
         false
     }
     fn forget_current_target_and_refresh_universal_anger(&mut self) {}
-    fn alert_nearby_same_type_universal_anger(&mut self, _search_area: Aabb) {}
+    fn alert_nearby_same_type_universal_anger(&mut self, _search_area: AABB) {}
 
     // --- Controls & navigation ---
     fn jump(&mut self) {}
@@ -445,7 +334,7 @@ pub trait GoalContext {
     fn nearest_entity_of_type(
         &self,
         _entity_type: EntityTypeId,
-        _area: Aabb,
+        _area: AABB,
         _conditions: TargetingConditions,
         _x: f64,
         _eye_y: f64,
@@ -455,7 +344,7 @@ pub trait GoalContext {
     }
     fn alert_nearby_same_type(
         &mut self,
-        _search_area: Aabb,
+        _search_area: AABB,
         _attacker: EntityId,
         _ignored_types: &[EntityTypeId],
     ) {

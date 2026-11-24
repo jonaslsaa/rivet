@@ -10,7 +10,7 @@ use crate::world::entity::entity::{
 use crate::world::entity::entity_attachments::{EntityAttachment, EntityAttachments};
 use crate::world::entity::entity_dimensions::EntityDimensions;
 use crate::world::entity::entity_equipment::EquipmentItem;
-use crate::world::entity::entity_record::{Aabb, EntityRemovalReason};
+use crate::world::entity::entity_record::EntityRemovalReason;
 use crate::world::entity::equipment_slot::EquipmentSlot;
 use crate::world::entity::humanoid_arm::HumanoidArm;
 use crate::world::entity::living_entity::LivingEntity;
@@ -18,7 +18,10 @@ use crate::world::entity::mob::{
     MOB_FLAG_AGGRESSIVE, MOB_FLAG_LEFTHANDED, MOB_FLAG_NO_AI, Mob, MobControlFlags,
 };
 use crate::world::entity::pose::Pose;
-use rivet_registry::core::{BlockPos, Vec3};
+use rivet_registry::core::BlockPos;
+
+use rivet_registry::world::phys::AABB;
+use rivet_registry::world::phys::Vec3;
 
 fn pig_meta() -> EntityTypeMeta {
     let mut meta = EntityTypeMeta::new("minecraft:pig", 0.9, 0.9);
@@ -40,7 +43,7 @@ fn dimensions_bounding_box_eye_height_and_scaling() {
     assert!((dim.eye_height - 1.53_f32).abs() < 1e-6);
     assert_eq!(
         dim.make_bounding_box(Vec3::new(10.0, 64.0, -5.0)),
-        Aabb::new(
+        AABB::new(
             10.0 - f64::from(0.3_f32),
             64.0,
             -5.0 - f64::from(0.3_f32),

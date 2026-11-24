@@ -2,7 +2,8 @@
 
 use std::cmp::Ordering;
 
-use crate::world::entity::ai::goal::context::{BlockPos, GoalRandom};
+use crate::world::entity::ai::goal::context::BlockPos;
+use crate::world::entity::ai::goal::context::GoalRandom;
 use crate::world::level::pathfinder::node::{BinaryHeap, Node, NodeArena, Target};
 use crate::world::level::pathfinder::node_evaluator::NodeEvaluator;
 use crate::world::level::pathfinder::path::Path;

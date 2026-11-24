@@ -16,7 +16,7 @@ use crate::world::entity::entity::EntityTypeMeta;
 use crate::world::entity::entity_record::EntityRemovalReason;
 use crate::world::entity::humanoid_arm::HumanoidArm;
 use crate::world::entity::living_entity::LivingEntity;
-use rivet_registry::core::Vec3;
+use rivet_registry::world::phys::Vec3;
 use rivet_util::random::RandomSource;
 
 /// Paper `Mob.MOB_FLAG_NO_AI`.

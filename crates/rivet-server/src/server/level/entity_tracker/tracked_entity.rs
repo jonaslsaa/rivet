@@ -13,7 +13,7 @@ use crate::server::level::entity_tracker::visibility::{
     ViewerInfo, get_effective_range, is_visible_to_player,
 };
 use indexmap::IndexSet;
-use rivet_registry::core::Vec3;
+use rivet_registry::world::phys::Vec3;
 
 /// Nearby players snapshot for a chunk, mirroring Paper moonrise's
 /// `NearbyPlayers.TrackedChunk` (`updateCount` + chunk key + player list).

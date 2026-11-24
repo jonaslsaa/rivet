@@ -661,7 +661,11 @@ fn actual_world_unload_never_calls_removal_before_ack_and_retains_native_on_fail
         },
         &mut LegacyRandomSource::new(42),
     );
-    sheep.snap_to(rivet_registry::core::Vec3::new(-47.5, 64., 112.5), 90., 0.);
+    sheep.snap_to(
+        rivet_registry::world::phys::Vec3::new(-47.5, 64., 112.5),
+        90.,
+        0.,
+    );
     level
         .entity_lookup_mut()
         .unwrap()
@@ -760,7 +764,11 @@ fn actual_world_unload_never_calls_removal_before_ack_and_retains_native_on_fail
             },
             &mut LegacyRandomSource::new(42),
         );
-        sheep.snap_to(rivet_registry::core::Vec3::new(-47.5, 64., 112.5), 90., 0.);
+        sheep.snap_to(
+            rivet_registry::world::phys::Vec3::new(-47.5, 64., 112.5),
+            90.,
+            0.,
+        );
         level
             .entity_lookup_mut()
             .unwrap()

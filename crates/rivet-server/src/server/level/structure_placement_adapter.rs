@@ -311,7 +311,7 @@ impl StructurePlacementAuthority for RegionStructurePlacement<'_, '_> {
         let Some(mut entity) = self.runtime.entities.create_chest_minecart()? else {
             return Ok(());
         };
-        entity.set_initial_pos(rivet_registry::core::Vec3::new(
+        entity.set_initial_pos(rivet_registry::world::phys::Vec3::new(
             f64::from(pos.get_x()) + 0.5,
             f64::from(pos.get_y()) + 0.5,
             f64::from(pos.get_z()) + 0.5,

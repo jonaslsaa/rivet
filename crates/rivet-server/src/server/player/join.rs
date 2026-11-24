@@ -98,10 +98,12 @@ use rivet_protocol::protocol::game::clientbound_set_time::ClientboundSetTimePack
 use rivet_protocol::protocol::game::common_player_spawn_info::CommonPlayerSpawnInfo;
 use rivet_protocol::protocol::game::position_move_rotation::PositionMoveRotation;
 use rivet_registry::ResourceKey;
-use rivet_registry::core::{Difficulty, Vec3};
+use rivet_registry::core::Difficulty;
+
 use rivet_registry::holder::Holder;
 use rivet_registry::registries;
 use rivet_registry::registries::{DimensionType, Level};
+use rivet_registry::world::phys::Vec3;
 
 use crate::server::level::player_chunk_loader::PlayerChunkLoader;
 use crate::server::level::server_level::ServerLevel;
