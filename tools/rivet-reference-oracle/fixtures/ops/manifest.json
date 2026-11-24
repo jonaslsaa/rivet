@@ -4,8 +4,17 @@
   "paper": "26.2-DEV-main@0a99345",
   "paper_commit": "0a99345",
   "op_source": "tools/rivet-reference-oracle/src/RivetReferenceOracle.java",
-  "op_source_sha256": "01c811dc53fcb6dae62b46ce72d25ed6b601022d59d88f50f4b1690eeba4ab3c",
+  "op_source_sha256": "b6802640582e987591236ef57aa8bd342d5c8dd29210f6c4ffd47e6c9d79df2d",
   "ops": [
+    {
+      "op": "codec.reencode",
+      "corpus": "corpus/codec.reencode.jsonl",
+      "corpus_sha256": "0f8e1f0bee7aeee033e70ddfc423039b7ba7b3ce8bb99f7a4c4c2590ae83fa8d",
+      "corpus_n": 3499,
+      "output": "codec.reencode.jsonl",
+      "output_sha256": "188e971bbfe01efa1c37fec59a377e2e80cc58e88b467dbf2162600d25d24a1c",
+      "output_n": 3499
+    },
     {
       "op": "component.json",
       "corpus": "corpus/component.json.jsonl",
@@ -23,6 +32,15 @@
       "output": "nbt.decode.jsonl",
       "output_sha256": "5a33dc8446fdbbd5c4213e81bc2ffa82fe227c1208064c012d687acc8f53d1e3",
       "output_n": 40
+    },
+    {
+      "op": "packet.reencode",
+      "corpus": "corpus/packet.reencode.jsonl",
+      "corpus_sha256": "a05d7fd85c611cad66bf0391338ebc9ab87bc3aee837bc1b930e6fa1e4cea2d7",
+      "corpus_n": 2514,
+      "output": "packet.reencode.jsonl",
+      "output_sha256": "35dc0aef425ae51394fcf3ed892f4a2301acfe61aca3bfbd3097b85683050f09",
+      "output_n": 2514
     },
     {
       "op": "snbt.parse",

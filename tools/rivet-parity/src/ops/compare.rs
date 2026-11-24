@@ -103,8 +103,12 @@ impl Outcome {
     }
 }
 
-/// One committed exclusion: `field` (a dot path starting at `result.`, as the
-/// field diff names it) of `op` is dropped from both sides before comparison.
+/// One committed exclusion of `op`. `field` is either a dot path starting at
+/// `result.` (as the field diff names it), dropped from both sides before
+/// comparison, or `input:<id>`, which takes that whole input out of the
+/// comparison: a known divergence (or an input Rivet cannot survive) filed as
+/// `issue` and left unfixed by the verification PR. Excluded inputs are
+/// counted separately from matched and mismatched, never silently.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Exclusion {
     pub op: String,
@@ -114,8 +118,11 @@ pub struct Exclusion {
 }
 
 /// Parse the committed exclusions table (columns `op`, `field`, `reason`, `issue`, tab-separated; header
-/// first). Every row needs a reason and an issue link; an exclusion is legal
-/// only when Paper differs from itself across twin runs (VERIFICATION §2.4.3).
+/// first). Every row needs a reason and a GitHub issue number. Two kinds of
+/// row exist: `result.<path>` (a field Paper itself varies across twin runs,
+/// VERIFICATION §2.4.3) and `input:<id>` (a known Rivet divergence found by the
+/// op, filed as an issue and not fixed in the PR that records it; the input is
+/// reported as excluded, never as matched).
 pub fn parse_exclusions(text: &str) -> Result<Vec<Exclusion>, String> {
     let mut lines = text.lines();
     if lines.next() != Some("op\tfield\treason\tissue") {
@@ -141,9 +148,15 @@ pub fn parse_exclusions(text: &str) -> Result<Vec<Exclusion>, String> {
                 index + 2
             ));
         }
-        if !field.starts_with("result.") {
+        if !issue.bytes().all(|b| b.is_ascii_digit()) {
             return Err(format!(
-                "exclusions row {}: field must be a path under `result.` (the envelope is never excluded)",
+                "exclusions row {}: issue must be a GitHub issue number, got `{issue}`",
+                index + 2
+            ));
+        }
+        if !field.starts_with("result.") && !field.starts_with("input:") {
+            return Err(format!(
+                "exclusions row {}: field must be a path under `result.` or `input:<id>` (the envelope is never excluded)",
                 index + 2
             ));
         }
@@ -162,6 +175,16 @@ pub fn load_exclusions(path: &Path) -> Result<Vec<Exclusion>, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read exclusions table {}: {e}", path.display()))?;
     parse_exclusions(&text)
+}
+
+/// Whether `id` of `op` is excluded as a whole input.
+pub fn input_excluded(op: &str, id: &str, exclusions: &[Exclusion]) -> bool {
+    exclusions.iter().any(|e| {
+        e.op == op
+            && e.field
+                .strip_prefix("input:")
+                .is_some_and(|excluded| excluded == id)
+    })
 }
 
 fn remove_path(map: &mut Map<String, Value>, path: &str) {
@@ -319,11 +342,23 @@ impl fmt::Display for Divergence {
     }
 }
 
+/// How one input compared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputVerdict {
+    Matched,
+    Mismatched,
+    Excluded,
+}
+
 /// Counts and divergences of one op comparison.
 #[derive(Debug, Clone, Default)]
 pub struct Comparison {
     pub executed: usize,
+    /// The per-input verdict, in corpus order (for per-subject tallies).
+    pub per_input: Vec<(String, InputVerdict)>,
     pub matched: usize,
+    /// Inputs taken out of the comparison by an `input:<id>` exclusion.
+    pub excluded: usize,
     pub mismatched_ids: Vec<String>,
     pub first: Option<Divergence>,
 }
@@ -371,10 +406,19 @@ pub fn compare(
                 (None, None) => unreachable!("index < max(len)"),
             };
         comparison.executed += 1;
-        if verdicts && expected_line == actual_line {
-            comparison.matched += 1;
+        if input_excluded(op, &id, exclusions) {
+            comparison.excluded += 1;
+            comparison.per_input.push((id, InputVerdict::Excluded));
             continue;
         }
+        if verdicts && expected_line == actual_line {
+            comparison.matched += 1;
+            comparison.per_input.push((id, InputVerdict::Matched));
+            continue;
+        }
+        comparison
+            .per_input
+            .push((id.clone(), InputVerdict::Mismatched));
         if comparison.first.is_none() {
             comparison.first = Some(Divergence {
                 op: op.to_owned(),
@@ -433,8 +477,10 @@ pub fn tamper_negative(
     exclusions: &[Exclusion],
 ) -> Option<rivet_harness_common::negative::Verdict> {
     let clean = compare(op, expected, actual, exclusions);
-    let index = (0..expected.len().min(actual.len()))
-        .find(|&i| !clean.mismatched_ids.contains(&expected[i].0))?;
+    let index = (0..expected.len().min(actual.len())).find(|&i| {
+        !clean.mismatched_ids.contains(&expected[i].0)
+            && !input_excluded(op, &expected[i].0, exclusions)
+    })?;
     let mut tampered = expected.to_vec();
     tampered[index].1 = tamper(&tampered[index].1);
     let result = compare(op, &tampered, actual, exclusions);
@@ -582,7 +628,7 @@ mod tests {
 
     #[test]
     fn exclusions_are_data_and_drop_only_the_named_field() {
-        let table = "op\tfield\treason\tissue\nop\tresult.nested.t\tPaper twin runs differ\thttps://example.invalid/1\n";
+        let table = "op\tfield\treason\tissue\nop\tresult.nested.t\tPaper twin runs differ\t1\n";
         let exclusions = parse_exclusions(table).unwrap();
         let paper = vec![(
             "a".to_owned(),
@@ -610,10 +656,15 @@ mod tests {
 
     #[test]
     fn exclusion_rows_need_a_reason_and_an_issue() {
-        assert!(parse_exclusions("op\tfield\treason\tissue\nop\tresult.x\t\thttps://x\n").is_err());
+        assert!(parse_exclusions("op\tfield\treason\tissue\nop\tresult.x\t\t7\n").is_err());
+        // The issue column is a GitHub issue number, not a URL or a placeholder.
+        assert!(
+            parse_exclusions("op\tfield\treason\tissue\nop\tresult.x\twhy\thttps://x\n").is_err()
+        );
+        assert!(parse_exclusions("op\tfield\treason\tissue\nop\tresult.x\twhy\tTBD\n").is_err());
         assert!(parse_exclusions("op\tfield\treason\tissue\nop\tresult.x\twhy\n").is_err());
         assert!(parse_exclusions("wrong header\n").is_err());
-        assert!(parse_exclusions("op\tfield\treason\tissue\nop\tok\twhy\thttps://x\n").is_err());
+        assert!(parse_exclusions("op\tfield\treason\tissue\nop\tok\twhy\t7\n").is_err());
         assert!(
             parse_exclusions("op\tfield\treason\tissue\n")
                 .unwrap()
