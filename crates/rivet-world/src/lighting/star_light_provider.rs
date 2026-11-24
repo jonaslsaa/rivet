@@ -68,6 +68,20 @@ pub trait StarLightProvider {
     /// (the light-queue defers with the engine units, #184).
     fn section_change(&mut self, pos: SectionPos, new_empty_value: bool);
 
+    /// `StarLightInterface.hasUpdates()` — whether the provider has pending
+    /// light updates queued to run.
+    fn has_updates(&self) -> bool {
+        false
+    }
+
+    /// `StarLightInterface.propagateChanges()` — drains only a client light
+    /// queue; on the server queue it is a deliberate no-op ("invalid usage,
+    /// although we won't throw"), because server tasks run through the
+    /// chunk-system scheduler instead (here, the owner's drain). Java returns
+    /// `void`; `LevelLightEngine.runLightUpdates()` derives its result from
+    /// `hasUpdates()` sampled before this call.
+    fn propagate_changes(&mut self) {}
+
     /// `StarLightInterface.lightChunk(ChunkAccess, Boolean[])` — light a chunk
     /// whose per-section emptiness is `empty_sections`. Java's `Boolean[]` is
     /// tri-state, mirrored as `Option<bool>`: `Some(true)`/`Some(false)` are
@@ -165,6 +179,7 @@ mod tests {
         force_loaded_chunks: Vec<(ChunkPos, Vec<Option<bool>>)>,
         relit_chunks: Vec<ChunkPos>,
         edge_checks: Vec<ChunkPos>,
+        propagations: usize,
     }
 
     /// A concrete `StarLightProvider` recording every call into the shared log.
@@ -191,6 +206,13 @@ mod tests {
                 .unwrap()
                 .section_changes
                 .push((pos, new_empty_value));
+        }
+        fn has_updates(&self) -> bool {
+            let log = self.log.lock().unwrap();
+            !log.block_changes.is_empty() || !log.section_changes.is_empty()
+        }
+        fn propagate_changes(&mut self) {
+            self.log.lock().unwrap().propagations += 1;
         }
         fn light_chunk(&mut self, pos: ChunkPos, empty_sections: &[Option<bool>]) {
             self.log
@@ -241,9 +263,13 @@ mod tests {
         let log = Arc::clone(&recording.log);
         let mut provider: Box<dyn StarLightProvider + Send> = Box::new(recording);
 
+        assert!(!provider.has_updates());
+        provider.propagate_changes();
         provider.block_change(BlockPos::new(1, 2, 3));
         let pos = SectionPos::of(4, 5, 6);
         provider.section_change(pos, true);
+        assert!(provider.has_updates());
+        provider.propagate_changes();
         provider.light_chunk(ChunkPos::new(7, 8), &[Some(false), None, Some(true)]);
         provider.force_load_in_chunk(ChunkPos::new(8, 9), &[Some(true), None, Some(false)]);
         let mut chunks = HashSet::new();
@@ -264,6 +290,7 @@ mod tests {
         );
         assert_eq!(seen.relit_chunks, vec![ChunkPos::new(9, 10)]);
         assert_eq!(seen.edge_checks, vec![ChunkPos::new(11, 12)]);
+        assert_eq!(seen.propagations, 2);
     }
 
     /// A provider also works behind a plain `&mut dyn StarLightProvider` (the
