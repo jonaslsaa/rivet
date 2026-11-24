@@ -131,7 +131,8 @@ const SURFACE_RULES = `WHAT A SCAFFOLD IS: the family's compile-clean Rust SURFA
   at its canonical home with its owning unit's STUB marker, listed in stubs_created.
 - The scaffold must build warning-free: \`cd ${WT} && ${CARGO} cargo check -p ${A.crate} --locked\` with zero
   errors and \`cd ${WT} && RUSTFLAGS=-Dwarnings ${CARGO} cargo clippy -p ${A.crate} --all-targets --locked\` clean.
-  A pub(crate) item that trips dead_code gets an item-level \`#[allow(dead_code)] // STUB(<unit-id>) scaffold\`,
+  A pub(crate) item that trips dead_code gets an item-level \`#[allow(dead_code)]\` preceded, on its own line directly above it,
+  by \`// STUB(<unit-id>) scaffold\` (a trailing comment is not a marker, so check_markers.py would never flag it stale),
   never a module-wide allow. \`cd ${WT} && python3 scripts/check_markers.py\` must pass.
 - No tests, no fixtures, no MANIFEST.tsv or *.md edits, nothing under working/, no copying from working/Pumpkin.`
 
