@@ -74,38 +74,47 @@ fn render_json(value: &Value) -> String {
 /// One table row. `entry!(name, path)` is for `Arc<dyn Codec>` constructors;
 /// `entry!(enum name, path)` for `EnumCodec` ones (a concrete struct).
 macro_rules! entry {
-    (@build $name:literal, $make:ident) => {
+    (@build $name:literal, $($make:ident)::+) => {
         Entry {
             name: $name,
             json: |input| {
-                let codec = $make::<JsonOps>();
+                let codec = $($make)::+::<JsonOps>();
                 reencode(&*codec, &JsonOps::INSTANCE, input, render_json)
             },
             nbt: |input| {
-                let codec = $make::<NbtOps>();
+                let codec = $($make)::+::<NbtOps>();
                 reencode(&*codec, &NbtOps::instance(), input, StringTagVisitor::to_string)
             },
         }
     };
-    (enum $name:literal, $make:ident) => {
+    (enum $name:literal, $($make:ident)::+) => {
         Entry {
             name: $name,
             json: |input| {
-                let codec = $make::<JsonOps>();
+                let codec = $($make)::+::<JsonOps>();
                 reencode(&codec, &JsonOps::INSTANCE, input, render_json)
             },
             nbt: |input| {
-                let codec = $make::<NbtOps>();
+                let codec = $($make)::+::<NbtOps>();
                 reencode(&codec, &NbtOps::instance(), input, StringTagVisitor::to_string)
             },
         }
     };
-    ($name:literal, $make:ident) => {
-        entry!(@build $name, $make)
+    ($name:literal, $($make:ident)::+) => {
+        entry!(@build $name, $($make)::+)
     };
 }
 
-/// Every ported registry-free codec exposed to the op. Polymorphic roots
+/// Every ported registry-free codec exposed to the op.
+///
+/// STUB (deliberately omitted): the ported codecs that need a `RegistryOpsLookup` (holders, tags,
+/// `RegistryFileCodec`: configured features, placers, predicates, processors,
+/// biomes, density functions, the registry-bound `WorldPreset`/`LevelStem` forms),
+/// the item-component codecs that carry holder sets or sound events (`Tool`,
+/// `Repairable`, `BlocksAttacks`, `KineticWeapon`, ...), and the MapCodec-only
+/// constructors that no Java `Codec` constant wraps are not in this table.
+/// Running them needs a Rust `RegistryAccess` built to mirror Paper's frozen
+/// registries (tracked by #803); the table grows with it. Polymorphic roots
 /// (`IntProviders.CODEC`, `RuleTest.CODEC`, `ItemStack.CODEC`, ...) reach every
 /// variant codec registered under them, so those variants are verified through
 /// their root rather than listed one by one.
@@ -211,6 +220,68 @@ pub fn entries() -> Vec<Entry> {
             world_data_configuration_codec
         ),
         entry!("FeatureFlags.CODEC", feature_flags_codec),
+        entry!("WorldBorder.CODEC", rivet_world::level::border::world_border::WorldBorder::codec),
+        entry!("WorldBorder.Settings.CODEC", rivet_world::level::border::world_border::Settings::codec),
+        entry!("WeatherData.CODEC", rivet_world::level::saveddata::weather_data::WeatherData::codec),
+        entry!("WanderingTraderData.CODEC", rivet_world::level::saveddata::wandering_trader_data::WanderingTraderData::codec),
+        entry!("LevelSettings.DifficultySettings.CODEC", rivet_world::level::level_settings::DifficultySettings::codec),
+        entry!("LevelData.RespawnData.CODEC", rivet_world::level::storage::level_data::respawn_data_codec),
+        entry!("BlendingData.Packed.CODEC", rivet_world::levelgen::blending::blending_data::Packed::packed_codec),
+        entry!("NoiseSettings.CODEC", rivet_world::levelgen::noise::noise_settings::noise_settings_codec),
+        entry!("ObjectiveCriteria.RenderType.CODEC", rivet_world::scores::RenderType::codec),
+        entry!("ObjectiveCriteria.CODEC", rivet_world::scores::ObjectiveCriteria::codec),
+        entry!("DisplaySlot.CODEC", rivet_world::scores::DisplaySlot::codec),
+        entry!("NumberFormatTypes.CODEC", rivet_world::scores::NumberFormat::codec),
+        entry!("Objective.Packed.CODEC", rivet_world::scores::objective::PackedObjective::codec),
+        entry!("ScoreboardSaveData.Packed.CODEC", rivet_world::scores::save_data::PackedScoreboardData::codec),
+        entry!("Scoreboard.PackedScore.CODEC", rivet_world::scores::scoreboard::PackedScore::codec),
+        entry!("Team.Visibility.CODEC", rivet_world::scores::team::Visibility::codec),
+        entry!("Team.CollisionRule.CODEC", rivet_world::scores::team::CollisionRule::codec),
+        entry!("PlayerTeam.Packed.CODEC", rivet_world::scores::team::PackedPlayerTeam::codec),
+        entry!("TeamColor.CODEC", rivet_world::scores::team_color::TeamColor::codec),
+        entry!("Biome.Precipitation.CODEC", rivet_world::biome::biome::Precipitation::codec),
+        entry!("Biome.TemperatureModifier.CODEC", rivet_world::biome::biome::TemperatureModifier::codec),
+        entry!("BiomeSpecialEffects.CODEC", rivet_world::biome::biome_special_effects::BiomeSpecialEffects::codec),
+        entry!("BiomeSpecialEffects.GrassColorModifier.CODEC", rivet_world::biome::biome_special_effects::GrassColorModifier::codec),
+        entry!("Climate.Parameter.CODEC", rivet_world::biome::climate::Parameter::codec),
+        entry!("Climate.ParameterPoint.CODEC", rivet_world::biome::climate::ParameterPoint::codec),
+        entry!("MobSpawnSettings.MobSpawnCost.CODEC", rivet_world::biome::mob_spawn_settings::MobSpawnCost::codec),
+        entry!("MultiNoiseBiomeSourceParameterList.Preset.CODEC", rivet_world::biome::multi_noise_biome_source_parameter_list::Preset::codec),
+        entry!("TickPriority.CODEC", rivet_world::ticks::TickPriority::codec),
+        entry!("MobCategory.CODEC", rivet_world::entity::MobCategory::codec),
+        entry!(enum "GenerationStep.Decoration.CODEC", rivet_world::levelgen::generation_step::decoration_codec),
+        entry!("RarityFilter.CODEC", rivet_world::levelgen::placement::rarity_filter_codec),
+        entry!("HeightRangePlacement.CODEC", rivet_world::levelgen::placement::height_range_placement_codec),
+        entry!("CountOnEveryLayerPlacement.CODEC", rivet_world::levelgen::placement::count_on_every_layer_placement_codec),
+        entry!("FixedPlacement.CODEC", rivet_world::levelgen::placement::fixed_placement_codec),
+        entry!("SurfaceWaterDepthFilter.CODEC", rivet_world::levelgen::placement::surface_water_depth_filter_codec),
+        entry!(enum "CaveSurface.CODEC", rivet_world::levelgen::placement::cave_surface_codec),
+        entry!("InSquarePlacement.CODEC", rivet_world::levelgen::placement::in_square_placement_codec),
+        entry!("HeightmapPlacement.CODEC", rivet_world::levelgen::placement::heightmap_placement_codec),
+        entry!("RandomOffsetPlacement.CODEC", rivet_world::levelgen::placement::random_offset_placement_codec),
+        entry!("SurfaceRelativeThresholdFilter.CODEC", rivet_world::levelgen::placement::surface_relative_threshold_filter_codec),
+        entry!("CanyonCarverConfiguration.CanyonShapeConfiguration.CODEC", rivet_world::levelgen::carver::canyon_carver_configuration::canyon_shape_configuration_codec),
+        entry!("FoliagePlacer.CODEC", rivet_world::levelgen::feature::foliageplacers::foliage_placer::foliage_placer_codec),
+        entry!("CountConfiguration.CODEC", rivet_world::levelgen::feature::configurations::count_configuration::count_configuration_codec),
+        entry!("BlockStateConfiguration.CODEC", rivet_world::levelgen::feature::configurations::block_state_configuration::block_state_configuration_codec),
+        entry!("LayerConfiguration.CODEC", rivet_world::levelgen::feature::configurations::layer_configuration::layer_configuration_codec),
+        entry!("DeltaFeatureConfiguration.CODEC", rivet_world::levelgen::feature::configurations::delta_feature_configuration::delta_feature_configuration_codec),
+        entry!("ReplaceSphereConfiguration.CODEC", rivet_world::levelgen::feature::configurations::replace_sphere_configuration::replace_sphere_configuration_codec),
+        entry!("NoneFeatureConfiguration.CODEC", rivet_world::levelgen::feature::configurations::none_feature_configuration::none_feature_configuration_codec),
+        entry!("ColumnFeatureConfiguration.CODEC", rivet_world::levelgen::feature::configurations::column_feature_configuration::column_feature_configuration_codec),
+        entry!("UnderwaterMagmaConfiguration.CODEC", rivet_world::levelgen::feature::configurations::underwater_magma_configuration::underwater_magma_configuration_codec),
+        entry!("ItemLore.CODEC", rivet_world::item::components::display::item_lore_codec),
+        entry!("CustomModelData.CODEC", rivet_world::item::components::display::custom_model_data_codec),
+        entry!("DyedItemColor.CODEC", rivet_world::item::components::display::dyed_item_color_codec),
+        entry!("MapItemColor.CODEC", rivet_world::item::components::display::map_item_color_codec),
+        entry!("FireworkExplosion.CODEC", rivet_world::item::components::world_and_books::firework_explosion_codec),
+        entry!("Fireworks.CODEC", rivet_world::item::components::world_and_books::fireworks_codec),
+        entry!("WritableBookContent.CODEC", rivet_world::item::components::world_and_books::writable_book_content_codec),
+        entry!("BlockItemStateProperties.CODEC", rivet_world::item::components::world_and_books::block_item_state_properties_codec),
+        entry!("CustomData.CODEC", rivet_world::item::components::core::custom_data_codec),
+        entry!("AttackRange.CODEC", rivet_world::item::components::combat::attack_range_codec),
+        entry!("SwingAnimation.CODEC", rivet_world::item::components::combat::swing_animation_codec),
+        entry!("Weapon.CODEC", rivet_world::item::components::combat::weapon_codec),
     ]
 }
 

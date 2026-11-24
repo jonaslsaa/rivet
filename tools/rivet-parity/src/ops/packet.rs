@@ -78,6 +78,26 @@ fn with_registries<V: 'static>(
     Ok(output.into_inner().to_vec())
 }
 
+/// The same packet ported twice (`rivet-protocol` has a `protocol::game` and a
+/// `game` module for `ServerboundChunkBatchReceivedPacket`): both codecs run, and
+/// a disagreement between them answers bytes no Paper answer can equal, so it
+/// surfaces as a mismatch whether Paper accepts or rejects the input.
+fn plain_pair<V: 'static, W: 'static>(
+    (first, second): (
+        StreamCodec<FriendlyByteBuf, V>,
+        StreamCodec<FriendlyByteBuf, W>,
+    ),
+    body: &[u8],
+) -> Result<Vec<u8>, String> {
+    let first = plain(first, body);
+    let second = plain(second, body);
+    if first == second {
+        first
+    } else {
+        Ok(b"<the two Rust ports of this packet disagree>".to_vec())
+    }
+}
+
 /// The registries the registry-aware packet codecs resolve holders through:
 /// the elements of `dimension_type` and `world_clock` in the vanilla registry
 /// id order (`SYNCHRONIZED_REGISTRIES`, the order Paper's frozen registries
@@ -144,6 +164,17 @@ fn build_registry_access() -> RegistryAccess {
     ])
 }
 
+/// A registry-aware codec from a type's own `encode`/`decode` methods (the
+/// scoreboard packets are plain structs, not `StreamCodec` values).
+macro_rules! methods {
+    ($packet:ty) => {
+        rivet_protocol::codec::codec(
+            |value: &$packet, output: &mut RegistryFriendlyByteBuf| value.encode(output),
+            |input: &mut RegistryFriendlyByteBuf| <$packet>::decode(input),
+        )
+    };
+}
+
 macro_rules! entry {
     ($state:literal, $dir:literal, $name:literal, $subject:literal, $codec:expr, $run:ident) => {
         Entry {
@@ -171,6 +202,10 @@ pub fn entries() -> Vec<Entry> {
     use rivet_protocol::protocol::login as l;
     use rivet_protocol::protocol::ping as pg;
     use rivet_protocol::protocol::status as s;
+    use rivet_world::scores::packets::{
+        ClientboundResetScorePacket, ClientboundSetDisplayObjectivePacket,
+        ClientboundSetObjectivePacket, ClientboundSetPlayerTeamPacket, ClientboundSetScorePacket,
+    };
     vec![
         // status
         entry!("status", "serverbound", "minecraft:status_request", "ServerboundStatusRequestPacket",
@@ -299,6 +334,16 @@ pub fn entries() -> Vec<Entry> {
             pg::clientbound_pong_response::ClientboundPongResponsePacket::stream_codec(), plain),
         entry!("play", "clientbound", "minecraft:resource_pack_pop", "ClientboundResourcePackPopPacket",
             c::clientbound_resource_pack_pop::ClientboundResourcePackPopPacket::stream_codec(), plain),
+        entry!("play", "clientbound", "minecraft:set_objective", "ClientboundSetObjectivePacket",
+            methods!(ClientboundSetObjectivePacket), with_registries),
+        entry!("play", "clientbound", "minecraft:set_display_objective", "ClientboundSetDisplayObjectivePacket",
+            methods!(ClientboundSetDisplayObjectivePacket), with_registries),
+        entry!("play", "clientbound", "minecraft:set_score", "ClientboundSetScorePacket",
+            methods!(ClientboundSetScorePacket), with_registries),
+        entry!("play", "clientbound", "minecraft:reset_score", "ClientboundResetScorePacket",
+            methods!(ClientboundResetScorePacket), with_registries),
+        entry!("play", "clientbound", "minecraft:set_player_team", "ClientboundSetPlayerTeamPacket",
+            methods!(ClientboundSetPlayerTeamPacket), with_registries),
         entry!("play", "clientbound", "minecraft:section_blocks_update", "ClientboundSectionBlocksUpdatePacket",
             p::clientbound_block_updates::ClientboundSectionBlocksUpdatePacket::stream_codec(), plain),
         entry!("play", "clientbound", "minecraft:server_links", "ClientboundServerLinksPacket",
@@ -329,7 +374,10 @@ pub fn entries() -> Vec<Entry> {
         entry!("play", "serverbound", "minecraft:accept_teleportation", "ServerboundAcceptTeleportationPacket",
             g::serversbound_accept_teleportation_packet::accept_teleportation_codec(), plain),
         entry!("play", "serverbound", "minecraft:chunk_batch_received", "ServerboundChunkBatchReceivedPacket",
-            p::serverbound_chunk_batch_received::ServerboundChunkBatchReceivedPacket::stream_codec(), plain),
+            (
+                p::serverbound_chunk_batch_received::ServerboundChunkBatchReceivedPacket::stream_codec(),
+                g::serversbound_chunk_batch_received_packet::chunk_batch_received_codec(),
+            ), plain_pair),
         entry!("play", "serverbound", "minecraft:client_command", "ServerboundClientCommandPacket",
             g::serversbound_client_command_packet::client_command_codec(), plain),
         entry!("play", "serverbound", "minecraft:client_information", "ServerboundClientInformationPacket",
@@ -466,6 +514,10 @@ pub fn packet_reencode(request: &Map<String, Value>) -> Outcome {
                 "{state}/{direction} {name} is registered in Paper but not ported in Rivet"
             ));
         };
+        // The harness's own setup runs outside the guard: a fault in it
+        // propagates as "Rust handler panicked" (unavailable, never a match),
+        // so only a panic inside a ported codec can read as a rejection.
+        drop(registry_access());
         match guarded(|| entry.reencode(&body)) {
             Ok(Ok(encoded)) => {
                 let mut result = Map::new();
@@ -476,7 +528,8 @@ pub fn packet_reencode(request: &Map<String, Value>) -> Outcome {
             Ok(Err(_)) => Outcome::Rejected,
             // The ported codecs report a malformed packet by panicking exactly
             // where Java throws (`DecoderException`, `IndexOutOfBoundsException`,
-            // `IdentifierException`, ...): that panic is Rivet's rejection.
+            // `IdentifierException`, ...): that panic, raised inside the ported
+            // codec itself, is Rivet's rejection.
             Err(_) => Outcome::Rejected,
         }
     })

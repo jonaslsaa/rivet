@@ -485,6 +485,465 @@ const HAND: &[(&str, &str)] = &[
         r#"["minecraft:vanilla","minecraft:nope"]"#,
     ),
     ("FeatureFlags.CODEC", "[]"),
+    (
+        "WorldBorder.Settings.CODEC",
+        r#"{"center_x":0.0,"center_z":0.0,"damage_per_block":0.2,"safe_zone":5.0,"warning_blocks":5,"warning_time":15,"size":59999968.0,"lerp_time":0,"lerp_target":59999968.0}"#,
+    ),
+    (
+        "WorldBorder.Settings.CODEC",
+        r#"{"center_x":30000000.0,"center_z":0.0,"damage_per_block":0.2,"safe_zone":5.0,"warning_blocks":5,"warning_time":15,"size":100.0,"lerp_time":0,"lerp_target":100.0}"#,
+    ),
+    (
+        "WorldBorder.Settings.CODEC",
+        r#"{"center_x":1.5,"center_z":-2.5,"damage_per_block":1,"safe_zone":2,"warning_blocks":0,"warning_time":0,"size":10,"lerp_time":1000,"lerp_target":20}"#,
+    ),
+    ("WorldBorder.Settings.CODEC", r#"{"center_x":0.0}"#),
+    (
+        "WorldBorder.CODEC",
+        r#"{"center_x":0.0,"center_z":0.0,"damage_per_block":0.2,"safe_zone":5.0,"warning_blocks":5,"warning_time":15,"size":59999968.0,"lerp_time":0,"lerp_target":59999968.0}"#,
+    ),
+    (
+        "WeatherData.CODEC",
+        r#"{"clear_weather_time":0,"rain_time":100,"thunder_time":200,"raining":true,"thundering":false}"#,
+    ),
+    (
+        "WeatherData.CODEC",
+        r#"{"clear_weather_time":-5,"rain_time":0,"thunder_time":0,"raining":false,"thundering":true}"#,
+    ),
+    (
+        "WeatherData.CODEC",
+        r#"{"clear_weather_time":0,"rain_time":100}"#,
+    ),
+    ("WanderingTraderData.CODEC", r#"{}"#),
+    (
+        "WanderingTraderData.CODEC",
+        r#"{"spawn_delay":100,"spawn_chance":50}"#,
+    ),
+    (
+        "WanderingTraderData.CODEC",
+        r#"{"spawn_delay":24000,"spawn_chance":25}"#,
+    ),
+    ("WanderingTraderData.CODEC", r#"{"spawn_delay":"x"}"#),
+    (
+        "LevelSettings.DifficultySettings.CODEC",
+        r#"{"difficulty":"hard","hardcore":false,"locked":true}"#,
+    ),
+    (
+        "LevelSettings.DifficultySettings.CODEC",
+        r#"{"difficulty":"peaceful","hardcore":true,"locked":false}"#,
+    ),
+    (
+        "LevelSettings.DifficultySettings.CODEC",
+        r#"{"difficulty":"easy"}"#,
+    ),
+    (
+        "LevelData.RespawnData.CODEC",
+        r#"{"dimension":"minecraft:overworld","pos":[1,64,-3],"yaw":90.0,"pitch":10.0}"#,
+    ),
+    (
+        "LevelData.RespawnData.CODEC",
+        r#"{"dimension":"minecraft:the_nether","pos":[0,0,0],"yaw":-180.0,"pitch":-90.0}"#,
+    ),
+    (
+        "LevelData.RespawnData.CODEC",
+        r#"{"dimension":"minecraft:overworld","pos":[1,64,-3],"yaw":200.0,"pitch":10.0}"#,
+    ),
+    (
+        "BlendingData.Packed.CODEC",
+        r#"{"min_section":-4,"max_section":20}"#,
+    ),
+    (
+        "BlendingData.Packed.CODEC",
+        r#"{"min_section":-4,"max_section":20,"heights":[1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0,9.0,10.0,11.0,12.0,13.0,14.0,15.0,16.0]}"#,
+    ),
+    (
+        "BlendingData.Packed.CODEC",
+        r#"{"min_section":0,"max_section":4,"heights":[1.0,2.0,3.0]}"#,
+    ),
+    (
+        "NoiseSettings.CODEC",
+        r#"{"min_y":-64,"height":384,"size_horizontal":1,"size_vertical":2}"#,
+    ),
+    (
+        "NoiseSettings.CODEC",
+        r#"{"min_y":0,"height":128,"size_horizontal":2,"size_vertical":1}"#,
+    ),
+    (
+        "NoiseSettings.CODEC",
+        r#"{"min_y":-60,"height":384,"size_horizontal":1,"size_vertical":2}"#,
+    ),
+    (
+        "NoiseSettings.CODEC",
+        r#"{"min_y":0,"height":100,"size_horizontal":1,"size_vertical":2}"#,
+    ),
+    (
+        "NoiseSettings.CODEC",
+        r#"{"min_y":-2032,"height":4064,"size_horizontal":5,"size_vertical":2}"#,
+    ),
+    ("ObjectiveCriteria.RenderType.CODEC", r#""integer""#),
+    ("ObjectiveCriteria.RenderType.CODEC", r#""hearts""#),
+    ("ObjectiveCriteria.RenderType.CODEC", r#""stars""#),
+    ("ObjectiveCriteria.CODEC", r#""dummy""#),
+    ("ObjectiveCriteria.CODEC", r#""deathCount""#),
+    (
+        "ObjectiveCriteria.CODEC",
+        r#""minecraft.killed:minecraft.zombie""#,
+    ),
+    ("ObjectiveCriteria.CODEC", r#""teamkill.red""#),
+    ("ObjectiveCriteria.CODEC", r#""bogus""#),
+    ("DisplaySlot.CODEC", r#""list""#),
+    ("DisplaySlot.CODEC", r#""sidebar.team.red""#),
+    ("DisplaySlot.CODEC", r#""below_name""#),
+    ("DisplaySlot.CODEC", r#""nope""#),
+    ("NumberFormatTypes.CODEC", r#"{"type":"minecraft:blank"}"#),
+    (
+        "NumberFormatTypes.CODEC",
+        r#"{"type":"minecraft:fixed","value":"x"}"#,
+    ),
+    (
+        "NumberFormatTypes.CODEC",
+        r#"{"type":"minecraft:styled","bold":true,"color":"red"}"#,
+    ),
+    ("NumberFormatTypes.CODEC", r#"{"type":"minecraft:nope"}"#),
+    (
+        "Objective.Packed.CODEC",
+        r#"{"Name":"o","DisplayName":"Obj"}"#,
+    ),
+    (
+        "Objective.Packed.CODEC",
+        r#"{"Name":"o","CriteriaName":"deathCount","DisplayName":{"text":"Obj","color":"red"},"RenderType":"hearts","display_auto_update":true,"format":{"type":"minecraft:blank"}}"#,
+    ),
+    ("Objective.Packed.CODEC", r#"{"Name":"o"}"#),
+    (
+        "Scoreboard.PackedScore.CODEC",
+        r#"{"Name":"Notch","Objective":"kills","Score":5,"Locked":true}"#,
+    ),
+    (
+        "Scoreboard.PackedScore.CODEC",
+        r#"{"Name":"Notch","Objective":"kills","display":"alias","format":{"type":"minecraft:blank"}}"#,
+    ),
+    ("Scoreboard.PackedScore.CODEC", r#"{"Name":"Notch"}"#),
+    ("ScoreboardSaveData.Packed.CODEC", r#"{}"#),
+    (
+        "ScoreboardSaveData.Packed.CODEC",
+        r#"{"Objectives":[{"Name":"o","DisplayName":"Obj"}],"PlayerScores":[{"Name":"a","Objective":"o","Score":1}],"DisplaySlots":{"sidebar":"o"},"Teams":[{"Name":"red","TeamColor":"red","Players":["a"]}]}"#,
+    ),
+    (
+        "ScoreboardSaveData.Packed.CODEC",
+        r#"{"DisplaySlots":{"nope":"o"}}"#,
+    ),
+    ("Team.Visibility.CODEC", r#""always""#),
+    ("Team.Visibility.CODEC", r#""hideForOtherTeams""#),
+    ("Team.Visibility.CODEC", r#""nope""#),
+    ("Team.CollisionRule.CODEC", r#""pushOwnTeam""#),
+    ("Team.CollisionRule.CODEC", r#""never""#),
+    ("Team.CollisionRule.CODEC", r#""nope""#),
+    (
+        "PlayerTeam.Packed.CODEC",
+        r#"{"Name":"red","TeamColor":"red","DisplayName":"Red","Players":["Notch"]}"#,
+    ),
+    (
+        "PlayerTeam.Packed.CODEC",
+        r#"{"Name":"t","TeamColor":"white","AllowFriendlyFire":false,"SeeFriendlyInvisibles":false,"MemberNamePrefix":"[","MemberNameSuffix":"]","NameTagVisibility":"never","DeathMessageVisibility":"hideForOwnTeam","CollisionRule":"pushOtherTeams"}"#,
+    ),
+    ("PlayerTeam.Packed.CODEC", r#"{"Name":"t"}"#),
+    (
+        "PlayerTeam.Packed.CODEC",
+        r#"{"Name":"t","TeamColor":"nope"}"#,
+    ),
+    ("TeamColor.CODEC", r#""red""#),
+    ("TeamColor.CODEC", r#""dark_blue""#),
+    ("TeamColor.CODEC", r#""nope""#),
+    ("Biome.Precipitation.CODEC", r#""none""#),
+    ("Biome.Precipitation.CODEC", r#""snow""#),
+    ("Biome.Precipitation.CODEC", r#""hail""#),
+    ("Biome.TemperatureModifier.CODEC", r#""frozen""#),
+    ("Biome.TemperatureModifier.CODEC", r#""none""#),
+    ("Biome.TemperatureModifier.CODEC", r#""hot""#),
+    (
+        "BiomeSpecialEffects.CODEC",
+        r##"{"water_color":"#3f76e4"}"##,
+    ),
+    (
+        "BiomeSpecialEffects.CODEC",
+        r##"{"water_color":"#3f76e4","foliage_color":"#123456","dry_foliage_color":"#654321","grass_color":"#aabbcc","grass_color_modifier":"swamp"}"##,
+    ),
+    ("BiomeSpecialEffects.CODEC", r#"{"water_color":4159204}"#),
+    (
+        "BiomeSpecialEffects.CODEC",
+        r##"{"water_color":"#3f76e4","grass_color_modifier":"nope"}"##,
+    ),
+    ("BiomeSpecialEffects.CODEC", r#"{}"#),
+    (
+        "BiomeSpecialEffects.GrassColorModifier.CODEC",
+        r#""dark_forest""#,
+    ),
+    ("BiomeSpecialEffects.GrassColorModifier.CODEC", r#""nope""#),
+    ("Climate.Parameter.CODEC", r#"{"min":-0.5,"max":0.5}"#),
+    ("Climate.Parameter.CODEC", r#"[-0.5,0.5]"#),
+    ("Climate.Parameter.CODEC", r#"0.25"#),
+    ("Climate.Parameter.CODEC", r#"{"min":0.5,"max":-0.5}"#),
+    ("Climate.Parameter.CODEC", r#"[-3.0,0.0]"#),
+    (
+        "Climate.ParameterPoint.CODEC",
+        r#"{"temperature":[-1.0,1.0],"humidity":[-1.0,1.0],"continentalness":[0.0,0.3],"erosion":[-1.0,1.0],"depth":0.0,"weirdness":[-1.0,1.0],"offset":0.5}"#,
+    ),
+    (
+        "Climate.ParameterPoint.CODEC",
+        r#"{"temperature":0.1,"humidity":0.2,"continentalness":0.3,"erosion":0.4,"depth":[0.0,1.0],"weirdness":0.6,"offset":1.0}"#,
+    ),
+    ("Climate.ParameterPoint.CODEC", r#"{"temperature":0.1}"#),
+    (
+        "MobSpawnSettings.MobSpawnCost.CODEC",
+        r#"{"energy_budget":0.12,"charge":1.0}"#,
+    ),
+    (
+        "MobSpawnSettings.MobSpawnCost.CODEC",
+        r#"{"energy_budget":1,"charge":-2}"#,
+    ),
+    ("MobSpawnSettings.MobSpawnCost.CODEC", r#"{"charge":1.0}"#),
+    (
+        "MultiNoiseBiomeSourceParameterList.Preset.CODEC",
+        r#""minecraft:nether""#,
+    ),
+    (
+        "MultiNoiseBiomeSourceParameterList.Preset.CODEC",
+        r#""minecraft:overworld""#,
+    ),
+    (
+        "MultiNoiseBiomeSourceParameterList.Preset.CODEC",
+        r#""minecraft:nope""#,
+    ),
+    (
+        "MultiNoiseBiomeSourceParameterList.Preset.CODEC",
+        r#""overworld""#,
+    ),
+    ("TickPriority.CODEC", r#"-3"#),
+    ("TickPriority.CODEC", r#"0"#),
+    ("TickPriority.CODEC", r#"3"#),
+    ("TickPriority.CODEC", r#"100"#),
+    ("TickPriority.CODEC", r#""x""#),
+    ("MobCategory.CODEC", r#""monster""#),
+    ("MobCategory.CODEC", r#""underground_water_creature""#),
+    ("MobCategory.CODEC", r#""nope""#),
+    ("GenerationStep.Decoration.CODEC", r#""raw_generation""#),
+    (
+        "GenerationStep.Decoration.CODEC",
+        r#""top_layer_modification""#,
+    ),
+    ("GenerationStep.Decoration.CODEC", r#""nope""#),
+    ("RarityFilter.CODEC", r#"{"chance":10}"#),
+    ("RarityFilter.CODEC", r#"{"chance":0}"#),
+    ("RarityFilter.CODEC", r#"{}"#),
+    (
+        "HeightRangePlacement.CODEC",
+        r#"{"height":{"type":"minecraft:uniform","min_inclusive":{"absolute":0},"max_inclusive":{"absolute":64}}}"#,
+    ),
+    (
+        "HeightRangePlacement.CODEC",
+        r#"{"height":{"above_bottom":8}}"#,
+    ),
+    (
+        "HeightRangePlacement.CODEC",
+        r#"{"height":{"type":"minecraft:trapezoid","min_inclusive":{"absolute":-16},"max_inclusive":{"absolute":48},"plateau":10}}"#,
+    ),
+    ("HeightRangePlacement.CODEC", r#"{}"#),
+    ("CountOnEveryLayerPlacement.CODEC", r#"{"count":4}"#),
+    (
+        "CountOnEveryLayerPlacement.CODEC",
+        r#"{"count":{"type":"minecraft:uniform","min_inclusive":1,"max_inclusive":3}}"#,
+    ),
+    ("CountOnEveryLayerPlacement.CODEC", r#"{"count":300}"#),
+    ("CountOnEveryLayerPlacement.CODEC", r#"{"count":-1}"#),
+    ("FixedPlacement.CODEC", r#"{"positions":[[1,2,3],[4,5,6]]}"#),
+    ("FixedPlacement.CODEC", r#"{"positions":[]}"#),
+    ("FixedPlacement.CODEC", r#"{"positions":[[1,2]]}"#),
+    ("SurfaceWaterDepthFilter.CODEC", r#"{"max_water_depth":2}"#),
+    ("SurfaceWaterDepthFilter.CODEC", r#"{"max_water_depth":-2}"#),
+    (
+        "SurfaceWaterDepthFilter.CODEC",
+        r#"{"max_water_depth":2.5}"#,
+    ),
+    ("CaveSurface.CODEC", r#""ceiling""#),
+    ("CaveSurface.CODEC", r#""floor""#),
+    ("CaveSurface.CODEC", r#""nope""#),
+    ("InSquarePlacement.CODEC", r#"{}"#),
+    ("InSquarePlacement.CODEC", r#"{"x":1}"#),
+    (
+        "HeightmapPlacement.CODEC",
+        r#"{"heightmap":"MOTION_BLOCKING"}"#,
+    ),
+    (
+        "HeightmapPlacement.CODEC",
+        r#"{"heightmap":"OCEAN_FLOOR_WG"}"#,
+    ),
+    ("HeightmapPlacement.CODEC", r#"{"heightmap":"nope"}"#),
+    (
+        "RandomOffsetPlacement.CODEC",
+        r#"{"xz_spread":{"type":"minecraft:uniform","min_inclusive":-3,"max_inclusive":3},"y_spread":0}"#,
+    ),
+    (
+        "RandomOffsetPlacement.CODEC",
+        r#"{"xz_spread":20,"y_spread":0}"#,
+    ),
+    (
+        "RandomOffsetPlacement.CODEC",
+        r#"{"xz_spread":-16,"y_spread":16}"#,
+    ),
+    (
+        "SurfaceRelativeThresholdFilter.CODEC",
+        r#"{"heightmap":"OCEAN_FLOOR_WG","min_inclusive":-2,"max_inclusive":5}"#,
+    ),
+    (
+        "SurfaceRelativeThresholdFilter.CODEC",
+        r#"{"heightmap":"WORLD_SURFACE_WG"}"#,
+    ),
+    (
+        "SurfaceRelativeThresholdFilter.CODEC",
+        r#"{"heightmap":"nope","min_inclusive":1}"#,
+    ),
+    (
+        "CanyonCarverConfiguration.CanyonShapeConfiguration.CODEC",
+        r#"{"distance_factor":{"type":"minecraft:uniform","min_inclusive":0.75,"max_inclusive":1.0},"thickness":{"type":"minecraft:uniform","min_inclusive":0.75,"max_inclusive":1.0},"width_smoothness":3,"horizontal_radius_factor":{"type":"minecraft:uniform","min_inclusive":0.75,"max_inclusive":1.0},"vertical_radius_default_factor":1.0,"vertical_radius_center_factor":0.0}"#,
+    ),
+    (
+        "CanyonCarverConfiguration.CanyonShapeConfiguration.CODEC",
+        r#"{"distance_factor":1.0,"thickness":0.5,"width_smoothness":0,"horizontal_radius_factor":1.0,"vertical_radius_default_factor":1.0,"vertical_radius_center_factor":0.0}"#,
+    ),
+    (
+        "FoliagePlacer.CODEC",
+        r#"{"type":"minecraft:blob_foliage_placer","radius":2,"offset":0,"height":3}"#,
+    ),
+    (
+        "FoliagePlacer.CODEC",
+        r#"{"type":"minecraft:random_spread_foliage_placer","radius":{"type":"minecraft:uniform","min_inclusive":1,"max_inclusive":3},"offset":0,"foliage_height":2,"leaf_placement_attempts":50}"#,
+    ),
+    (
+        "FoliagePlacer.CODEC",
+        r#"{"type":"minecraft:pine_foliage_placer","radius":2,"offset":1,"height":{"type":"minecraft:uniform","min_inclusive":3,"max_inclusive":5}}"#,
+    ),
+    ("FoliagePlacer.CODEC", r#"{"type":"minecraft:nope"}"#),
+    (
+        "FoliagePlacer.CODEC",
+        r#"{"type":"minecraft:blob_foliage_placer","radius":99,"offset":0,"height":3}"#,
+    ),
+    ("CountConfiguration.CODEC", r#"{"count":5}"#),
+    (
+        "CountConfiguration.CODEC",
+        r#"{"count":{"type":"minecraft:uniform","min_inclusive":1,"max_inclusive":4}}"#,
+    ),
+    ("CountConfiguration.CODEC", r#"{"count":999}"#),
+    (
+        "BlockStateConfiguration.CODEC",
+        r#"{"state":{"Name":"minecraft:stone"}}"#,
+    ),
+    (
+        "BlockStateConfiguration.CODEC",
+        r#"{"state":{"Name":"minecraft:oak_log","Properties":{"axis":"x"}}}"#,
+    ),
+    (
+        "BlockStateConfiguration.CODEC",
+        r#"{"state":{"Name":"minecraft:nope"}}"#,
+    ),
+    (
+        "LayerConfiguration.CODEC",
+        r#"{"height":4,"state":{"Name":"minecraft:snow","Properties":{"layers":"2"}}}"#,
+    ),
+    (
+        "LayerConfiguration.CODEC",
+        r#"{"height":5000,"state":{"Name":"minecraft:stone"}}"#,
+    ),
+    (
+        "DeltaFeatureConfiguration.CODEC",
+        r#"{"contents":{"Name":"minecraft:lava"},"rim":{"Name":"minecraft:basalt"},"size":{"type":"minecraft:uniform","min_inclusive":3,"max_inclusive":7},"rim_size":{"type":"minecraft:uniform","min_inclusive":0,"max_inclusive":2}}"#,
+    ),
+    (
+        "DeltaFeatureConfiguration.CODEC",
+        r#"{"contents":{"Name":"minecraft:lava"},"rim":{"Name":"minecraft:basalt"},"size":20,"rim_size":1}"#,
+    ),
+    (
+        "ReplaceSphereConfiguration.CODEC",
+        r#"{"target":{"Name":"minecraft:stone"},"state":{"Name":"minecraft:blackstone"},"radius":{"type":"minecraft:uniform","min_inclusive":3,"max_inclusive":7}}"#,
+    ),
+    (
+        "ReplaceSphereConfiguration.CODEC",
+        r#"{"target":{"Name":"minecraft:stone"},"state":{"Name":"minecraft:blackstone"},"radius":13}"#,
+    ),
+    ("NoneFeatureConfiguration.CODEC", r#"{}"#),
+    ("NoneFeatureConfiguration.CODEC", r#"{"x":1}"#),
+    (
+        "ColumnFeatureConfiguration.CODEC",
+        r#"{"reach":{"type":"minecraft:uniform","min_inclusive":0,"max_inclusive":2},"height":{"type":"minecraft:uniform","min_inclusive":1,"max_inclusive":5}}"#,
+    ),
+    (
+        "ColumnFeatureConfiguration.CODEC",
+        r#"{"reach":5,"height":0}"#,
+    ),
+    (
+        "UnderwaterMagmaConfiguration.CODEC",
+        r#"{"floor_search_range":5,"placement_radius_around_floor":1,"placement_probability_per_valid_position":0.5}"#,
+    ),
+    (
+        "UnderwaterMagmaConfiguration.CODEC",
+        r#"{"floor_search_range":600,"placement_radius_around_floor":1,"placement_probability_per_valid_position":1.5}"#,
+    ),
+    ("ItemLore.CODEC", r#"[]"#),
+    ("ItemLore.CODEC", r#"["a",{"text":"b","italic":false}]"#),
+    ("ItemLore.CODEC", r#""x""#),
+    ("CustomModelData.CODEC", r#"{}"#),
+    (
+        "CustomModelData.CODEC",
+        r#"{"floats":[1.0,2.5],"flags":[true,false],"strings":["a","b"],"colors":[16711680,255]}"#,
+    ),
+    ("CustomModelData.CODEC", r#"{"colors":[[1.0,0.5,0.0]]}"#),
+    ("DyedItemColor.CODEC", r#"16711680"#),
+    ("DyedItemColor.CODEC", r#"[1.0,0.0,0.5]"#),
+    ("DyedItemColor.CODEC", r#""red""#),
+    ("MapItemColor.CODEC", r#"4603950"#),
+    ("MapItemColor.CODEC", r#"-1"#),
+    ("MapItemColor.CODEC", r#"1.5"#),
+    ("FireworkExplosion.CODEC", r#"{"shape":"small_ball"}"#),
+    (
+        "FireworkExplosion.CODEC",
+        r#"{"shape":"star","colors":[16711680,255],"fade_colors":[65280],"has_trail":true,"has_twinkle":true}"#,
+    ),
+    ("FireworkExplosion.CODEC", r#"{"shape":"nope"}"#),
+    ("Fireworks.CODEC", r#"{}"#),
+    (
+        "Fireworks.CODEC",
+        r#"{"flight_duration":2,"explosions":[{"shape":"burst"}]}"#,
+    ),
+    ("Fireworks.CODEC", r#"{"flight_duration":300}"#),
+    ("WritableBookContent.CODEC", r#"{}"#),
+    (
+        "WritableBookContent.CODEC",
+        r#"{"pages":["page one",{"text":"page two","raw":"x"}]}"#,
+    ),
+    ("WritableBookContent.CODEC", r#"{"pages":[1]}"#),
+    ("BlockItemStateProperties.CODEC", r#"{}"#),
+    (
+        "BlockItemStateProperties.CODEC",
+        r#"{"facing":"north","lit":"true"}"#,
+    ),
+    ("BlockItemStateProperties.CODEC", r#"{"lit":true}"#),
+    ("CustomData.CODEC", r#"{}"#),
+    ("CustomData.CODEC", r#"{"a":1,"b":[1,2,3],"c":{"d":"e"}}"#),
+    ("CustomData.CODEC", r#"[1]"#),
+    ("AttackRange.CODEC", r#"{}"#),
+    (
+        "AttackRange.CODEC",
+        r#"{"min_reach":1.0,"max_reach":4.5,"min_creative_reach":0.5,"max_creative_reach":6.0,"hitbox_margin":0.5,"mob_factor":1.5}"#,
+    ),
+    ("AttackRange.CODEC", r#"{"min_reach":100.0}"#),
+    ("SwingAnimation.CODEC", r#"{}"#),
+    ("SwingAnimation.CODEC", r#"{"type":"stab","duration":12}"#),
+    ("SwingAnimation.CODEC", r#"{"type":"nope","duration":0}"#),
+    ("Weapon.CODEC", r#"{}"#),
+    (
+        "Weapon.CODEC",
+        r#"{"item_damage_per_attack":2,"disable_blocking_for_seconds":5.0}"#,
+    ),
+    ("Weapon.CODEC", r#"{"item_damage_per_attack":-1}"#),
 ];
 
 /// Replacement values for mutation: wrong types, boundaries, unknown names.
@@ -630,6 +1089,9 @@ const SNBT: &[(&str, &str)] = &[
     ("OminousBottleAmplifier.CODEC", "3.0f"),
 ];
 
+/// Harvested data-pack documents per codec that also get structural mutants.
+const MUTATED_HARVESTED: usize = 14;
+
 /// Build the corpus text.
 pub fn emit() -> Result<String, String> {
     let known: std::collections::BTreeSet<&str> = codec::entries().iter().map(|e| e.name).collect();
@@ -664,10 +1126,21 @@ pub fn emit() -> Result<String, String> {
 
     let mut out = String::new();
     let mut per_codec: std::collections::BTreeMap<String, usize> = Default::default();
+    let mut harvested_per_codec: std::collections::BTreeMap<String, usize> = Default::default();
     for (name, origin, value) in &inputs {
         let n = per_codec.entry(name.clone()).or_default();
         let ordinal = *n;
         *n += 1;
+        // Every harvested document is a corpus input; the structural mutants
+        // (which multiply the corpus) cover every hand-typed input and the
+        // first [`MUTATED_HARVESTED`] harvested documents of each codec.
+        let mutate = if origin.starts_with("hand") {
+            true
+        } else {
+            let h = harvested_per_codec.entry(name.clone()).or_default();
+            *h += 1;
+            *h <= MUTATED_HARVESTED
+        };
         out += &line(format!("{name}.{origin}.json"), name, "json", value.clone());
         // The SNBT spelling of the first inputs of each codec.
         if ordinal < 6 {
@@ -677,6 +1150,9 @@ pub fn emit() -> Result<String, String> {
                 "nbt",
                 json!(to_snbt(value)),
             );
+        }
+        if !mutate {
+            continue;
         }
         let mut rng = Rng::for_stream(&format!("codec.{name}.{origin}"));
         for (m, mutant) in mutants(value, &mut rng, 6).iter().enumerate() {

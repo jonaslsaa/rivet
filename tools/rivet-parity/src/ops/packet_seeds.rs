@@ -171,6 +171,41 @@ fn position_move_rotation(rng: &mut Rng) -> Wire {
         .f32(angle(rng))
 }
 
+/// A root `TAG_String` component (the plain-text form `trusted_component` writes).
+fn text(w: Wire, s: &str) -> Wire {
+    w.u8(8).i16(s.len() as i16).raw(s.as_bytes())
+}
+
+/// `Optional<NumberFormat>`: absent, blank (type 0), or fixed (type 1, a text component).
+fn number_format(rng: &mut Rng, w: Wire) -> Wire {
+    match rng.below(3) {
+        0 => w.bool(false),
+        1 => w.bool(true).varint(0),
+        _ => text(w.bool(true).varint(1), "N"),
+    }
+}
+
+/// `ClientboundSetPlayerTeamPacket.Parameters`.
+fn team_parameters(rng: &mut Rng, w: Wire) -> Wire {
+    let w = text(text(text(w, "Team"), "["), "]");
+    let w = w.varint(rng.below(4) as i32).varint(rng.below(4) as i32);
+    let w = if rng.below(2) == 0 {
+        w.bool(false)
+    } else {
+        w.bool(true).varint(rng.below(22) as i32)
+    };
+    w.u8(rng.below(4) as u8)
+}
+
+fn team_players(rng: &mut Rng, w: Wire) -> Wire {
+    let count = rng.below(3) as i32;
+    let mut w = w.varint(count);
+    for _ in 0..count {
+        w = w.string(pick(rng, &["Notch", "Steve", "Alex"]));
+    }
+    w
+}
+
 /// Valid wire bodies for one packet, built from `rng`. Packets whose body is
 /// too structured to write by hand here (chunk data, tag tables, registry
 /// contents, entity data) rely on the captured bodies and mutations of them.
@@ -580,6 +615,73 @@ pub fn seeds(entry: &Entry, rng: &mut Rng) -> Vec<Vec<u8>> {
                     .done()
             },
             3,
+            rng,
+        ),
+        // ---- scoreboard (RegistryFriendlyByteBuf)
+        ("play", "clientbound", "minecraft:set_objective") => more(
+            &mut |r| {
+                let w = Wire::new().string(pick(r, &["kills", "health", "rivet"]));
+                match r.below(4) {
+                    0 => w.u8(1).done(),
+                    method => {
+                        let w = text(w.u8(if method == 1 { 0 } else { 2 }), "Score");
+                        let render = r.below(2) as i32;
+                        number_format(r, w.varint(render)).done()
+                    }
+                }
+            },
+            5,
+            rng,
+        ),
+        ("play", "clientbound", "minecraft:set_display_objective") => more(
+            &mut |r| {
+                Wire::new()
+                    .varint(r.below(19) as i32)
+                    .string(pick(r, &["", "kills", "health"]))
+                    .done()
+            },
+            3,
+            rng,
+        ),
+        ("play", "clientbound", "minecraft:set_score") => more(
+            &mut |r| {
+                let w = Wire::new()
+                    .string(pick(r, &["Notch", "Steve", "#total"]))
+                    .string(pick(r, &["kills", "health"]))
+                    .varint(small(r) - 8000);
+                let w = if r.below(2) == 0 { w.bool(false) } else { text(w.bool(true), "Alias") };
+                number_format(r, w).done()
+            },
+            4,
+            rng,
+        ),
+        ("play", "clientbound", "minecraft:reset_score") => more(
+            &mut |r| {
+                let w = Wire::new().string(pick(r, &["Notch", "Steve"]));
+                if r.below(2) == 0 {
+                    w.bool(false).done()
+                } else {
+                    w.bool(true).string("kills").done()
+                }
+            },
+            3,
+            rng,
+        ),
+        ("play", "clientbound", "minecraft:set_player_team") => more(
+            &mut |r| {
+                let w = Wire::new().string(pick(r, &["red", "blue", "staff"]));
+                match r.below(5) {
+                    0 => {
+                        let w = team_parameters(r, w.u8(0));
+                        team_players(r, w).done()
+                    }
+                    1 => w.u8(1).done(),
+                    2 => team_parameters(r, w.u8(2)).done(),
+                    3 => team_players(r, w.u8(3)).done(),
+                    _ => team_players(r, w.u8(4)).done(),
+                }
+            },
+            6,
             rng,
         ),
         _ => {}

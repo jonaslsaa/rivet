@@ -46,59 +46,33 @@ packet.reencode	input:seed.configuration.clientbound.update_enabled_features.1	J
 packet.reencode	input:random.configuration.clientbound.disconnect.7	Rivet aborts the process allocating from a hostile length prefix (Paper: OutOfMemoryError); input never handed to Rust	795
 packet.reencode	input:random.play.clientbound.player_info_update.7	Rivet aborts the process allocating from a hostile length prefix (Paper: OutOfMemoryError); input never handed to Rust	795
 packet.reencode	input:random.play.clientbound.update_tags.4	Rivet aborts the process allocating from a hostile length prefix (Paper: OutOfMemoryError); input never handed to Rust	795
-codec.reencode	input:BlockPos.CODEC.hand110.mut2.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+packet.reencode	input:mutate.play.clientbound.set_display_objective.1.flip1	DisplaySlot id out of range decodes to slot 0 in Paper (ByIdMap ZERO strategy), Rivet rejects	808
+packet.reencode	input:mutate.play.clientbound.set_display_objective.1.replace	DisplaySlot id out of range decodes to slot 0 in Paper (ByIdMap ZERO strategy), Rivet rejects	808
+codec.reencode	input:ItemStack.CODEC.hand001.json	Component equal to the item prototype kept (Paper drops it)	800
+codec.reencode	input:ItemStack.CODEC.hand001.nbt	Component equal to the item prototype kept (Paper drops it)	800
+codec.reencode	input:DataComponentPatch.CODEC.hand012.mut1.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.hand014.mut1.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.hand014.mut1.nbt	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.hand014.mut4.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.hand017.mut1.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:ConsumeEffect.CODEC.hand040.json	Dispatch codec writes the type key first (Paper: last) or empty sound id accepted	799
+codec.reencode	input:ConsumeEffect.CODEC.hand040.mut1.json	Dispatch codec writes the type key first (Paper: last) or empty sound id accepted	799
+codec.reencode	input:ConsumeEffect.CODEC.hand041.json	Dispatch codec writes the type key first (Paper: last) or empty sound id accepted	799
+codec.reencode	input:ConsumeEffect.CODEC.hand043.json	Dispatch codec writes the type key first (Paper: last) or empty sound id accepted	799
+codec.reencode	input:ConsumeEffect.CODEC.hand043.mut4.json	Dispatch codec writes the type key first (Paper: last) or empty sound id accepted	799
+codec.reencode	input:OminousBottleAmplifier.CODEC.hand060.mut4.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:OminousBottleAmplifier.CODEC.hand061.mut2.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:IntProviders.CODEC.hand070.mut2.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:IntProviders.CODEC.hand074.mut1.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:IntProviders.CODEC.hand076.mut2.json	Non-finite float: Paper writes Infinity, Rivet's JSON value holds null	797
 codec.reencode	input:ComponentSerialization.CODEC.hand096.mut2.json	ComponentSerialization decode differs (empty selector accepted, nbt block source rejected)	804
 codec.reencode	input:ComponentSerialization.CODEC.hand097.json	ComponentSerialization decode differs (empty selector accepted, nbt block source rejected)	804
-codec.reencode	input:ConsumeEffect.CODEC.hand040.json	ConsumeEffect dispatch type key written first (Paper: last) or empty sound id accepted	799
-codec.reencode	input:ConsumeEffect.CODEC.hand040.mut1.json	ConsumeEffect dispatch type key written first (Paper: last) or empty sound id accepted	799
-codec.reencode	input:ConsumeEffect.CODEC.hand041.json	ConsumeEffect dispatch type key written first (Paper: last) or empty sound id accepted	799
-codec.reencode	input:ConsumeEffect.CODEC.hand043.json	ConsumeEffect dispatch type key written first (Paper: last) or empty sound id accepted	799
-codec.reencode	input:ConsumeEffect.CODEC.hand043.mut4.json	ConsumeEffect dispatch type key written first (Paper: last) or empty sound id accepted	799
-codec.reencode	input:DataComponentPatch.CODEC.hand012.mut1.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
-codec.reencode	input:DataComponentPatch.CODEC.hand014.mut1.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
-codec.reencode	input:DataComponentPatch.CODEC.hand014.mut1.nbt	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
-codec.reencode	input:DataComponentPatch.CODEC.hand014.mut4.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
-codec.reencode	input:DataComponentPatch.CODEC.hand017.mut1.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
-codec.reencode	input:DataComponentPatch.CODEC.pack014.mut1.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
-codec.reencode	input:DataComponentPatch.CODEC.pack014.mut2.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
-codec.reencode	input:DataComponentPatch.CODEC.pack014.mut3.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
-codec.reencode	input:DataComponentPatch.CODEC.pack015.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
-codec.reencode	input:DataComponentPatch.CODEC.pack015.mut0.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
-codec.reencode	input:DataComponentPatch.CODEC.pack015.mut1.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
-codec.reencode	input:DataComponentPatch.CODEC.pack015.mut2.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
-codec.reencode	input:DataComponentPatch.CODEC.pack016.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
-codec.reencode	input:DataComponentPatch.CODEC.pack016.mut3.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
-codec.reencode	input:DataComponentPatch.CODEC.pack018.mut1.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
-codec.reencode	input:DataComponentPatch.CODEC.pack018.mut2.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
-codec.reencode	input:DataComponentPatch.CODEC.pack018.mut3.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
-codec.reencode	input:DataComponentPatch.CODEC.pack018.mut4.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
-codec.reencode	input:DataComponentPatch.CODEC.pack019.mut1.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
-codec.reencode	input:DataComponentPatch.CODEC.pack019.mut2.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
-codec.reencode	input:DataComponentPatch.CODEC.pack019.mut3.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
-codec.reencode	input:DataComponentPatch.CODEC.pack019.mut4.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
-codec.reencode	input:DataComponentPatch.CODEC.pack020.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
-codec.reencode	input:DataComponentPatch.CODEC.pack020.mut1.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
-codec.reencode	input:DataComponentPatch.CODEC.pack020.mut3.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
-codec.reencode	input:DataComponentPatch.CODEC.pack021.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
-codec.reencode	input:DataComponentPatch.CODEC.pack021.mut1.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
-codec.reencode	input:DataComponentPatch.CODEC.pack021.mut3.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
-codec.reencode	input:DataComponentPatch.CODEC.pack022.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
-codec.reencode	input:DataComponentPatch.CODEC.pack022.mut1.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
-codec.reencode	input:DataComponentPatch.CODEC.pack022.mut3.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
-codec.reencode	input:DataComponentPatch.CODEC.pack023.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
-codec.reencode	input:DataComponentPatch.CODEC.pack023.mut1.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
-codec.reencode	input:DataComponentPatch.CODEC.pack023.mut3.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
-codec.reencode	input:DataComponentPatch.CODEC.pack024.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
-codec.reencode	input:DataComponentPatch.CODEC.pack024.mut1.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
-codec.reencode	input:DataComponentPatch.CODEC.pack024.mut3.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
-codec.reencode	input:DataComponentPatch.CODEC.pack025.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
-codec.reencode	input:DataComponentPatch.CODEC.pack025.mut1.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
-codec.reencode	input:DataComponentPatch.CODEC.pack025.mut3.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
-codec.reencode	input:DataComponentPatch.CODEC.pack026.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
-codec.reencode	input:DataComponentPatch.CODEC.pack026.mut1.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
-codec.reencode	input:DataComponentPatch.CODEC.pack027.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
-codec.reencode	input:DataComponentPatch.CODEC.pack027.mut1.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
-codec.reencode	input:DataComponentPatch.CODEC.pack027.mut3.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
+codec.reencode	input:UUIDUtil.CODEC.hand103.mut2.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:UUIDUtil.CODEC.hand103.mut3.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:BlockPos.CODEC.hand110.mut2.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:HeightProvider.CODEC.hand132.mut4.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:VerticalAnchor.CODEC.hand140.mut4.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:MobEffectInstance.CODEC.hand150.mut1.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
 codec.reencode	input:FeatureSize.CODEC.hand153.mut1.json	FeatureSize optional-field strictness differs from Paper	801
 codec.reencode	input:FeatureSize.CODEC.hand153.mut1.nbt	FeatureSize optional-field strictness differs from Paper	801
 codec.reencode	input:FeatureSize.CODEC.hand153.mut2.json	FeatureSize optional-field strictness differs from Paper	801
@@ -106,65 +80,142 @@ codec.reencode	input:FeatureSize.CODEC.hand153.mut3.json	FeatureSize optional-fi
 codec.reencode	input:FeatureSize.CODEC.hand154.mut1.json	FeatureSize optional-field strictness differs from Paper	801
 codec.reencode	input:FeatureSize.CODEC.hand154.mut1.nbt	FeatureSize optional-field strictness differs from Paper	801
 codec.reencode	input:FeatureSize.CODEC.hand154.mut4.json	FeatureSize optional-field strictness differs from Paper	801
-codec.reencode	input:FeatureSize.CODEC.pack028.mut1.json	FeatureSize optional-field strictness differs from Paper	801
-codec.reencode	input:FeatureSize.CODEC.pack028.mut1.nbt	FeatureSize optional-field strictness differs from Paper	801
-codec.reencode	input:FeatureSize.CODEC.pack028.mut2.json	FeatureSize optional-field strictness differs from Paper	801
-codec.reencode	input:FeatureSize.CODEC.pack030.mut4.json	FeatureSize optional-field strictness differs from Paper	801
-codec.reencode	input:FeatureSize.CODEC.pack031.mut1.json	FeatureSize optional-field strictness differs from Paper	801
-codec.reencode	input:FeatureSize.CODEC.pack031.mut2.json	FeatureSize optional-field strictness differs from Paper	801
-codec.reencode	input:FeatureSize.CODEC.pack031.mut3.json	FeatureSize optional-field strictness differs from Paper	801
-codec.reencode	input:FeatureSize.CODEC.pack032.mut3.json	FeatureSize optional-field strictness differs from Paper	801
-codec.reencode	input:FeatureSize.CODEC.pack035.mut1.json	FeatureSize optional-field strictness differs from Paper	801
-codec.reencode	input:FeatureSize.CODEC.pack035.mut2.json	FeatureSize optional-field strictness differs from Paper	801
-codec.reencode	input:FeatureSize.CODEC.pack035.mut5.json	FeatureSize optional-field strictness differs from Paper	801
-codec.reencode	input:FloatProviders.CODEC.pack039.mut3.json	Non-finite float: Paper writes Infinity, Rivet's JSON value holds null	797
-codec.reencode	input:FloatProviders.CODEC.poison08.json	Non-finite float: Paper writes Infinity, Rivet's JSON value holds null	797
-codec.reencode	input:HeightProvider.CODEC.hand132.mut4.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
-codec.reencode	input:IntProviders.CODEC.hand070.mut2.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
-codec.reencode	input:IntProviders.CODEC.hand074.mut1.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
-codec.reencode	input:IntProviders.CODEC.hand076.mut2.json	Non-finite float: Paper writes Infinity, Rivet's JSON value holds null	797
-codec.reencode	input:IntProviders.CODEC.pack073.mut4.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
-codec.reencode	input:IntProviders.CODEC.pack075.mut1.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
-codec.reencode	input:IntProviders.CODEC.poison08.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
-codec.reencode	input:ItemStack.CODEC.hand001.json	Component equal to the item prototype kept (Paper drops it)	800
-codec.reencode	input:ItemStack.CODEC.hand001.nbt	Component equal to the item prototype kept (Paper drops it)	800
-codec.reencode	input:ItemStack.CODEC.pack090.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
-codec.reencode	input:ItemStackTemplate.CODEC.pack104.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
-codec.reencode	input:MobEffectInstance.CODEC.hand150.mut1.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
 codec.reencode	input:NormalNoise.NoiseParameters.DIRECT_CODEC.hand172.mut2.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
-codec.reencode	input:NormalNoise.NoiseParameters.DIRECT_CODEC.pack116.mut2.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
-codec.reencode	input:NormalNoise.NoiseParameters.DIRECT_CODEC.pack117.mut3.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
-codec.reencode	input:NormalNoise.NoiseParameters.DIRECT_CODEC.pack118.mut4.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
-codec.reencode	input:OminousBottleAmplifier.CODEC.hand060.mut4.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
-codec.reencode	input:OminousBottleAmplifier.CODEC.hand061.mut2.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
-codec.reencode	input:OminousBottleAmplifier.CODEC.poison08.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
-codec.reencode	input:RuleTest.CODEC.pack147.mut4.json	Non-finite float: Paper writes Infinity, Rivet's JSON value holds null	797
-codec.reencode	input:UUIDUtil.CODEC.hand103.mut2.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
-codec.reencode	input:UUIDUtil.CODEC.hand103.mut3.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
-codec.reencode	input:VerticalAnchor.CODEC.hand140.mut4.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
-codec.reencode	input:VerticalAnchor.CODEC.pack150.mut3.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
-codec.reencode	input:VerticalAnchor.CODEC.pack153.mut3.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
-codec.reencode	input:VerticalAnchor.CODEC.pack156.mut1.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
-codec.reencode	input:VerticalAnchor.CODEC.pack160.mut2.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
 codec.reencode	input:WorldDataConfiguration.CODEC.hand178.json	WorldDataConfiguration DataPacks elided when equal to default (Paper never elides: DataPackConfig has no equals)	802
+codec.reencode	input:WorldDataConfiguration.CODEC.hand178.nbt	WorldDataConfiguration DataPacks elided when equal to default (Paper never elides: DataPackConfig has no equals)	802
 codec.reencode	input:WorldDataConfiguration.CODEC.hand178.mut0.json	WorldDataConfiguration DataPacks elided when equal to default (Paper never elides: DataPackConfig has no equals)	802
 codec.reencode	input:WorldDataConfiguration.CODEC.hand178.mut0.nbt	WorldDataConfiguration DataPacks elided when equal to default (Paper never elides: DataPackConfig has no equals)	802
 codec.reencode	input:WorldDataConfiguration.CODEC.hand178.mut1.json	WorldDataConfiguration DataPacks elided when equal to default (Paper never elides: DataPackConfig has no equals)	802
 codec.reencode	input:WorldDataConfiguration.CODEC.hand178.mut1.nbt	WorldDataConfiguration DataPacks elided when equal to default (Paper never elides: DataPackConfig has no equals)	802
 codec.reencode	input:WorldDataConfiguration.CODEC.hand178.mut3.json	WorldDataConfiguration DataPacks elided when equal to default (Paper never elides: DataPackConfig has no equals)	802
 codec.reencode	input:WorldDataConfiguration.CODEC.hand178.mut4.json	WorldDataConfiguration DataPacks elided when equal to default (Paper never elides: DataPackConfig has no equals)	802
-codec.reencode	input:WorldDataConfiguration.CODEC.hand178.nbt	WorldDataConfiguration DataPacks elided when equal to default (Paper never elides: DataPackConfig has no equals)	802
 codec.reencode	input:WorldDataConfiguration.CODEC.hand179.json	WorldDataConfiguration DataPacks elided when equal to default (Paper never elides: DataPackConfig has no equals)	802
 codec.reencode	input:WorldDataConfiguration.CODEC.hand179.nbt	WorldDataConfiguration DataPacks elided when equal to default (Paper never elides: DataPackConfig has no equals)	802
-codec.reencode	input:WorldPreset.DIRECT_CODEC.pack163.json	Registry-bound codec: Rivet has no registries behind plain JsonOps/NbtOps, Paper resolves vanilla holders	803
-codec.reencode	input:WorldPreset.DIRECT_CODEC.pack163.nbt	Registry-bound codec: Rivet has no registries behind plain JsonOps/NbtOps, Paper resolves vanilla holders	803
-codec.reencode	input:WorldPreset.DIRECT_CODEC.pack164.json	Registry-bound codec: Rivet has no registries behind plain JsonOps/NbtOps, Paper resolves vanilla holders	803
-codec.reencode	input:WorldPreset.DIRECT_CODEC.pack164.nbt	Registry-bound codec: Rivet has no registries behind plain JsonOps/NbtOps, Paper resolves vanilla holders	803
-codec.reencode	input:WorldPreset.DIRECT_CODEC.pack165.json	Registry-bound codec: Rivet has no registries behind plain JsonOps/NbtOps, Paper resolves vanilla holders	803
-codec.reencode	input:WorldPreset.DIRECT_CODEC.pack165.nbt	Registry-bound codec: Rivet has no registries behind plain JsonOps/NbtOps, Paper resolves vanilla holders	803
-codec.reencode	input:WorldPreset.DIRECT_CODEC.pack166.json	Registry-bound codec: Rivet has no registries behind plain JsonOps/NbtOps, Paper resolves vanilla holders	803
-codec.reencode	input:WorldPreset.DIRECT_CODEC.pack166.nbt	Registry-bound codec: Rivet has no registries behind plain JsonOps/NbtOps, Paper resolves vanilla holders	803
-codec.reencode	input:WorldPreset.DIRECT_CODEC.pack167.json	Registry-bound codec: Rivet has no registries behind plain JsonOps/NbtOps, Paper resolves vanilla holders	803
-codec.reencode	input:WorldPreset.DIRECT_CODEC.pack167.nbt	Registry-bound codec: Rivet has no registries behind plain JsonOps/NbtOps, Paper resolves vanilla holders	803
-codec.reencode	input:WorldPreset.DIRECT_CODEC.pack168.json	Registry-bound codec: Rivet has no registries behind plain JsonOps/NbtOps, Paper resolves vanilla holders	803
-codec.reencode	input:WorldPreset.DIRECT_CODEC.pack169.json	Registry-bound codec: Rivet has no registries behind plain JsonOps/NbtOps, Paper resolves vanilla holders	803
+codec.reencode	input:WorldBorder.Settings.CODEC.hand183.json	JSON double formatting: Java Double.toString (5.9999968E7, 1.0E300) vs Rivet plain/lowercase exponent	806
+codec.reencode	input:WorldBorder.Settings.CODEC.hand185.mut3.json	JSON double formatting: Java Double.toString (5.9999968E7, 1.0E300) vs Rivet plain/lowercase exponent	806
+codec.reencode	input:WorldBorder.CODEC.hand187.json	JSON double formatting: Java Double.toString (5.9999968E7, 1.0E300) vs Rivet plain/lowercase exponent	806
+codec.reencode	input:WorldBorder.CODEC.hand187.mut5.json	JSON double formatting: Java Double.toString (5.9999968E7, 1.0E300) vs Rivet plain/lowercase exponent	806
+codec.reencode	input:WanderingTraderData.CODEC.hand193.mut1.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:WanderingTraderData.CODEC.hand194.mut3.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:BlendingData.Packed.CODEC.hand201.mut5.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:ObjectiveCriteria.CODEC.hand216.mut3.json	ObjectiveCriteria accepts unknown namespaced criteria names (Paper declines)	807
+codec.reencode	input:NumberFormatTypes.CODEC.hand222.json	Dispatch codec writes the type key first (Paper: last) or empty sound id accepted	799
+codec.reencode	input:NumberFormatTypes.CODEC.hand223.json	Dispatch codec writes the type key first (Paper: last) or empty sound id accepted	799
+codec.reencode	input:NumberFormatTypes.CODEC.hand223.mut0.json	Dispatch codec writes the type key first (Paper: last) or empty sound id accepted	799
+codec.reencode	input:NumberFormatTypes.CODEC.hand223.mut3.json	Dispatch codec writes the type key first (Paper: last) or empty sound id accepted	799
+codec.reencode	input:BiomeSpecialEffects.CODEC.hand254.mut1.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:BiomeSpecialEffects.CODEC.hand255.mut2.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:MobSpawnSettings.MobSpawnCost.CODEC.hand269.mut2.json	JSON double formatting: Java Double.toString (5.9999968E7, 1.0E300) vs Rivet plain/lowercase exponent	806
+codec.reencode	input:TickPriority.CODEC.hand276.mut2.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:TickPriority.CODEC.hand278.mut4.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:TickPriority.CODEC.hand279.mut1.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:RarityFilter.CODEC.hand287.mut3.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:CountOnEveryLayerPlacement.CODEC.hand293.mut2.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:CountOnEveryLayerPlacement.CODEC.hand295.mut1.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:CountOnEveryLayerPlacement.CODEC.hand296.mut2.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:CanyonCarverConfiguration.CanyonShapeConfiguration.CODEC.hand318.mut1.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.pack266.mut1.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.pack266.mut2.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.pack267.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.pack267.mut0.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.pack267.mut1.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.pack267.mut5.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.pack268.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.pack268.mut0.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.pack268.mut3.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.pack268.mut4.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.pack270.mut1.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.pack270.mut2.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.pack270.mut3.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.pack270.mut4.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.pack271.mut1.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.pack271.mut2.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.pack271.mut3.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.pack271.mut4.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.pack272.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.pack272.mut1.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.pack272.mut3.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.pack273.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.pack273.mut1.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.pack273.mut3.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.pack274.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.pack274.mut1.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.pack274.mut3.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.pack275.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.pack275.mut1.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.pack275.mut3.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.pack276.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.pack276.mut1.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.pack276.mut3.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.pack277.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.pack277.mut1.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.pack277.mut3.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.pack278.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.pack278.mut1.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.pack278.mut3.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.pack279.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.pack279.mut1.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.pack279.mut3.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.pack280.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DataComponentPatch.CODEC.pack281.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:FeatureSize.CODEC.pack283.mut1.json	FeatureSize optional-field strictness differs from Paper	801
+codec.reencode	input:FeatureSize.CODEC.pack283.mut1.nbt	FeatureSize optional-field strictness differs from Paper	801
+codec.reencode	input:FeatureSize.CODEC.pack283.mut2.json	FeatureSize optional-field strictness differs from Paper	801
+codec.reencode	input:FeatureSize.CODEC.pack283.mut5.json	FeatureSize optional-field strictness differs from Paper	801
+codec.reencode	input:FeatureSize.CODEC.pack285.mut1.json	FeatureSize optional-field strictness differs from Paper	801
+codec.reencode	input:FeatureSize.CODEC.pack287.mut1.json	FeatureSize optional-field strictness differs from Paper	801
+codec.reencode	input:FeatureSize.CODEC.pack287.mut2.json	FeatureSize optional-field strictness differs from Paper	801
+codec.reencode	input:FeatureSize.CODEC.pack287.mut5.json	FeatureSize optional-field strictness differs from Paper	801
+codec.reencode	input:FeatureSize.CODEC.pack288.mut5.json	FeatureSize optional-field strictness differs from Paper	801
+codec.reencode	input:FeatureSize.CODEC.pack289.mut2.json	FeatureSize optional-field strictness differs from Paper	801
+codec.reencode	input:FeatureSize.CODEC.pack289.mut4.json	FeatureSize optional-field strictness differs from Paper	801
+codec.reencode	input:FeatureSize.CODEC.pack290.mut2.json	FeatureSize optional-field strictness differs from Paper	801
+codec.reencode	input:FeatureSize.CODEC.pack290.mut4.json	FeatureSize optional-field strictness differs from Paper	801
+codec.reencode	input:FloatProviders.CODEC.pack302.mut2.json	Non-finite float: Paper writes Infinity, Rivet's JSON value holds null	797
+codec.reencode	input:IntProviders.CODEC.pack854.mut5.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:ItemStack.CODEC.pack2256.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
+codec.reencode	input:ItemStack.CODEC.pack2257.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
+codec.reencode	input:ItemStack.CODEC.pack2258.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
+codec.reencode	input:ItemStack.CODEC.pack2259.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
+codec.reencode	input:ItemStack.CODEC.pack2260.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
+codec.reencode	input:ItemStack.CODEC.pack2261.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
+codec.reencode	input:ItemStack.CODEC.pack2262.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
+codec.reencode	input:ItemStack.CODEC.pack2263.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
+codec.reencode	input:ItemStack.CODEC.pack2264.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
+codec.reencode	input:ItemStack.CODEC.pack2265.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
+codec.reencode	input:ItemStackTemplate.CODEC.pack3526.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
+codec.reencode	input:ItemStackTemplate.CODEC.pack3527.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
+codec.reencode	input:ItemStackTemplate.CODEC.pack3528.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
+codec.reencode	input:ItemStackTemplate.CODEC.pack3529.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
+codec.reencode	input:ItemStackTemplate.CODEC.pack3530.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
+codec.reencode	input:ItemStackTemplate.CODEC.pack3531.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
+codec.reencode	input:ItemStackTemplate.CODEC.pack3532.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
+codec.reencode	input:ItemStackTemplate.CODEC.pack3533.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
+codec.reencode	input:ItemStackTemplate.CODEC.pack3534.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
+codec.reencode	input:ItemStackTemplate.CODEC.pack3535.json	DataComponentPatch component value codec not wired: wrong types accepted or key order differs	798
+codec.reencode	input:NormalNoise.NoiseParameters.DIRECT_CODEC.pack3729.mut1.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:RuleTest.CODEC.pack3837.mut3.json	Non-finite float: Paper writes Infinity, Rivet's JSON value holds null	797
+codec.reencode	input:VerticalAnchor.CODEC.pack3925.mut1.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:WorldPreset.DIRECT_CODEC.pack3983.json	Registry-bound codec: Rivet has no registries behind plain JsonOps/NbtOps, Paper resolves vanilla holders	803
+codec.reencode	input:WorldPreset.DIRECT_CODEC.pack3983.nbt	Registry-bound codec: Rivet has no registries behind plain JsonOps/NbtOps, Paper resolves vanilla holders	803
+codec.reencode	input:WorldPreset.DIRECT_CODEC.pack3984.json	Registry-bound codec: Rivet has no registries behind plain JsonOps/NbtOps, Paper resolves vanilla holders	803
+codec.reencode	input:WorldPreset.DIRECT_CODEC.pack3984.nbt	Registry-bound codec: Rivet has no registries behind plain JsonOps/NbtOps, Paper resolves vanilla holders	803
+codec.reencode	input:WorldPreset.DIRECT_CODEC.pack3985.json	Registry-bound codec: Rivet has no registries behind plain JsonOps/NbtOps, Paper resolves vanilla holders	803
+codec.reencode	input:WorldPreset.DIRECT_CODEC.pack3985.nbt	Registry-bound codec: Rivet has no registries behind plain JsonOps/NbtOps, Paper resolves vanilla holders	803
+codec.reencode	input:WorldPreset.DIRECT_CODEC.pack3986.json	Registry-bound codec: Rivet has no registries behind plain JsonOps/NbtOps, Paper resolves vanilla holders	803
+codec.reencode	input:WorldPreset.DIRECT_CODEC.pack3986.nbt	Registry-bound codec: Rivet has no registries behind plain JsonOps/NbtOps, Paper resolves vanilla holders	803
+codec.reencode	input:WorldPreset.DIRECT_CODEC.pack3987.json	Registry-bound codec: Rivet has no registries behind plain JsonOps/NbtOps, Paper resolves vanilla holders	803
+codec.reencode	input:WorldPreset.DIRECT_CODEC.pack3987.nbt	Registry-bound codec: Rivet has no registries behind plain JsonOps/NbtOps, Paper resolves vanilla holders	803
+codec.reencode	input:WorldPreset.DIRECT_CODEC.pack3988.json	Registry-bound codec: Rivet has no registries behind plain JsonOps/NbtOps, Paper resolves vanilla holders	803
+codec.reencode	input:WorldPreset.DIRECT_CODEC.pack3989.json	Registry-bound codec: Rivet has no registries behind plain JsonOps/NbtOps, Paper resolves vanilla holders	803
+codec.reencode	input:FloatProviders.CODEC.poison08.json	Non-finite float: Paper writes Infinity, Rivet's JSON value holds null	797
+codec.reencode	input:IntProviders.CODEC.poison08.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:ObjectiveCriteria.CODEC.poison10.json	ObjectiveCriteria accepts unknown namespaced criteria names (Paper declines)	807
+codec.reencode	input:OminousBottleAmplifier.CODEC.poison08.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:TickPriority.CODEC.poison08.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:FireworkExplosion.CODEC.hand355.nbt	NBT int list written as IntArrayTag by Rivet, plain ListTag by Paper (Codec.INT.listOf())	809
+codec.reencode	input:FireworkExplosion.CODEC.hand355.mut0.nbt	NBT int list written as IntArrayTag by Rivet, plain ListTag by Paper (Codec.INT.listOf())	809
+codec.reencode	input:FireworkExplosion.CODEC.hand355.mut1.nbt	NBT int list written as IntArrayTag by Rivet, plain ListTag by Paper (Codec.INT.listOf())	809
+codec.reencode	input:SwingAnimation.CODEC.hand373.mut3.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:DyedItemColor.CODEC.poison08.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:MapItemColor.CODEC.poison08.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796

@@ -174,7 +174,7 @@ side is `RivetReferenceOracle`'s op registry; the Rust twins are
 `tools/rivet-reference-oracle/fixtures/ops/` (`corpus/<op>.jsonl`,
 `<op>.jsonl`, `manifest.json`, `exclusions.tsv`). Recorded today:
 `snbt.parse` (170 inputs), `nbt.decode` (40), `component.json` (62),
-`packet.reencode` (2,503) and `codec.reencode` (3,499), with corpora derived
+`packet.reencode` (2,654) and `codec.reencode` (10,081), with corpora derived
 from this tool's own corpus, the join capture, seeded generators and the
 committed data-pack seeds (`ops emit-corpus`; a test pins the committed files
 to it). The last two print per-subject tallies (one per ported packet struct
@@ -198,6 +198,6 @@ op, the input id and the differing fields. Exclusions come only from the
 committed `exclusions.tsv` (`op`, `field`, `reason`, `issue`): `field` is a
 path under `result.` (Paper differs from itself) or `input:<id>` (a known Rivet
 divergence filed as a GitHub issue number; the input is not handed to Rust and
-is counted as excluded, never as matched). Each op row asserts closure (declared == executed, zero executed
+is counted as excluded, never as matched). Each op row asserts closure (declared == executed + excluded, zero executed
 is UNVERIFIED) and needs its detected tamper negative to PASS. Exit codes are
 the usual 0 PASS / 1 FAIL / 3 UNVERIFIED.

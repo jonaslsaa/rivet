@@ -2,7 +2,8 @@
 """Harvest codec.reencode seeds from the vanilla data pack inside the Paper jar.
 
 Writes fixtures/ops/corpus-src/codec-datapack.jsonl: {"codec", "source", "json"}
-lines, deterministic (sorted, evenly sampled). The Rust corpus generator
+lines, deterministic (sorted by source file). Every distinct document the
+vanilla pack feeds a codec is kept: nothing is sampled or size-capped. The Rust corpus generator
 (rivet-parity ops emit-corpus) reads that file, so regenerating the corpus needs
 no jar; only refreshing the seeds does.
 
@@ -18,7 +19,6 @@ default_jar = repo / "tools/rivet-oracle/work/run/versions/26.2/paper-26.2.jar"
 jar = Path(sys.argv[1]) if len(sys.argv) > 1 else default_jar
 out = repo / "tools/rivet-reference-oracle/fixtures/ops/corpus-src/codec-datapack.jsonl"
 
-PER_CODEC = 14
 PROVIDER_TYPES = {
     "minecraft:" + t
     for t in (
@@ -33,8 +33,6 @@ found = {}  # codec -> {canonical json text: source}
 
 def add(codec, source, value):
     text = json.dumps(value, sort_keys=False, separators=(",", ":"))
-    if len(text) > 4000:
-        return
     found.setdefault(codec, {}).setdefault(text, source)
 
 
@@ -102,8 +100,7 @@ with zipfile.ZipFile(jar) as z:
 lines = []
 for codec in sorted(found):
     items = sorted(found[codec].items(), key=lambda kv: (kv[1], kv[0]))
-    step = max(1, len(items) // PER_CODEC)
-    for text, source in items[::step][:PER_CODEC]:
+    for text, source in items:
         lines.append(json.dumps({"codec": codec, "source": source, "json": json.loads(text)}, separators=(",", ":")))
 out.write_text("\n".join(lines) + "\n")
 print(f"wrote {len(lines)} seeds for {len(found)} codecs to {out}")
