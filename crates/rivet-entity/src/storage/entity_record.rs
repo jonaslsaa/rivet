@@ -196,10 +196,10 @@ impl EntityRemovalReason {
         matches!(self, Self::Killed | Self::Discarded)
     }
 
-    /// `RemovalReason.shouldSave()`.
+    /// `RemovalReason.shouldSave()` (only `UNLOADED_TO_CHUNK(false, true)` saves).
     #[must_use]
     pub const fn should_save(self) -> bool {
-        matches!(self, Self::UnloadedToChunk | Self::UnloadedWithPlayer)
+        matches!(self, Self::UnloadedToChunk)
     }
 }
 
@@ -409,7 +409,7 @@ impl StoredEntityRecord {
 
     /// Mirrors `EntityAccess.shouldBeSaved()` / `Entity.saveAsPassenger` eligibility:
     /// must be persistent, have a non-empty type ID, and either not removed or
-    /// removed for a saveable reason (`UnloadedToChunk` / `UnloadedWithPlayer`).
+    /// removed for a saveable reason (`UnloadedToChunk`).
     #[must_use]
     pub fn should_be_saved(&self) -> bool {
         if !self.persist || self.id.is_empty() {
