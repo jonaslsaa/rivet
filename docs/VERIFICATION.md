@@ -395,6 +395,22 @@ L = several days / multiple rounds. Ordered by risk x already-ported-unverified 
 | 11 | **Bot rows: dig/place (#55), container click (#56).** Paper-vs-Paper first, then `--server both` as the server paths land. Reuse one Paper boot for several scenarios. | M each | Twin-run identical, negative detected, row on scoreboard. Hard cap of ~12 L5 rows total. |
 | 12 | **Differential fuzz in T3.** Drive `packet.reencode`, `nbt.decode`, `snbt.parse`, `codec.reencode` from the existing 15 fuzz targets with a fixed time budget; minimized divergences are appended to the committed corpus through record mode. | M | Nightly row with executions and divergences; every found divergence becomes a permanent recorded input. |
 
+**Status of items 2 and 3 (landed together).**
+- *Item 3, oracle ops.* `RivetReferenceOracle` has an op registry (declared result-key order, rejection
+  classes, IEEE-754 bit-hex floats) serving both `run.sh --record` and the live JSON-Lines loop; the five
+  existing ops run on it unchanged (`rivet-parity` still reports 1,995 checks, transcript byte-identical).
+  The Rust client is `rivet_harness_common::oracle_client` (boot once, pipelining, tamper hook) with
+  `closure` and `canon`; `rivet-parity ops check|live` runs the comparator (canonical lines, first
+  divergence with op/id/field, `exclusions.tsv`, per-comparator tamper negative, closure counts).
+  Recorded: `snbt.parse` 170, `nbt.decode` 40, `component.json` 62 inputs under
+  `tools/rivet-reference-oracle/fixtures/ops/`; `nbt.encode` stays on the semantic comparator (D12).
+  `ops live` is a full-gate step; the offline replay and the broken-handler negative are cargo tests.
+- *Item 2, probe regeneration.* `tools/rivet-oracle/probes.tsv` covers every `run_*.sh` plus the op
+  recorder; `rivet-oracle regen --check [--only glob] [--changed range]` (see `tools/rivet-oracle/README.md`).
+  T3: `scripts/gate.sh --nightly`. T1 path trigger: `regen --check --changed origin/main...HEAD`, to be
+  called by the merge tier once `gate.sh` grows `--tier merge` (§6.1 item 3). Rows with no committed
+  output and orphan goldens report UNVERIFIED, so the nightly row is not PASS until they are resolved.
+
 Deferred, deliberately: GameTest runner parity (L6) rides on item 7 and issues #474/#475; Paper JUnit
 and the plugin corpus (L8) start with the adapter (#494, #504). Their ledger rows should be created now
 as `INACTIVE` with the real denominators (`0 / 9,653`) so the scoreboard tells the truth.
