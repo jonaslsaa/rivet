@@ -472,8 +472,8 @@ impl Container for AbstractFurnaceBlockEntity {
         self.base.set_changed();
     }
 
-    fn still_valid(&self, _ctx: &ContainerAccessContext) -> bool {
-        true
+    fn still_valid(&self, ctx: &ContainerAccessContext) -> bool {
+        !ctx.is_removed && ctx.can_interact
     }
 
     fn can_place_item(&self, slot: usize, stack: &InventoryItemStack) -> bool {

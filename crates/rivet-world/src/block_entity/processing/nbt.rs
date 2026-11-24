@@ -336,10 +336,22 @@ pub fn load_all_items(input: &CompoundTag, items: &mut [InventoryItemStack]) {
         let Some(item_name) = entry.get_string("id") else {
             continue;
         };
-        let Some(item_id) = ItemId::from_name(item_name) else {
+        // `Item.CODEC`: the id is an `Identifier` (default namespace `minecraft`)
+        // and `minecraft:air` is rejected.
+        let Ok(Some(identifier)) = Identifier::try_parse_result(item_name) else {
             continue;
         };
+        let Some(item_id) = ItemId::from_name(&identifier.to_string()) else {
+            continue;
+        };
+        if item_id.is_air() {
+            continue;
+        }
+        // `ExtraCodecs.intRange(1, 99)`: out-of-range counts fail the entry.
         let count = entry.get_int_or("count", 1);
+        if !(1..=99).contains(&count) {
+            continue;
+        }
         let mut map = ComponentMap::new();
         if let Some(comp_tag) = entry.get_compound("components") {
             for (k, v) in &comp_tag.tags {

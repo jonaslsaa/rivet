@@ -495,7 +495,7 @@ fn container_nbt_preserves_typed_item_components() {
     entry.put_int("count", 1);
     entry.put("components".into(), Tag::Compound(comp));
 
-    let mut list = ListTag::new();
+    let mut list = rivet_nbt::list_tag::ListTag::new();
     list.list.push(Tag::Compound(entry));
     let mut input = CompoundTag::new();
     input.put("Items".into(), Tag::List(list));
@@ -797,11 +797,13 @@ fn furnace_hopper_inserted_input_recomputes_cook_time_and_multiplier() {
     furnace.cook_speed_multiplier = 2.0; // 40 / 2.0 = 20 ticks
     furnace.set_item(SLOT_FUEL, stack("minecraft:coal", 1));
 
-    // Insert input via hopper (uses Container::set_item without RecipeManager).
+    // Insert input via hopper into a level-bound furnace (`setItem` recomputes).
     let mut hopper = HopperBlockEntity::new(Direction::Down);
     hopper.set_item(0, stack("minecraft:raw_iron", 1));
-    assert!(hopper.eject_items(&mut HopperTarget::Worldly(&mut furnace), 1));
+    assert!(hopper.eject_items(&mut HopperTarget::Furnace(&mut furnace, &recipes), 1));
     assert_eq!(furnace.get_item(SLOT_INPUT).get_count(), 1);
+    assert_eq!(furnace.cooking_total_time, 20);
+    assert_eq!(furnace.cooking_timer, 0);
 
     for tick_idx in 1..=20 {
         let res = furnace.server_tick(&recipes, &fuel);
@@ -1120,4 +1122,112 @@ fn fuel_values_keep_zero_burn_entries_and_vanilla_craft_remainders() {
     let bucket = inventory_crafting_remainder(water).expect("bucket remainder");
     assert_eq!(bucket.item().name(), Some("minecraft:bucket"));
     assert_eq!(bucket.get_max_stack_size(), 16);
+}
+
+#[test]
+fn processing_block_entities_still_valid_follows_context() {
+    // `BaseContainerBlockEntity.stillValid` -> `Container.stillValidBlockEntity`:
+    // false once the block entity is removed or the player is out of range.
+    let ok = ContainerAccessContext::survival(1);
+    let far = ContainerAccessContext {
+        can_interact: false,
+        ..ContainerAccessContext::survival(1)
+    };
+    let removed = ContainerAccessContext {
+        is_removed: true,
+        ..ContainerAccessContext::survival(1)
+    };
+    let chest = ChestBlockEntity::new();
+    let hopper = HopperBlockEntity::new(Direction::Down);
+    let furnace = new_furnace();
+    for ctx in [&far, &removed] {
+        assert!(!chest.still_valid(ctx));
+        assert!(!hopper.still_valid(ctx));
+        assert!(!furnace.still_valid(ctx));
+    }
+    assert!(chest.still_valid(&ok));
+    assert!(hopper.still_valid(&ok));
+    assert!(furnace.still_valid(&ok));
+}
+
+#[test]
+fn hopper_failed_push_does_not_dirty_and_item_ops_do_not_set_changed() {
+    // Paper `HopperBlockEntity.removeItem/setItem` never call `setChanged`, and a
+    // failed `hopperPush` restores the count in place: the hopper stays clean.
+    let mut chest = ChestBlockEntity::new();
+    for slot in 0..27 {
+        chest.set_item(slot, stack("minecraft:dirt", 64));
+    }
+    let mut hopper = HopperBlockEntity::new(Direction::Down);
+    hopper.set_item(0, stack("minecraft:dirt", 1));
+    let before = hopper.base.changed_count();
+    // Chest is full, so `isFullContainer` short-circuits: nothing moves.
+    assert!(!hopper.eject_items(&mut HopperTarget::Plain(&mut chest), 1));
+    assert_eq!(hopper.base.changed_count(), before);
+
+    // A chest with one dirt-accepting slot of 63: push succeeds; hopper slot
+    // becomes 1 - 1 + 0 = empty, still without `setChanged` on the hopper.
+    let mut chest = ChestBlockEntity::new();
+    for slot in 0..27 {
+        chest.set_item(slot, stack("minecraft:dirt", 64));
+    }
+    chest.set_item(5, stack("minecraft:dirt", 63));
+    assert!(hopper.eject_items(&mut HopperTarget::Plain(&mut chest), 1));
+    assert!(hopper.get_item(0).is_empty());
+    assert_eq!(chest.get_item(5).get_count(), 64);
+    assert_eq!(hopper.base.changed_count(), before);
+    let _ = hopper.remove_item(0, 1);
+    hopper.set_item(1, stack("minecraft:dirt", 2));
+    assert_eq!(hopper.base.changed_count(), before);
+}
+
+#[test]
+fn hopper_into_level_bound_furnace_resets_timers_like_set_item() {
+    // Paper `AbstractFurnaceBlockEntity.setItem`: slot 0 replaced by a different
+    // stack on a ServerLevel furnace => total = getTotalCookTime (raw_iron, 200
+    // default smelting time here), cookingTimer = 0.
+    let recipes = recipe_manager_with_cooking(
+        "minecraft:test_smelt",
+        CookingKind::Smelting,
+        "minecraft:cobblestone",
+        "minecraft:stone",
+        200,
+    );
+    let mut furnace = new_furnace();
+    furnace.cooking_timer = 100;
+    furnace.cooking_total_time = 0;
+    let mut hopper = HopperBlockEntity::new(Direction::Down);
+    hopper.set_item(0, stack("minecraft:cobblestone", 1));
+    assert!(hopper.eject_items(&mut HopperTarget::Furnace(&mut furnace, &recipes), 1));
+    assert_eq!(furnace.cooking_timer, 0);
+    assert_eq!(furnace.cooking_total_time, 200);
+}
+
+#[test]
+fn load_all_items_follows_item_stack_with_slot_codec() {
+    let mut list = rivet_nbt::list_tag::ListTag::new();
+    let mut entry = |slot: i8, id: &str, count: Option<i32>| {
+        let mut c = CompoundTag::new();
+        c.put_byte("Slot", slot);
+        c.put_string("id", id);
+        if let Some(n) = count {
+            c.put_int("count", n);
+        }
+        list.list.push(Tag::Compound(c));
+    };
+    entry(0, "stone", Some(5)); // Identifier default namespace -> minecraft:stone
+    entry(1, "minecraft:stone", Some(100)); // intRange(1, 99) rejects
+    entry(2, "minecraft:stone", Some(0)); // rejects
+    entry(3, "minecraft:air", Some(1)); // Item.CODEC rejects air
+    entry(4, "minecraft:stone", Some(99)); // upper bound ok
+    let mut tag = CompoundTag::new();
+    tag.put("Items".to_string(), Tag::List(list));
+    let mut items = vec![InventoryItemStack::empty(); 5];
+    load_all_items(&tag, &mut items);
+    assert_eq!(items[0].item().name(), Some("minecraft:stone"));
+    assert_eq!(items[0].get_count(), 5);
+    assert!(items[1].is_empty());
+    assert!(items[2].is_empty());
+    assert!(items[3].is_empty());
+    assert_eq!(items[4].get_count(), 99);
 }

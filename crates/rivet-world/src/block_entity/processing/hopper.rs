@@ -7,9 +7,11 @@ use rivet_registry::core::Direction;
 
 use crate::inventory::{Container, ContainerAccessContext, ContainerHelper, InventoryItemStack};
 
+use super::furnace::AbstractFurnaceBlockEntity;
 use super::nbt::{BaseContainerState, load_all_items, save_all_items};
 use super::randomizable::RandomizableContainer;
 use super::worldly_container::WorldlyContainer;
+use crate::crafting::RecipeManager;
 
 /// `HopperBlockEntity.MOVE_ITEM_SPEED = 8`.
 pub const MOVE_ITEM_SPEED: i32 = 8;
@@ -32,6 +34,10 @@ pub enum HopperTarget<'a> {
     Plain(&'a mut dyn Container),
     /// Sided `WorldlyContainer` (e.g. furnace, brewing stand).
     Worldly(&'a mut dyn WorldlyContainer),
+    /// Level-bound furnace: `setItem` applies Paper's `this.level instanceof
+    /// ServerLevel` branch (`getTotalCookTime`, `cookingTimer = 0`), so the level's
+    /// `RecipeManager` travels with the target.
+    Furnace(&'a mut AbstractFurnaceBlockEntity, &'a RecipeManager),
     /// Another `HopperBlockEntity` (so empty-hopper transfer cooldown is applied).
     Hopper(&'a mut HopperBlockEntity),
 }
@@ -41,6 +47,7 @@ impl HopperTarget<'_> {
         match self {
             Self::Plain(c) => *c,
             Self::Worldly(w) => *w,
+            Self::Furnace(f, _) => &**f,
             Self::Hopper(h) => *h,
         }
     }
@@ -49,12 +56,22 @@ impl HopperTarget<'_> {
         match self {
             Self::Plain(c) => *c,
             Self::Worldly(w) => *w,
+            Self::Furnace(f, _) => &mut **f,
             Self::Hopper(h) => *h,
+        }
+    }
+
+    /// `Container.setItem` through the target (level-bound for furnaces).
+    fn set_item(&mut self, slot: usize, stack: InventoryItemStack) {
+        match self {
+            Self::Furnace(f, recipes) => f.set_item_with_recipes(slot, stack, recipes),
+            other => other.container_mut().set_item(slot, stack),
         }
     }
 
     fn slots_for_face(&self, direction: Option<Direction>) -> Vec<usize> {
         match (self, direction) {
+            (Self::Furnace(f, _), Some(dir)) => f.get_slots_for_face(dir).to_vec(),
             (Self::Worldly(w), Some(dir)) => w.get_slots_for_face(dir).to_vec(),
             (target, _) => (0..target.container().get_container_size()).collect(),
         }
@@ -72,6 +89,7 @@ impl HopperTarget<'_> {
         match self {
             Self::Plain(_) | Self::Hopper(_) => true,
             Self::Worldly(w) => w.can_place_item_through_face(slot, stack, direction),
+            Self::Furnace(f, _) => f.can_place_item_through_face(slot, stack, direction),
         }
     }
 
@@ -87,6 +105,7 @@ impl HopperTarget<'_> {
         match self {
             Self::Plain(_) | Self::Hopper(_) => true,
             Self::Worldly(w) => w.can_take_item_through_face(slot, stack, direction),
+            Self::Furnace(f, _) => f.can_take_item_through_face(slot, stack, direction),
         }
     }
 }
@@ -202,10 +221,10 @@ impl HopperBlockEntity {
             let max_size = dest.container().get_max_stack_size_for_item(&stack);
             if stack.get_count() > max_size {
                 let split = stack.split(max_size);
-                dest.container_mut().set_item(slot, split);
+                dest.set_item(slot, split);
             } else {
                 let to_place = std::mem::take(&mut stack);
-                dest.container_mut().set_item(slot, to_place);
+                dest.set_item(slot, to_place);
             }
             moved = true;
         } else if Self::can_merge_items(&current, &stack) {
@@ -219,7 +238,7 @@ impl HopperBlockEntity {
                 let mut merged = current;
                 merged.grow(transfer);
                 stack.shrink(transfer);
-                dest.container_mut().set_item(slot, merged);
+                dest.set_item(slot, merged);
                 moved = true;
             }
         }
@@ -262,37 +281,31 @@ impl HopperBlockEntity {
                 continue;
             }
             found_item = true;
+            // `hopperPush`: the stack is trimmed in place to the moved count, pushed,
+            // and rebuilt as `orig - moved + remaining` (no `setChanged` on the hopper).
             let original = self.items[slot].clone();
-            let extracted = self.remove_item(slot, hopper_amount);
+            let original_count = original.get_count();
+            let moved_count = hopper_amount.min(original_count);
+            let mut moved_item = original.clone();
+            moved_item.set_count(moved_count);
             let remainder = Self::add_item_with_source_tick(
                 dest,
-                extracted,
+                moved_item,
                 Some(insert_face),
                 Some(self.ticked_game_time),
             );
-            if remainder.is_empty() {
-                dest.container_mut().set_changed();
-                return true;
-            }
-            // Restore unmoved items cleanly so item count is strictly conserved.
-            let moved_count = original
-                .get_count()
-                .wrapping_sub(self.items[slot].get_count())
-                .wrapping_sub(remainder.get_count());
-            if moved_count > 0 {
-                // Partial move: restore only the unmoved remainder back to the slot.
-                let mut restored = original;
-                restored.set_count(
-                    self.items[slot]
-                        .get_count()
-                        .wrapping_add(remainder.get_count()),
+            let remaining_count = remainder.get_count();
+            if remaining_count != moved_count {
+                let mut rebuilt = original;
+                rebuilt.set_count(
+                    original_count
+                        .wrapping_sub(moved_count)
+                        .wrapping_add(remaining_count),
                 );
-                self.items[slot] = restored;
-                self.set_changed();
+                self.set_item(slot, rebuilt);
                 dest.container_mut().set_changed();
                 return true;
             }
-            self.items[slot] = original;
         }
         if found_item {
             // `hopper.cooldownWhenFull` — inventory was full.
@@ -342,11 +355,11 @@ impl HopperBlockEntity {
             if moved_count > 0 {
                 let mut restored = original;
                 restored.set_count(remaining_in_source.wrapping_add(remainder.get_count()));
-                source.container_mut().set_item(slot, restored);
+                source.set_item(slot, restored);
                 source.container_mut().set_changed();
                 return true;
             }
-            source.container_mut().set_item(slot, original);
+            source.set_item(slot, original);
             // `hopper.cooldownWhenFull` — `applyCooldown(hopper)`.
             self.set_cooldown(MOVE_ITEM_SPEED);
         }
@@ -441,11 +454,7 @@ impl Container for HopperBlockEntity {
     }
 
     fn remove_item(&mut self, slot: usize, count: i32) -> InventoryItemStack {
-        let result = ContainerHelper::remove_item(&mut self.items, slot, count);
-        if !result.is_empty() {
-            self.set_changed();
-        }
-        result
+        ContainerHelper::remove_item(&mut self.items, slot, count)
     }
 
     fn remove_item_no_update(&mut self, slot: usize) -> InventoryItemStack {
@@ -459,15 +468,14 @@ impl Container for HopperBlockEntity {
         let max_size = self.get_max_stack_size_for_item(&stack);
         stack.limit_size(max_size);
         self.items[slot] = stack;
-        self.set_changed();
     }
 
     fn set_changed(&mut self) {
         self.base.set_changed();
     }
 
-    fn still_valid(&self, _ctx: &ContainerAccessContext) -> bool {
-        true
+    fn still_valid(&self, ctx: &ContainerAccessContext) -> bool {
+        !ctx.is_removed && ctx.can_interact
     }
 
     fn clear_content(&mut self) {
