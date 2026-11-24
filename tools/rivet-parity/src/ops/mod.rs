@@ -31,6 +31,8 @@
 pub mod codec;
 pub mod codec_corpus;
 pub mod compare;
+pub mod entity;
+pub mod entity_corpus;
 pub mod handlers;
 pub mod packet;
 pub mod packet_corpus;
@@ -169,6 +171,51 @@ fn read_pinned(dir: &Path, relative: &str, sha256: &str) -> Result<Vec<u8>, Load
     Ok(bytes)
 }
 
+/// The op families that live in their own `.java` file beside the main op
+/// source (`EntityOps.java`, ...) are pinned like the main file: the manifest
+/// lists every sibling with its SHA-256, and the siblings on disk must be
+/// exactly that set.
+fn verify_extra_op_sources(manifest: &Value, op_source: &Path) -> Result<(), LoadError> {
+    let Some(listed) = manifest.get("extra_op_sources").and_then(Value::as_array) else {
+        return Err(LoadError::Invalid(
+            "ops manifest has no `extra_op_sources` array".into(),
+        ));
+    };
+    let dir = op_source.parent().unwrap_or_else(|| Path::new("."));
+    let mut on_disk = BTreeSet::new();
+    if let Ok(listing) = fs::read_dir(dir) {
+        for file in listing.flatten() {
+            let name = file.file_name().to_string_lossy().into_owned();
+            if name.ends_with(".java") && file.path() != op_source {
+                on_disk.insert(name);
+            }
+        }
+    }
+    let mut pinned = BTreeSet::new();
+    for entry in listed {
+        let path = manifest_str(entry, "path")?;
+        let name = path.rsplit('/').next().unwrap_or(path).to_owned();
+        let bytes = fs::read(dir.join(&name)).map_err(|e| {
+            LoadError::Invalid(format!(
+                "cannot read op source {name} pinned by the manifest: {e}"
+            ))
+        })?;
+        if sha256_hex(&bytes) != manifest_str(entry, "sha256")? {
+            return Err(LoadError::Invalid(format!(
+                "op source {name} changed since the ops were recorded; re-record with `tools/rivet-reference-oracle/run.sh --record`"
+            )));
+        }
+        pinned.insert(name);
+    }
+    if pinned != on_disk {
+        return Err(LoadError::Invalid(format!(
+            "op sources beside {} are {on_disk:?} but the manifest pins {pinned:?}; re-record with `tools/rivet-reference-oracle/run.sh --record`",
+            op_source.display()
+        )));
+    }
+    Ok(())
+}
+
 /// Load and closure-check every recorded op under `dir`.
 pub fn load_fixtures(dir: &Path, op_source: &Path) -> Result<Vec<OpFixture>, LoadError> {
     let manifest_path = dir.join("manifest.json");
@@ -209,6 +256,7 @@ pub fn load_fixtures(dir: &Path, op_source: &Path) -> Result<Vec<OpFixture>, Loa
             op_source.display()
         )));
     }
+    verify_extra_op_sources(&manifest, op_source)?;
     let Some(entries) = manifest.get("ops").and_then(Value::as_array) else {
         return Err(LoadError::Invalid("ops manifest has no `ops` array".into()));
     };
@@ -690,13 +738,15 @@ pub fn emit_corpus() -> Result<Vec<(&'static str, String)>, String> {
         );
     }
 
-    Ok(vec![
+    let mut corpora = vec![
         ("codec.reencode", codec_corpus::emit()?),
         ("component.json", component),
         ("nbt.decode", decode),
         ("packet.reencode", packet_corpus::emit()?),
         ("snbt.parse", snbt),
-    ])
+    ];
+    corpora.extend(entity_corpus::emit());
+    Ok(corpora)
 }
 
 fn print_rows(rows: &[OpRow]) {

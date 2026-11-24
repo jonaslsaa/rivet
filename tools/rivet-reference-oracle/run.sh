@@ -109,7 +109,7 @@ done < <(find "$paper_libraries" -type f -name '*.jar' -print0)
 
 mkdir -p "$classes_dir"
 echo "Compiling Rivet reference oracle against $paper_implementation ($paper_commit)" >&2
-"$javac_cmd" --release 25 -cp "$classpath" -d "$classes_dir" "$source_file"
+"$javac_cmd" --release 25 -cp "$classpath" -d "$classes_dir" "$tool_dir"/src/*.java
 
 # The JVM runs from target/ (Paper writes logs/ into its cwd), so make the
 # --record corpus/output directories absolute against the caller's cwd first.
