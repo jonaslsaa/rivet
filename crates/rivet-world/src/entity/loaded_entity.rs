@@ -2,7 +2,7 @@
 //! tag-backed substitute for an entity and does not imply AI ticking support.
 use super::{chest_minecart::NativeChestMinecart, generation_creature::NativeGenerationCreature};
 use rivet_nbt::compound_tag::CompoundTag;
-use rivet_registry::core::Vec3;
+use rivet_registry::world::phys::Vec3;
 use rivet_util::mth::Uuid;
 
 #[derive(Debug)]

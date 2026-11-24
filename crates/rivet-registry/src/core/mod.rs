@@ -30,20 +30,17 @@
 //!
 //! RivetTodo(#212): `BlockBox`, `Direction8`, `Rotations` are ported as pure
 //! value types (with `Rotations::CODEC` here). The remaining #212 gaps are the
-//! `Position` trait's only Java implementors — JOML `Vec3`/`Vector3d`,
-//! deferred with #206 — so no in-crate type implements it and the
-//! `Position`-taking overloads are omitted, and the
 //! `Entity`/`ChunkAccess`/`LevelHeightAccessor`-parametered overloads plus the
-//! JOML returns (`BlockBox::aabb` -> `AABB` is #206; `Vec3`, `Vector3f`,
-//! `Quaternionf`, `Matrix4fc`, `OctahedralGroup` with their owning units)
-//! stay deferred. RivetTodo(#126): the `StreamCodec` impls
+//! JOML returns (`Vector3f`, `Quaternionf`, `Matrix4fc`, `OctahedralGroup` with
+//! their owning units), which stay deferred. `Vec3` (the `Position` trait's
+//! Java implementor) and `AABB` are `crate::world::phys` (D15: `core` takes
+//! them, so they live in this crate). RivetTodo(#126): the `StreamCodec` impls
 //! (`BlockBox.STREAM_CODEC`, `Rotations.STREAM_CODEC`,
 //! `FriendlyByteBuf::read/writeBlockPos`/`read/writeChunkPos`) live in
 //! `rivet-protocol`.
 
 mod axis_cycle;
 mod block_box;
-mod block_hit_result;
 mod block_pos;
 mod chunk_pos;
 mod cursor3d;
@@ -53,7 +50,6 @@ mod direction8;
 mod game_profile;
 mod game_type;
 mod global_pos;
-mod interaction_hand;
 pub mod java_block_pos_set;
 mod position;
 mod quart_pos;
@@ -62,12 +58,10 @@ mod rotation;
 mod rotations;
 mod section_pos;
 mod uuid_util;
-mod vec3;
 mod vec3i;
 
 pub use axis_cycle::AxisCycle;
 pub use block_box::BlockBox;
-pub use block_hit_result::{BlockHitResult, HitResultType};
 pub use block_pos::{BlockPos, MutableBlockPos, TraversalNodeStatus, block_pos_codec};
 pub use chunk_pos::ChunkPos;
 pub use cursor3d::Cursor3D;
@@ -78,7 +72,6 @@ pub use direction8::Direction8;
 pub use game_profile::{GameProfile, Property, PropertyMap};
 pub use game_type::{GameType, game_type_codec, game_type_legacy_id_codec};
 pub use global_pos::{GlobalPos, global_pos_codec, global_pos_map_codec};
-pub use interaction_hand::InteractionHand;
 pub use java_block_pos_set::{JavaBlockPosSet, JavaBlockPosSetError};
 pub use position::Position;
 pub use quart_pos::QuartPos;
@@ -89,7 +82,6 @@ pub use section_pos::SectionPos;
 pub use uuid_util::{
     create_offline_player_uuid, uuid_codec, uuid_from_int_array, uuid_to_int_array,
 };
-pub use vec3::Vec3;
 pub use vec3i::{Vec3i, Vec3iLike};
 
 /// `ChunkPyramid.MAX_CHUNK_COORDINATE_VALUE` moved to a `const` here

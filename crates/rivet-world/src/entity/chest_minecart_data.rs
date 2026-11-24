@@ -5,9 +5,8 @@ use rivet_nbt::{
     compound_tag::CompoundTag, float_tag::FloatTag, list_tag::ListTag, nbt_ops::NbtOps, tag::Tag,
 };
 use rivet_registry::{
-    block_state::BlockState,
-    block_state_codec::block_state_codec,
-    core::{Vec3, uuid_codec},
+    block_state::BlockState, block_state_codec::block_state_codec, core::uuid_codec,
+    world::phys::Vec3,
 };
 use rivet_serialization::dynamic_ops::DynamicOps;
 use rivet_util::mth::Uuid;

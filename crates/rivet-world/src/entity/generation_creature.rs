@@ -4,7 +4,9 @@
 //! and passenger riding remain explicit capability boundaries.
 use super::farm_variants::{FarmFamily, FarmFamilyRegistry};
 use rivet_nbt::{compound_tag::CompoundTag, list_tag::ListTag, tag::Tag};
-use rivet_registry::core::{BlockPos, Vec3, uuid_to_int_array};
+use rivet_registry::core::{BlockPos, uuid_to_int_array};
+
+use rivet_registry::world::phys::Vec3;
 use rivet_registry::{
     Identifier, RegistryAccess, TagKey,
     biome_id::BiomeId,

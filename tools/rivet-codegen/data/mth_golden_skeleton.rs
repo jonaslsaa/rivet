@@ -1800,175 +1800,7 @@ fn golden_21() {
 
 #[test]
 fn golden_22() {
-    // rayIntersectsAABB / rotationAroundAxis
-    assert_eq!(
-        super::ray_intersects_aabb(
-            crate::mth_stubs::Vec3::new(1.0, 1.0, 1.0),
-            crate::mth_stubs::Vec3::new(0.0, 0.0, 1.0),
-            crate::mth_stubs::Aabb {
-                min_x: 0.0,
-                min_y: 0.0,
-                min_z: 0.0,
-                max_x: 2.0,
-                max_y: 2.0,
-                max_z: 2.0
-            }
-        ),
-@@1112@@);
-    assert_eq!(
-        super::ray_intersects_aabb(
-            crate::mth_stubs::Vec3::new(0.0, 0.0, 0.0),
-            crate::mth_stubs::Vec3::new(1.0, 0.0, 0.0),
-            crate::mth_stubs::Aabb {
-                min_x: 0.0,
-                min_y: 0.0,
-                min_z: 0.0,
-                max_x: 2.0,
-                max_y: 2.0,
-                max_z: 2.0
-            }
-        ),
-@@1113@@);
-    assert_eq!(
-        super::ray_intersects_aabb(
-            crate::mth_stubs::Vec3::new(5.0, 5.0, 5.0),
-            crate::mth_stubs::Vec3::new(0.0, 0.0, 0.0),
-            crate::mth_stubs::Aabb {
-                min_x: 0.0,
-                min_y: 0.0,
-                min_z: 0.0,
-                max_x: 2.0,
-                max_y: 2.0,
-                max_z: 2.0
-            }
-        ),
-@@1114@@);
-    assert_eq!(
-        super::ray_intersects_aabb(
-            crate::mth_stubs::Vec3::new(1.0, 1.0, 1.0),
-            crate::mth_stubs::Vec3::new(0.0, 0.0, -1.0),
-            crate::mth_stubs::Aabb {
-                min_x: 0.0,
-                min_y: 0.0,
-                min_z: 0.0,
-                max_x: 2.0,
-                max_y: 2.0,
-                max_z: 2.0
-            }
-        ),
-@@1115@@);
-    assert_eq!(
-        super::ray_intersects_aabb(
-            crate::mth_stubs::Vec3::new(-1.0, -1.0, -1.0),
-            crate::mth_stubs::Vec3::new(1.0, 1.0, 1.0),
-            crate::mth_stubs::Aabb {
-                min_x: 0.0,
-                min_y: 0.0,
-                min_z: 0.0,
-                max_x: 2.0,
-                max_y: 2.0,
-                max_z: 2.0
-            }
-        ),
-@@1116@@);
-    assert_eq!(
-        super::ray_intersects_aabb(
-            crate::mth_stubs::Vec3::new(0.0, 0.0, 0.0),
-            crate::mth_stubs::Vec3::new(-1.0, -1.0, -1.0),
-            crate::mth_stubs::Aabb {
-                min_x: 0.0,
-                min_y: 0.0,
-                min_z: 0.0,
-                max_x: 2.0,
-                max_y: 2.0,
-                max_z: 2.0
-            }
-        ),
-@@1117@@);
-    assert_eq!(
-        super::ray_intersects_aabb(
-            crate::mth_stubs::Vec3::new(2.0, 2.0, 2.0),
-            crate::mth_stubs::Vec3::new(1.0, 0.0, 0.0),
-            crate::mth_stubs::Aabb {
-                min_x: 0.0,
-                min_y: 0.0,
-                min_z: 0.0,
-                max_x: 2.0,
-                max_y: 2.0,
-                max_z: 2.0
-            }
-        ),
-@@1118@@);
-    assert_eq!(
-        super::ray_intersects_aabb(
-            crate::mth_stubs::Vec3::new(0.0, 0.0, 0.0),
-            crate::mth_stubs::Vec3::new(0.0, 0.0, 1.0),
-            crate::mth_stubs::Aabb {
-                min_x: 0.0,
-                min_y: 0.0,
-                min_z: 0.0,
-                max_x: 2.0,
-                max_y: 2.0,
-                max_z: 2.0
-            }
-        ),
-@@1119@@);
-    assert_eq!(
-        super::ray_intersects_aabb(
-            crate::mth_stubs::Vec3::new(1.0, 1.0, 1.0),
-            crate::mth_stubs::Vec3::new(1.0, 1.0, 1.0),
-            crate::mth_stubs::Aabb {
-                min_x: 1.0,
-                min_y: 1.0,
-                min_z: 1.0,
-                max_x: 3.0,
-                max_y: 3.0,
-                max_z: 3.0
-            }
-        ),
-@@1120@@);
-    assert_eq!(
-        super::ray_intersects_aabb(
-            crate::mth_stubs::Vec3::new(1.0, 1.0, 1.0),
-            crate::mth_stubs::Vec3::new(0.0, 0.0, -1.0),
-            crate::mth_stubs::Aabb {
-                min_x: 1.0,
-                min_y: 1.0,
-                min_z: 1.0,
-                max_x: 3.0,
-                max_y: 3.0,
-                max_z: 3.0
-            }
-        ),
-@@1121@@);
-    assert_eq!(
-        super::ray_intersects_aabb(
-            crate::mth_stubs::Vec3::new(3.0, 3.0, 3.0),
-            crate::mth_stubs::Vec3::new(-1.0, -1.0, -1.0),
-            crate::mth_stubs::Aabb {
-                min_x: 1.0,
-                min_y: 1.0,
-                min_z: 1.0,
-                max_x: 3.0,
-                max_y: 3.0,
-                max_z: 3.0
-            }
-        ),
-@@1122@@);
-    assert_eq!(
-        super::ray_intersects_aabb(
-            crate::mth_stubs::Vec3::new(0.5, 0.5, 0.5),
-            crate::mth_stubs::Vec3::new(1.0, 0.0, 0.0),
-            crate::mth_stubs::Aabb {
-                min_x: 1.0,
-                min_y: 1.0,
-                min_z: 1.0,
-                max_x: 3.0,
-                max_y: 3.0,
-                max_z: 3.0
-            }
-        ),
-@@1123@@);
+    // rotationAroundAxis (rayIntersectsAABB moved to rivet-registry with the phys types)
     assert_eq!(
         super::rotation_around_axis(
             crate::mth_stubs::Vec3f {
@@ -1981,6 +1813,210 @@ fn golden_22() {
                 y: 0.4f32,
                 z: 0.5f32,
                 w: 0.6f32
+            }
+        )
+        .x
+        .to_bits(),
+@@1112@@);
+    assert_eq!(
+        super::rotation_around_axis(
+            crate::mth_stubs::Vec3f {
+                x: 0.0f32,
+                y: 1.0f32,
+                z: 0.0f32
+            },
+            crate::mth_stubs::Quaternionf {
+                x: 0.3f32,
+                y: 0.4f32,
+                z: 0.5f32,
+                w: 0.6f32
+            }
+        )
+        .y
+        .to_bits(),
+@@1113@@);
+    assert_eq!(
+        super::rotation_around_axis(
+            crate::mth_stubs::Vec3f {
+                x: 0.0f32,
+                y: 1.0f32,
+                z: 0.0f32
+            },
+            crate::mth_stubs::Quaternionf {
+                x: 0.3f32,
+                y: 0.4f32,
+                z: 0.5f32,
+                w: 0.6f32
+            }
+        )
+        .z
+        .to_bits(),
+@@1114@@);
+    assert_eq!(
+        super::rotation_around_axis(
+            crate::mth_stubs::Vec3f {
+                x: 0.0f32,
+                y: 1.0f32,
+                z: 0.0f32
+            },
+            crate::mth_stubs::Quaternionf {
+                x: 0.3f32,
+                y: 0.4f32,
+                z: 0.5f32,
+                w: 0.6f32
+            }
+        )
+        .w
+        .to_bits(),
+@@1115@@);
+    assert_eq!(
+        super::rotation_around_axis(
+            crate::mth_stubs::Vec3f {
+                x: 1.0f32,
+                y: 0.0f32,
+                z: 0.0f32
+            },
+            crate::mth_stubs::Quaternionf {
+                x: 0.1f32,
+                y: 0.2f32,
+                z: 0.3f32,
+                w: 0.4f32
+            }
+        )
+        .x
+        .to_bits(),
+@@1116@@);
+    assert_eq!(
+        super::rotation_around_axis(
+            crate::mth_stubs::Vec3f {
+                x: 1.0f32,
+                y: 0.0f32,
+                z: 0.0f32
+            },
+            crate::mth_stubs::Quaternionf {
+                x: 0.1f32,
+                y: 0.2f32,
+                z: 0.3f32,
+                w: 0.4f32
+            }
+        )
+        .y
+        .to_bits(),
+@@1117@@);
+    assert_eq!(
+        super::rotation_around_axis(
+            crate::mth_stubs::Vec3f {
+                x: 1.0f32,
+                y: 0.0f32,
+                z: 0.0f32
+            },
+            crate::mth_stubs::Quaternionf {
+                x: 0.1f32,
+                y: 0.2f32,
+                z: 0.3f32,
+                w: 0.4f32
+            }
+        )
+        .z
+        .to_bits(),
+@@1118@@);
+    assert_eq!(
+        super::rotation_around_axis(
+            crate::mth_stubs::Vec3f {
+                x: 1.0f32,
+                y: 0.0f32,
+                z: 0.0f32
+            },
+            crate::mth_stubs::Quaternionf {
+                x: 0.1f32,
+                y: 0.2f32,
+                z: 0.3f32,
+                w: 0.4f32
+            }
+        )
+        .w
+        .to_bits(),
+@@1119@@);
+    assert_eq!(
+        super::rotation_around_axis(
+            crate::mth_stubs::Vec3f {
+                x: 0.0f32,
+                y: 0.0f32,
+                z: 1.0f32
+            },
+            crate::mth_stubs::Quaternionf {
+                x: 0.9f32,
+                y: 0.8f32,
+                z: 0.7f32,
+                w: 0.6f32
+            }
+        )
+        .x
+        .to_bits(),
+@@1120@@);
+    assert_eq!(
+        super::rotation_around_axis(
+            crate::mth_stubs::Vec3f {
+                x: 0.0f32,
+                y: 0.0f32,
+                z: 1.0f32
+            },
+            crate::mth_stubs::Quaternionf {
+                x: 0.9f32,
+                y: 0.8f32,
+                z: 0.7f32,
+                w: 0.6f32
+            }
+        )
+        .y
+        .to_bits(),
+@@1121@@);
+    assert_eq!(
+        super::rotation_around_axis(
+            crate::mth_stubs::Vec3f {
+                x: 0.0f32,
+                y: 0.0f32,
+                z: 1.0f32
+            },
+            crate::mth_stubs::Quaternionf {
+                x: 0.9f32,
+                y: 0.8f32,
+                z: 0.7f32,
+                w: 0.6f32
+            }
+        )
+        .z
+        .to_bits(),
+@@1122@@);
+    assert_eq!(
+        super::rotation_around_axis(
+            crate::mth_stubs::Vec3f {
+                x: 0.0f32,
+                y: 0.0f32,
+                z: 1.0f32
+            },
+            crate::mth_stubs::Quaternionf {
+                x: 0.9f32,
+                y: 0.8f32,
+                z: 0.7f32,
+                w: 0.6f32
+            }
+        )
+        .w
+        .to_bits(),
+@@1123@@);
+    assert_eq!(
+        super::rotation_around_axis(
+            crate::mth_stubs::Vec3f {
+                x: 1.0f32,
+                y: 1.0f32,
+                z: 0.0f32
+            },
+            crate::mth_stubs::Quaternionf {
+                x: 0.0f32,
+                y: 0.0f32,
+                z: 0.0f32,
+                w: 1.0f32
             }
         )
         .x
@@ -1989,15 +2025,15 @@ fn golden_22() {
     assert_eq!(
         super::rotation_around_axis(
             crate::mth_stubs::Vec3f {
-                x: 0.0f32,
+                x: 1.0f32,
                 y: 1.0f32,
                 z: 0.0f32
             },
             crate::mth_stubs::Quaternionf {
-                x: 0.3f32,
-                y: 0.4f32,
-                z: 0.5f32,
-                w: 0.6f32
+                x: 0.0f32,
+                y: 0.0f32,
+                z: 0.0f32,
+                w: 1.0f32
             }
         )
         .y
@@ -2006,15 +2042,15 @@ fn golden_22() {
     assert_eq!(
         super::rotation_around_axis(
             crate::mth_stubs::Vec3f {
-                x: 0.0f32,
+                x: 1.0f32,
                 y: 1.0f32,
                 z: 0.0f32
             },
             crate::mth_stubs::Quaternionf {
-                x: 0.3f32,
-                y: 0.4f32,
-                z: 0.5f32,
-                w: 0.6f32
+                x: 0.0f32,
+                y: 0.0f32,
+                z: 0.0f32,
+                w: 1.0f32
             }
         )
         .z
@@ -2023,15 +2059,15 @@ fn golden_22() {
     assert_eq!(
         super::rotation_around_axis(
             crate::mth_stubs::Vec3f {
-                x: 0.0f32,
+                x: 1.0f32,
                 y: 1.0f32,
                 z: 0.0f32
             },
             crate::mth_stubs::Quaternionf {
-                x: 0.3f32,
-                y: 0.4f32,
-                z: 0.5f32,
-                w: 0.6f32
+                x: 0.0f32,
+                y: 0.0f32,
+                z: 0.0f32,
+                w: 1.0f32
             }
         )
         .w
@@ -2040,15 +2076,15 @@ fn golden_22() {
     assert_eq!(
         super::rotation_around_axis(
             crate::mth_stubs::Vec3f {
-                x: 1.0f32,
+                x: 0.0f32,
                 y: 0.0f32,
                 z: 0.0f32
             },
             crate::mth_stubs::Quaternionf {
-                x: 0.1f32,
-                y: 0.2f32,
-                z: 0.3f32,
-                w: 0.4f32
+                x: 0.5f32,
+                y: 0.5f32,
+                z: 0.5f32,
+                w: 0.5f32
             }
         )
         .x
@@ -2057,15 +2093,15 @@ fn golden_22() {
     assert_eq!(
         super::rotation_around_axis(
             crate::mth_stubs::Vec3f {
-                x: 1.0f32,
+                x: 0.0f32,
                 y: 0.0f32,
                 z: 0.0f32
             },
             crate::mth_stubs::Quaternionf {
-                x: 0.1f32,
-                y: 0.2f32,
-                z: 0.3f32,
-                w: 0.4f32
+                x: 0.5f32,
+                y: 0.5f32,
+                z: 0.5f32,
+                w: 0.5f32
             }
         )
         .y
@@ -2074,15 +2110,15 @@ fn golden_22() {
     assert_eq!(
         super::rotation_around_axis(
             crate::mth_stubs::Vec3f {
-                x: 1.0f32,
+                x: 0.0f32,
                 y: 0.0f32,
                 z: 0.0f32
             },
             crate::mth_stubs::Quaternionf {
-                x: 0.1f32,
-                y: 0.2f32,
-                z: 0.3f32,
-                w: 0.4f32
+                x: 0.5f32,
+                y: 0.5f32,
+                z: 0.5f32,
+                w: 0.5f32
             }
         )
         .z
@@ -2091,224 +2127,20 @@ fn golden_22() {
     assert_eq!(
         super::rotation_around_axis(
             crate::mth_stubs::Vec3f {
-                x: 1.0f32,
+                x: 0.0f32,
                 y: 0.0f32,
                 z: 0.0f32
             },
             crate::mth_stubs::Quaternionf {
-                x: 0.1f32,
-                y: 0.2f32,
-                z: 0.3f32,
-                w: 0.4f32
+                x: 0.5f32,
+                y: 0.5f32,
+                z: 0.5f32,
+                w: 0.5f32
             }
         )
         .w
         .to_bits(),
 @@1131@@);
-    assert_eq!(
-        super::rotation_around_axis(
-            crate::mth_stubs::Vec3f {
-                x: 0.0f32,
-                y: 0.0f32,
-                z: 1.0f32
-            },
-            crate::mth_stubs::Quaternionf {
-                x: 0.9f32,
-                y: 0.8f32,
-                z: 0.7f32,
-                w: 0.6f32
-            }
-        )
-        .x
-        .to_bits(),
-@@1132@@);
-    assert_eq!(
-        super::rotation_around_axis(
-            crate::mth_stubs::Vec3f {
-                x: 0.0f32,
-                y: 0.0f32,
-                z: 1.0f32
-            },
-            crate::mth_stubs::Quaternionf {
-                x: 0.9f32,
-                y: 0.8f32,
-                z: 0.7f32,
-                w: 0.6f32
-            }
-        )
-        .y
-        .to_bits(),
-@@1133@@);
-    assert_eq!(
-        super::rotation_around_axis(
-            crate::mth_stubs::Vec3f {
-                x: 0.0f32,
-                y: 0.0f32,
-                z: 1.0f32
-            },
-            crate::mth_stubs::Quaternionf {
-                x: 0.9f32,
-                y: 0.8f32,
-                z: 0.7f32,
-                w: 0.6f32
-            }
-        )
-        .z
-        .to_bits(),
-@@1134@@);
-    assert_eq!(
-        super::rotation_around_axis(
-            crate::mth_stubs::Vec3f {
-                x: 0.0f32,
-                y: 0.0f32,
-                z: 1.0f32
-            },
-            crate::mth_stubs::Quaternionf {
-                x: 0.9f32,
-                y: 0.8f32,
-                z: 0.7f32,
-                w: 0.6f32
-            }
-        )
-        .w
-        .to_bits(),
-@@1135@@);
-    assert_eq!(
-        super::rotation_around_axis(
-            crate::mth_stubs::Vec3f {
-                x: 1.0f32,
-                y: 1.0f32,
-                z: 0.0f32
-            },
-            crate::mth_stubs::Quaternionf {
-                x: 0.0f32,
-                y: 0.0f32,
-                z: 0.0f32,
-                w: 1.0f32
-            }
-        )
-        .x
-        .to_bits(),
-@@1136@@);
-    assert_eq!(
-        super::rotation_around_axis(
-            crate::mth_stubs::Vec3f {
-                x: 1.0f32,
-                y: 1.0f32,
-                z: 0.0f32
-            },
-            crate::mth_stubs::Quaternionf {
-                x: 0.0f32,
-                y: 0.0f32,
-                z: 0.0f32,
-                w: 1.0f32
-            }
-        )
-        .y
-        .to_bits(),
-@@1137@@);
-    assert_eq!(
-        super::rotation_around_axis(
-            crate::mth_stubs::Vec3f {
-                x: 1.0f32,
-                y: 1.0f32,
-                z: 0.0f32
-            },
-            crate::mth_stubs::Quaternionf {
-                x: 0.0f32,
-                y: 0.0f32,
-                z: 0.0f32,
-                w: 1.0f32
-            }
-        )
-        .z
-        .to_bits(),
-@@1138@@);
-    assert_eq!(
-        super::rotation_around_axis(
-            crate::mth_stubs::Vec3f {
-                x: 1.0f32,
-                y: 1.0f32,
-                z: 0.0f32
-            },
-            crate::mth_stubs::Quaternionf {
-                x: 0.0f32,
-                y: 0.0f32,
-                z: 0.0f32,
-                w: 1.0f32
-            }
-        )
-        .w
-        .to_bits(),
-@@1139@@);
-    assert_eq!(
-        super::rotation_around_axis(
-            crate::mth_stubs::Vec3f {
-                x: 0.0f32,
-                y: 0.0f32,
-                z: 0.0f32
-            },
-            crate::mth_stubs::Quaternionf {
-                x: 0.5f32,
-                y: 0.5f32,
-                z: 0.5f32,
-                w: 0.5f32
-            }
-        )
-        .x
-        .to_bits(),
-@@1140@@);
-    assert_eq!(
-        super::rotation_around_axis(
-            crate::mth_stubs::Vec3f {
-                x: 0.0f32,
-                y: 0.0f32,
-                z: 0.0f32
-            },
-            crate::mth_stubs::Quaternionf {
-                x: 0.5f32,
-                y: 0.5f32,
-                z: 0.5f32,
-                w: 0.5f32
-            }
-        )
-        .y
-        .to_bits(),
-@@1141@@);
-    assert_eq!(
-        super::rotation_around_axis(
-            crate::mth_stubs::Vec3f {
-                x: 0.0f32,
-                y: 0.0f32,
-                z: 0.0f32
-            },
-            crate::mth_stubs::Quaternionf {
-                x: 0.5f32,
-                y: 0.5f32,
-                z: 0.5f32,
-                w: 0.5f32
-            }
-        )
-        .z
-        .to_bits(),
-@@1142@@);
-    assert_eq!(
-        super::rotation_around_axis(
-            crate::mth_stubs::Vec3f {
-                x: 0.0f32,
-                y: 0.0f32,
-                z: 0.0f32
-            },
-            crate::mth_stubs::Quaternionf {
-                x: 0.5f32,
-                y: 0.5f32,
-                z: 0.5f32,
-                w: 0.5f32
-            }
-        )
-        .w
-        .to_bits(),
-@@1143@@);
 }
 
 #[test]
@@ -2322,7 +2154,7 @@ fn golden_23() {
             },
             100
         ),
-@@1144@@);
+@@1132@@);
     assert_eq!(
         super::mul_and_truncate(
             &crate::mth_stubs::Fraction {
@@ -2331,7 +2163,7 @@ fn golden_23() {
             },
             100
         ),
-@@1145@@);
+@@1133@@);
     assert_eq!(
         super::mul_and_truncate(
             &crate::mth_stubs::Fraction {
@@ -2340,7 +2172,7 @@ fn golden_23() {
             },
             100
         ),
-@@1146@@);
+@@1134@@);
     assert_eq!(
         super::mul_and_truncate(
             &crate::mth_stubs::Fraction {
@@ -2349,7 +2181,7 @@ fn golden_23() {
             },
             100
         ),
-@@1147@@);
+@@1135@@);
     assert_eq!(
         super::mul_and_truncate(
             &crate::mth_stubs::Fraction {
@@ -2358,7 +2190,7 @@ fn golden_23() {
             },
             100
         ),
-@@1148@@);
+@@1136@@);
     assert_eq!(
         super::mul_and_truncate(
             &crate::mth_stubs::Fraction {
@@ -2367,7 +2199,7 @@ fn golden_23() {
             },
             100
         ),
-@@1149@@);
+@@1137@@);
     assert_eq!(
         super::mul_and_truncate(
             &crate::mth_stubs::Fraction {
@@ -2376,7 +2208,7 @@ fn golden_23() {
             },
             7
         ),
-@@1150@@);
+@@1138@@);
     assert_eq!(
         super::mul_and_truncate(
             &crate::mth_stubs::Fraction {
@@ -2385,7 +2217,7 @@ fn golden_23() {
             },
             7
         ),
-@@1151@@);
+@@1139@@);
     assert_eq!(
         super::mul_and_truncate(
             &crate::mth_stubs::Fraction {
@@ -2394,7 +2226,7 @@ fn golden_23() {
             },
             7
         ),
-@@1152@@);
+@@1140@@);
     assert_eq!(
         super::mul_and_truncate(
             &crate::mth_stubs::Fraction {
@@ -2403,7 +2235,7 @@ fn golden_23() {
             },
             7
         ),
-@@1153@@);
+@@1141@@);
     assert_eq!(
         super::mul_and_truncate(
             &crate::mth_stubs::Fraction {
@@ -2412,7 +2244,7 @@ fn golden_23() {
             },
             7
         ),
-@@1154@@);
+@@1142@@);
     assert_eq!(
         super::mul_and_truncate(
             &crate::mth_stubs::Fraction {
@@ -2421,5 +2253,5 @@ fn golden_23() {
             },
             7
         ),
-@@1155@@);
+@@1143@@);
 }

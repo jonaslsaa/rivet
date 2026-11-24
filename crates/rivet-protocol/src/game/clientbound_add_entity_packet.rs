@@ -9,7 +9,7 @@ use crate::{
     },
     registry_friendly_byte_buf::RegistryFriendlyByteBuf,
 };
-use rivet_registry::core::Vec3;
+use rivet_registry::world::phys::Vec3;
 use rivet_util::mth::Uuid;
 
 #[derive(Debug, Clone, PartialEq)]

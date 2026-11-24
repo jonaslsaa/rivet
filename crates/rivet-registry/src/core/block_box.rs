@@ -10,14 +10,13 @@
 //! `BlockPos.betweenClosed(min, max)` in X/Y/Z-major order as a materialized
 //! `Vec`; `iter()` provides the same order lazily for stream-shaped callers.
 //!
-//! RivetTodo(#206): `aabb()` (`AABB.encapsulatingFullBlocks(min, max)`) returns
-//! the `world.phys.AABB` value type, deferred with the JOML/math value types
-//! in #206. RivetTodo(#126): `STREAM_CODEC` (two `BlockPos` stream codecs)
-//! lives in `rivet-protocol`.
+//! RivetTodo(#126): `STREAM_CODEC` (two `BlockPos` stream codecs) lives in
+//! `rivet-protocol`.
 
 use super::block_pos::BlockPos;
 use super::direction::{AxisDirection, Direction};
 use super::vec3i::Vec3i;
+use crate::world::phys::AABB;
 
 /// `BlockBox` — an axis-aligned inclusive block box.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,6 +53,11 @@ impl BlockBox {
     /// `BlockBox.max()` — the record accessor (already normalized).
     pub fn max(&self) -> BlockPos {
         self.max
+    }
+
+    /// `BlockBox.aabb()` — `AABB.encapsulatingFullBlocks(min, max)`.
+    pub fn aabb(&self) -> AABB {
+        AABB::encapsulating_full_blocks(&self.min, &self.max)
     }
 
     /// `BlockBox.include(BlockPos)` — the smallest box containing `this` and

@@ -17,7 +17,9 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rivet_registry::core::{BlockHitResult, InteractionHand};
+use rivet_registry::world::phys::BlockHitResult;
+
+use rivet_registry::world::interaction_hand::InteractionHand;
 
 use crate::codec::{CodecError, StreamCodec};
 use crate::friendly_byte_buf::FriendlyByteBuf;
@@ -120,7 +122,9 @@ mod tests {
     use super::*;
     use crate::codec::{StreamDecoder, StreamEncoder};
     use bytes::BytesMut;
-    use rivet_registry::core::{BlockPos, Direction, Vec3};
+    use rivet_registry::core::{BlockPos, Direction};
+
+    use rivet_registry::world::phys::{HitResultBehavior, Vec3};
 
     fn buf() -> FriendlyByteBuf {
         FriendlyByteBuf::new(BytesMut::new())
