@@ -483,6 +483,48 @@ OP_SURFACES = {
          "net.minecraft.world.item.component.Consumable", "net.minecraft.util.valueproviders.IntProviders",
          "net.minecraft.world.level.levelgen.structure.templatesystem.RuleTest",
          "net.minecraft.world.level.levelgen.synth.NormalNoise", "net.minecraft.network.chat.ComponentSerialization"]),
+    # Gameplay-data ops (VERIFICATION item 8). The globs name the files the handler's answers
+    # depend on: the recipe loader/matchers, the enchantment registry and selection helper, the
+    # mob-effect table, the scoreboard codec and load/pack paths. loot.roll answers the blocks/*
+    # tables through block/drops.rs only; trade.offers has no Rust handler yet (every input is
+    # unavailable, unavailable.tsv), so it claims no file.
+    "recipe.match": (
+        ["crates/rivet-world/src/crafting/ingredient.rs", "crates/rivet-world/src/crafting/input.rs",
+         "crates/rivet-world/src/crafting/item.rs", "crates/rivet-world/src/crafting/json.rs",
+         "crates/rivet-world/src/crafting/pattern.rs", "crates/rivet-world/src/crafting/recipe_type.rs",
+         "crates/rivet-world/src/crafting/recipes.rs", "crates/rivet-world/src/crafting/stacked_contents.rs"],
+        ["net.minecraft.world.item.crafting.Recipe", "net.minecraft.world.item.crafting.ShapedRecipe",
+         "net.minecraft.world.item.crafting.ShapelessRecipe", "net.minecraft.world.item.crafting.CookingRecipe",
+         "net.minecraft.world.item.crafting.StonecutterRecipe", "net.minecraft.world.item.crafting.SmithingRecipe",
+         "net.minecraft.world.item.crafting.TransmuteRecipe", "net.minecraft.world.item.crafting.DyeRecipe",
+         "net.minecraft.world.item.crafting.ImbueRecipe", "net.minecraft.world.item.crafting.CraftingInput",
+         "net.minecraft.world.item.crafting.Ingredient", "net.minecraft.world.item.crafting.RecipeManager"]),
+    "loot.roll": (
+        ["crates/rivet-world/src/block/drops.rs"],
+        ["net.minecraft.world.level.storage.loot.LootTable", "net.minecraft.world.level.storage.loot.LootParams",
+         "net.minecraft.world.level.storage.loot.LootContext", "net.minecraft.world.level.storage.loot.LootPool"]),
+    "enchant.select": (
+        ["crates/rivet-world/src/enchantment/definition.rs", "crates/rivet-world/src/enchantment/helper.rs",
+         "crates/rivet-world/src/enchantment/item_enchantments.rs", "crates/rivet-world/src/enchantment/registry.rs"],
+        ["net.minecraft.world.item.enchantment.EnchantmentHelper", "net.minecraft.world.item.enchantment.Enchantment",
+         "net.minecraft.world.item.enchantment.EnchantmentInstance", "net.minecraft.world.item.enchantment.Enchantable"]),
+    "effect": (
+        ["crates/rivet-world/src/effect/mob_effect.rs", "crates/rivet-world/src/effect/mod.rs"],
+        ["net.minecraft.world.effect.MobEffect", "net.minecraft.world.effect.MobEffects",
+         "net.minecraft.world.effect.MobEffectCategory"]),
+    "trade.offers": (
+        [],
+        ["net.minecraft.world.item.trading.TradeSet", "net.minecraft.world.item.trading.VillagerTrade",
+         "net.minecraft.world.item.trading.MerchantOffer", "net.minecraft.world.entity.npc.villager.AbstractVillager"]),
+    "scoreboard.saved_data": (
+        ["crates/rivet-world/src/scores/criteria.rs", "crates/rivet-world/src/scores/display_slot.rs",
+         "crates/rivet-world/src/scores/number_format.rs", "crates/rivet-world/src/scores/objective.rs",
+         "crates/rivet-world/src/scores/save_data.rs", "crates/rivet-world/src/scores/score.rs",
+         "crates/rivet-world/src/scores/scoreboard.rs", "crates/rivet-world/src/scores/server_scoreboard.rs",
+         "crates/rivet-world/src/scores/team.rs", "crates/rivet-world/src/scores/team_color.rs"],
+        ["net.minecraft.world.scores.ScoreboardSaveData", "net.minecraft.world.scores.Scoreboard",
+         "net.minecraft.world.scores.Objective", "net.minecraft.world.scores.PlayerTeam",
+         "net.minecraft.world.scores.Score"]),
     # Pure entity ops (VERIFICATION item 9): handlers in tools/rivet-parity/src/ops/entity.rs.
     "damage.calc": (
         ["crates/rivet-server/src/world/damagesource/combat_rules.rs",
@@ -526,15 +568,17 @@ def op_rows(tracked: list[str]) -> list[dict]:
             if not is_tracked(path, tracked):
                 raise SystemExit(f"op.{op}: {path} is not tracked")
         n = count_corpus([corpus], tracked)
+        # A row whose every input is unavailable (unavailable.tsv) has nothing to tamper with.
+        negative = "n" if str(n).isdigit() and op_unavailable_counts().get(op, 0) >= int(n) else "y"
         rows.append({
-            "id": f"op.{op}.recorded", "layer": "L1", "tier": "T0", "negative": "y",
+            "id": f"op.{op}.recorded", "layer": "L1", "tier": "T0", "negative": negative,
             "mechanism": f"test:rivet-parity ops::tests (recorded Paper {op} vs the Rust handler, "
                          "offline; + tamper and broken-handler negatives)",
             "fixtures": fixtures, "corpus_n": n, "rust_globs": globs, "java_classes": java,
             "consumers": [], "seed_status": "UNVERIFIED",
             "note": "byte-equal canonical lines; exclusions in fixtures/ops/exclusions.tsv"})
         rows.append({
-            "id": f"op.{op}.live", "layer": "L2", "tier": "T1", "negative": "y",
+            "id": f"op.{op}.live", "layer": "L2", "tier": "T1", "negative": negative,
             "mechanism": f"op:rivet-parity ops live {op} (recorded vs live Paper, Rust vs live Paper, "
                          "+ live tamper negative; gate.sh run_oracle_ops_live)",
             "fixtures": fixtures, "corpus_n": n, "rust_globs": globs, "java_classes": java,
@@ -1221,6 +1265,19 @@ def op_excluded_counts() -> dict[str, int]:
     return counts
 
 
+def op_unavailable_counts() -> dict[str, int]:
+    """Inputs the Rust handlers answer `Unported` per recorded op (unavailable.tsv; a
+    rivet-parity test pins the table to what the handlers report)."""
+    path = REPO / OPS_DIR / "unavailable.tsv"
+    counts: dict[str, int] = {}
+    if path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines()[1:]:
+            cells = line.split("\t")
+            if len(cells) == 3 and cells[1].isdigit():
+                counts[cells[0]] = counts.get(cells[0], 0) + int(cells[1])
+    return counts
+
+
 OP_ROW_RE = re.compile(r"^op\.(.+)\.(recorded|live)$")
 
 
@@ -1228,6 +1285,7 @@ def validate(text: str) -> list[str]:
     """Malformed-ledger findings for a rendered VERIFY.tsv."""
     errors = []
     excluded = op_excluded_counts()
+    unavailable = op_unavailable_counts()
     lines = text.splitlines()
     if not lines or lines[0].split("\t") != COLUMNS:
         return ["header does not match the VERIFY.tsv columns"]
@@ -1259,14 +1317,16 @@ def validate(text: str) -> list[str]:
         if r["status"] == "PASS" and r["mismatched"] not in ("-", "0"):
             errors.append(f"{r['id']}: PASS with mismatches")
         # An op row's scoreboard count is its executed inputs: every recorded
-        # input that no exclusions row takes out. A recorded result that does
-        # not add up is stale (the corpus or the exclusions moved since).
+        # input that no exclusions row takes out and that the Rust side answers
+        # (unavailable.tsv lists the unported ones). A recorded result that does
+        # not add up is stale (the corpus or either table moved since).
         m = OP_ROW_RE.match(r["id"])
         if m and r["status"] == "PASS" and r["corpus_n"].isdigit() and r["matched"].isdigit():
-            expected = int(r["corpus_n"]) - excluded.get(m.group(1), 0)
+            gone = excluded.get(m.group(1), 0) + unavailable.get(m.group(1), 0)
+            expected = int(r["corpus_n"]) - gone
             if int(r["matched"]) != expected:
                 errors.append(f"{r['id']}: matched={r['matched']} but corpus_n={r['corpus_n']} minus "
-                              f"{excluded.get(m.group(1), 0)} excluded inputs is {expected}: re-record the row")
+                              f"{gone} excluded or unavailable inputs is {expected}: re-record the row")
     return errors
 
 
