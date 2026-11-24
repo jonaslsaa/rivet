@@ -105,7 +105,8 @@ Thresholds (VERIFICATION 4.2) are reported in the `flag` column, not enforced:
 
 `scripts/ledger_check.sh` checks that both ledgers regenerate byte-identically
 from the tree and are well-formed, and runs the ledger tools' tests (about one
-minute of CPU, offline). The fast gate calls it as one step:
+minute of CPU, offline). It is not wired into `scripts/gate.sh` yet; this is
+the one-line step to add to the fast gate:
 
 ```sh
 echo "==> ledger check (scripts/ledger_check.sh)"; scripts/ledger_check.sh
