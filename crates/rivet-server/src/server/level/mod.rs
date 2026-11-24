@@ -54,6 +54,7 @@ pub mod poi_manager;
 pub mod poi_storage;
 pub mod region_backed;
 pub mod server_level;
+pub mod server_player_game_mode;
 pub mod structure_entity_loading;
 pub mod structure_generate_events;
 pub mod structure_generation;

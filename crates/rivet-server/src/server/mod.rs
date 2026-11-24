@@ -9,6 +9,7 @@
 
 pub mod dataconverter;
 pub mod gametest;
+pub mod interaction;
 pub mod keepalive;
 pub mod level;
 pub mod lighting;

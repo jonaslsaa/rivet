@@ -1,0 +1,27 @@
+{"packet":"use_item_on","hand":0,"pos":[0,0,0],"direction":1,"location_bits":[4602678819172646912,4607182418800017408,4602678819172646912],"inside":false,"world_border":false,"sequence":0,"body":"000000000000000000013f0000003f8000003f000000000000","decoded_location_bits":[4602678819172646912,4607182418800017408,4602678819172646912]}
+{"packet":"use_item_on","hand":1,"pos":[-1,-64,15],"direction":2,"location_bits":[13821547256400052224,13857561979670180659,4624633867356078080],"inside":true,"world_border":false,"sequence":300,"body":"01ffffffc00000ffc0023f4000003dcccccd000000000100ac02","decoded_location_bits":[13821547256400052224,13857561979669970944,4624633867356078080]}
+{"packet":"use_item_on","hand":0,"pos":[29999999,319,-29999999],"direction":5,"location_bits":[4718818273909538816,4644328319632801792,13942190310415348531],"inside":false,"world_border":true,"sequence":2147483647,"body":"007270dfe363c8113f053f8000003f0000003e99999a0001ffffffff07","decoded_location_bits":[4718818273909538816,4644328319632801792,13942190310415348528]}
+{"packet":"use_item_on","hand":0,"pos":[1,2,3],"direction":0,"location_bits":[4607632778762754458,4611686018652567885,4616189392874777031],"inside":false,"world_border":false,"sequence":5,"body":"000000004000003002003dcccccd33d6bf953f7ff972000005","decoded_location_bits":[4607632778769465344,4611686018652567888,4616189392837410816]}
+{"packet":"use_item_on","hand":1,"pos":[10,64,10],"direction":4,"location_bits":[4623226492472524800,4634344754052595712,4620693217682128896],"inside":true,"world_border":true,"sequence":128,"body":"01000002800000a040044020000040000000c000000001018001","decoded_location_bits":[4623226492472524800,4634344754052595712,4620693217682128896]}
+{"packet":"use_item_on","hand":0,"pos":[-7,-1,-9],"direction":3,"location_bits":[9218868437227405312,9223372036854775808,13844628204490326016],"inside":false,"world_border":false,"sequence":1,"body":"00fffffe7fffff7fff037f8000003f80000000000000000001","decoded_location_bits":[9218868437227405312,0,13844628204490326016]}
+{"packet":"use_item_on_malformed","body":"020000004000003002013f0000003f0000003f000000000000","error":"Index 2 out of bounds for length 2"}
+{"packet":"use_item_on_malformed","body":"ffffffff0f0000004000003002013f0000003f0000003f000000000000","error":"Index -1 out of bounds for length 2"}
+{"packet":"use_item_on_malformed","body":"000000004000003002063f0000003f0000003f000000000000","error":"Index 6 out of bounds for length 6"}
+{"packet":"use_item","hand":0,"sequence":0,"y_rot_bits":0,"x_rot_bits":0,"body":"00000000000000000000"}
+{"packet":"use_item","hand":1,"sequence":2147483647,"y_rot_bits":3274964992,"x_rot_bits":1119092736,"body":"01ffffffff07c334000042b40000"}
+{"packet":"use_item","hand":0,"sequence":1,"y_rot_bits":2143289344,"x_rot_bits":2139095040,"body":"00017fc000007f800000"}
+{"packet":"use_item","hand":0,"sequence":128,"y_rot_bits":1136214016,"x_rot_bits":3267264512,"body":"00800143b94000c2be8000"}
+{"packet":"use_item_malformed","body":"02000000000000000000","error":"Index 2 out of bounds for length 2"}
+{"packet":"use_item_malformed","body":"05000000000000000000","error":"Index 5 out of bounds for length 2"}
+{"packet":"block_changed_ack","sequence":0,"body":"00"}
+{"packet":"block_changed_ack","sequence":1,"body":"01"}
+{"packet":"block_changed_ack","sequence":127,"body":"7f"}
+{"packet":"block_changed_ack","sequence":128,"body":"8001"}
+{"packet":"block_changed_ack","sequence":2147483647,"body":"ffffffff07"}
+{"packet":"block_changed_ack","sequence":-1,"body":"ffffffff0f"}
+{"packet":"block_destruction","id":1,"pos":[0,0,0],"progress":0,"body":"01000000000000000000","decoded_progress":0}
+{"packet":"block_destruction","id":42,"pos":[-1,-64,15],"progress":-1,"body":"2affffffc00000ffc0ff","decoded_progress":255}
+{"packet":"block_destruction","id":2147483647,"pos":[29999999,319,-29999999],"progress":9,"body":"ffffffff077270dfe363c8113f09","decoded_progress":9}
+{"packet":"block_destruction","id":-5,"pos":[1,2,3],"progress":255,"body":"fbffffff0f0000004000003002ff","decoded_progress":255}
+{"packet":"block_destruction","id":7,"pos":[1,2,3],"progress":300,"body":"0700000040000030022c","decoded_progress":44}
+{"packet":"block_destruction","id":7,"pos":[1,2,3],"progress":10,"body":"0700000040000030020a","decoded_progress":10}
