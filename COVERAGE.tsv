@@ -2480,7 +2480,7 @@ net.minecraft.util.filefix.virtualfilesystem.exception.CowFSSymlinkException	min
 net.minecraft.util.monitoring.jmx.MinecraftServerStatistics	minecraft:net/minecraft/util/monitoring/jmx/MinecraftServerStatistics.java	118	A		mc.util.monitoring.jmx	rivet-util	rivet-server	-		10	0	0	0	absent
 net.minecraft.util.parsing.packrat.Atom	minecraft:net/minecraft/util/parsing/packrat/Atom.java	12	A		mc.util.parsing.packrat	rivet-util	rivet-util	-		2	0	0	0	absent
 net.minecraft.util.parsing.packrat.CachedParseState	minecraft:net/minecraft/util/parsing/packrat/CachedParseState.java	225	A		mc.util.parsing.packrat	rivet-util	rivet-util	-		17	0	0	0	absent
-net.minecraft.util.parsing.packrat.Control	minecraft:net/minecraft/util/parsing/packrat/Control.java	18	A		mc.util.parsing.packrat	rivet-util	rivet-util	-		2	0	0	0	absent
+net.minecraft.util.parsing.packrat.Control	minecraft:net/minecraft/util/parsing/packrat/Control.java	18	A		mc.util.parsing.packrat	rivet-util	rivet-util	-	crates/rivet-entity/src/ai/control/mod.rs	2	0	0	0	absent
 net.minecraft.util.parsing.packrat.DelayedException	minecraft:net/minecraft/util/parsing/packrat/DelayedException.java	18	A		mc.util.parsing.packrat	rivet-util	rivet-util	-		1	0	0	0	absent
 net.minecraft.util.parsing.packrat.Dictionary	minecraft:net/minecraft/util/parsing/packrat/Dictionary.java	94	A		mc.util.parsing.packrat	rivet-util	rivet-util	-		12	0	0	0	absent
 net.minecraft.util.parsing.packrat.ErrorCollector	minecraft:net/minecraft/util/parsing/packrat/ErrorCollector.java	97	A		mc.util.parsing.packrat	rivet-util	rivet-util	-		6	0	0	0	absent
@@ -2699,7 +2699,7 @@ net.minecraft.world.entity.Crackiness	minecraft:net/minecraft/world/entity/Crack
 net.minecraft.world.entity.Display	minecraft:net/minecraft/world/entity/Display.java	904	A		mc.world.entity	rivet-entity	rivet-server	-	crates/rivet-world/src/crafting/display.rs;crates/rivet-world/src/item/components/display.rs	72	0	0	0	absent
 net.minecraft.world.entity.DropChances	minecraft:net/minecraft/world/entity/DropChances.java	49	A		mc.world.entity	rivet-entity	rivet-server	-		6	0	0	0	absent
 net.minecraft.world.entity.ElytraAnimationState	minecraft:net/minecraft/world/entity/ElytraAnimationState.java	65	A		mc.world.entity	rivet-entity	rivet-server	-		4	0	0	0	absent
-net.minecraft.world.entity.Entity	minecraft:net/minecraft/world/entity/Entity.java	5462	A	spine	mc.world.entity	rivet-entity	rivet-server	-	crates/rivet-api/src/native/facades/entity.rs	505	0	0	0	absent
+net.minecraft.world.entity.Entity	minecraft:net/minecraft/world/entity/Entity.java	5462	A	spine	mc.world.entity	rivet-entity	rivet-server	-	crates/rivet-api/src/native/facades/entity.rs;crates/rivet-entity/src/lifecycle/entity.rs	505	0	0	0	absent
 net.minecraft.world.entity.EntityAttachment	minecraft:net/minecraft/world/entity/EntityAttachment.java	30	A		mc.world.entity	rivet-entity	rivet-server	-		2	0	0	0	absent
 net.minecraft.world.entity.EntityAttachments	minecraft:net/minecraft/world/entity/EntityAttachments.java	105	A		mc.world.entity	rivet-entity	rivet-server	-		10	0	0	0	absent
 net.minecraft.world.entity.EntityDimensions	minecraft:net/minecraft/world/entity/EntityDimensions.java	56	A		mc.world.entity	rivet-entity	rivet-server	-		7	0	0	0	absent
@@ -2732,7 +2732,7 @@ net.minecraft.world.entity.Leashable	minecraft:net/minecraft/world/entity/Leasha
 net.minecraft.world.entity.LightningBolt	minecraft:net/minecraft/world/entity/LightningBolt.java	286	A	spine	mc.world.entity	rivet-entity	rivet-server	-		18	0	0	0	absent
 net.minecraft.world.entity.LivingEntity	minecraft:net/minecraft/world/entity/LivingEntity.java	4915	A	spine	mc.world.entity	rivet-entity	rivet-server	-		373	0	0	0	absent
 net.minecraft.world.entity.Marker	minecraft:net/minecraft/world/entity/Marker.java	70	A		mc.world.entity	rivet-entity	rivet-server	-		11	0	0	0	absent
-net.minecraft.world.entity.Mob	minecraft:net/minecraft/world/entity/Mob.java	1707	A	spine	mc.world.entity	rivet-entity	rivet-server	-		147	0	0	0	absent
+net.minecraft.world.entity.Mob	minecraft:net/minecraft/world/entity/Mob.java	1707	A	spine	mc.world.entity	rivet-entity	rivet-server	-	crates/rivet-entity/src/lifecycle/mob.rs	147	0	0	0	absent
 net.minecraft.world.entity.MobCategory	minecraft:net/minecraft/world/entity/MobCategory.java	68	A		mc.world.entity	rivet-entity	rivet-server	-		8	0	0	0	absent
 net.minecraft.world.entity.MoverType	minecraft:net/minecraft/world/entity/MoverType.java	9	A		mc.world.entity	rivet-entity	rivet-server	-		0	0	0	0	absent
 net.minecraft.world.entity.NeutralMob	minecraft:net/minecraft/world/entity/NeutralMob.java	170	A		mc.world.entity	rivet-entity	rivet-server	-		24	0	0	0	absent
@@ -2886,7 +2886,7 @@ net.minecraft.world.entity.ai.behavior.warden.SetWardenLookTarget	minecraft:net/
 net.minecraft.world.entity.ai.behavior.warden.Sniffing	minecraft:net/minecraft/world/entity/ai/behavior/warden/Sniffing.java	66	A		mc.world.entity.ai.behavior.warden	rivet-entity	rivet-server	-		3	0	0	0	absent
 net.minecraft.world.entity.ai.behavior.warden.SonicBoom	minecraft:net/minecraft/world/entity/ai/behavior/warden/SonicBoom.java	101	A		mc.world.entity.ai.behavior.warden	rivet-entity	rivet-server	-		6	0	0	0	absent
 net.minecraft.world.entity.ai.behavior.warden.TryToSniff	minecraft:net/minecraft/world/entity/ai/behavior/warden/TryToSniff.java	33	A		mc.world.entity.ai.behavior.warden	rivet-entity	rivet-server	-		1	0	0	0	absent
-net.minecraft.world.entity.ai.control.BodyRotationControl	minecraft:net/minecraft/world/entity/ai/control/BodyRotationControl.java	64	A		mc.world.entity.ai.control	rivet-entity	rivet-server	-		6	0	0	0	absent
+net.minecraft.world.entity.ai.control.BodyRotationControl	minecraft:net/minecraft/world/entity/ai/control/BodyRotationControl.java	64	A		mc.world.entity.ai.control	rivet-entity	rivet-server	crates/rivet-entity/src/ai/control/body_rotation_control.rs		6	5	0	0	partial
 net.minecraft.world.entity.ai.control.Control	minecraft:net/minecraft/world/entity/ai/control/Control.java	11	A		mc.world.entity.ai.control	rivet-entity	rivet-server	-		1	0	0	0	absent
 net.minecraft.world.entity.ai.control.FlyingMoveControl	minecraft:net/minecraft/world/entity/ai/control/FlyingMoveControl.java	57	A		mc.world.entity.ai.control	rivet-entity	rivet-server	-		1	0	0	0	absent
 net.minecraft.world.entity.ai.control.JumpControl	minecraft:net/minecraft/world/entity/ai/control/JumpControl.java	21	A		mc.world.entity.ai.control	rivet-entity	rivet-server	-		2	0	0	0	absent
