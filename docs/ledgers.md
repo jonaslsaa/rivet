@@ -66,6 +66,18 @@ A new row starts as `UNVERIFIED` (or `INACTIVE` for a mechanism that never
 runs). Nothing is seeded `PASS`. A `PASS` at L2 to L6 without a negative
 control is rejected as malformed (VERIFICATION 2.4).
 
+An L1 `PASS` means the cargo tests in the row's consumer files passed against
+the committed Paper golden at `last_verified_commit`. It does not yet mean the
+golden reproduces from Paper: that is `rivet-oracle regen --check`
+(VERIFICATION item 2). Rows that need a Paper boot (parity, oracle verify,
+capture, scenarios, codegen probes) stay `UNVERIFIED` until the gate records
+them with `record`.
+
+`rust_globs` lists the files a row verifies directly first (a production file
+that reads the fixture, or the module that declares a test-only consumer),
+then the files of the same crate that its tests import. The debt script
+spends a row's capped credit in that order.
+
 ## Debt metric
 
 ```sh
@@ -92,8 +104,8 @@ Thresholds (VERIFICATION 4.2) are reported in the `flag` column, not enforced:
 ## Gate hook
 
 `scripts/ledger_check.sh` checks that both ledgers regenerate byte-identically
-from the tree and are well-formed, and runs the ledger tools' tests (about 35
-seconds, offline). The fast gate calls it as one step:
+from the tree and are well-formed, and runs the ledger tools' tests (about one
+minute of CPU, offline). The fast gate calls it as one step:
 
 ```sh
 echo "==> ledger check (scripts/ledger_check.sh)"; scripts/ledger_check.sh
