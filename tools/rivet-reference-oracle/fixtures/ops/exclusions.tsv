@@ -20,8 +20,6 @@ packet.reencode	input:capture.035.configuration.clientbound.registry_data	NBT co
 packet.reencode	input:capture.036.configuration.clientbound.registry_data	NBT compound entries written in Java HashMap order, Rivet in insertion order (D12 class)	792
 packet.reencode	input:capture.037.configuration.clientbound.registry_data	NBT compound entries written in Java HashMap order, Rivet in insertion order (D12 class)	792
 packet.reencode	input:capture.039.configuration.clientbound.registry_data	NBT compound entries written in Java HashMap order, Rivet in insertion order (D12 class)	792
-packet.reencode	input:capture.041.configuration.clientbound.update_tags	Paper differs from itself across twin runs (collection ordered by identity hash); Rivet keeps its own order	793
-packet.reencode	input:capture.179.play.clientbound.login	Paper differs from itself across twin runs (collection ordered by identity hash); Rivet keeps its own order	793
 packet.reencode	input:mutate.configuration.clientbound.disconnect.0.flip0	NBT compound entries written in Java HashMap order, Rivet in insertion order (D12 class)	792
 packet.reencode	input:mutate.configuration.clientbound.disconnect.1.flip0	NBT compound entries written in Java HashMap order, Rivet in insertion order (D12 class)	792
 packet.reencode	input:mutate.configuration.clientbound.registry_data.0.flip0	NBT compound entries written in Java HashMap order, Rivet in insertion order (D12 class)	792
@@ -34,9 +32,6 @@ packet.reencode	input:mutate.configuration.clientbound.registry_data.3.flip0	NBT
 packet.reencode	input:mutate.configuration.clientbound.registry_data.3.replace	NBT compound entries written in Java HashMap order, Rivet in insertion order (D12 class)	792
 packet.reencode	input:mutate.configuration.clientbound.update_enabled_features.1.flip0	Java Set/Map iteration order after decode, Rivet keeps/randomizes its own order	793
 packet.reencode	input:mutate.configuration.clientbound.update_enabled_features.1.flip1	Java Set/Map iteration order after decode, Rivet keeps/randomizes its own order	793
-packet.reencode	input:mutate.configuration.clientbound.update_tags.3.flip0	Paper differs from itself across twin runs (collection ordered by identity hash); Rivet keeps its own order	793
-packet.reencode	input:mutate.play.clientbound.login.0.flip1	Paper differs from itself across twin runs (collection ordered by identity hash); Rivet keeps its own order	793
-packet.reencode	input:mutate.play.clientbound.login.0.replace	Paper differs from itself across twin runs (collection ordered by identity hash); Rivet keeps its own order	793
 packet.reencode	input:mutate.status.clientbound.status_response.0.flip0	Paper drops an undecodable version object and re-encodes the status; Rivet rejects the packet	794
 packet.reencode	input:seed.configuration.clientbound.disconnect.0	NBT compound entries written in Java HashMap order, Rivet in insertion order (D12 class)	792
 packet.reencode	input:seed.configuration.clientbound.disconnect.1	NBT compound entries written in Java HashMap order, Rivet in insertion order (D12 class)	792
@@ -48,15 +43,9 @@ packet.reencode	input:seed.configuration.clientbound.registry_data.4	NBT compoun
 packet.reencode	input:seed.configuration.clientbound.registry_data.5	NBT compound entries written in Java HashMap order, Rivet in insertion order (D12 class)	792
 packet.reencode	input:seed.configuration.clientbound.update_enabled_features.0	Java Set/Map iteration order after decode, Rivet keeps/randomizes its own order	793
 packet.reencode	input:seed.configuration.clientbound.update_enabled_features.1	Java Set/Map iteration order after decode, Rivet keeps/randomizes its own order	793
-packet.reencode	input:seed.configuration.clientbound.update_tags.3	Paper differs from itself across twin runs (collection ordered by identity hash); Rivet keeps its own order	793
-packet.reencode	input:seed.play.clientbound.login.0	Paper differs from itself across twin runs (collection ordered by identity hash); Rivet keeps its own order	793
 packet.reencode	input:random.configuration.clientbound.disconnect.7	Rivet aborts the process allocating from a hostile length prefix (Paper: OutOfMemoryError); input never handed to Rust	795
 packet.reencode	input:random.play.clientbound.player_info_update.7	Rivet aborts the process allocating from a hostile length prefix (Paper: OutOfMemoryError); input never handed to Rust	795
 packet.reencode	input:random.play.clientbound.update_tags.4	Rivet aborts the process allocating from a hostile length prefix (Paper: OutOfMemoryError); input never handed to Rust	795
-packet.reencode	input:capture.196.play.clientbound.set_time	Paper orders Map<Holder<WorldClock>,..> by identity hash (differs across JVM runs); Rivet HashMap order is random too	805
-packet.reencode	input:seed.play.clientbound.set_time.0	Paper orders Map<Holder<WorldClock>,..> by identity hash (differs across JVM runs); Rivet HashMap order is random too	805
-packet.reencode	input:mutate.play.clientbound.set_time.0.flip0	Paper orders Map<Holder<WorldClock>,..> by identity hash (differs across JVM runs); Rivet HashMap order is random too	805
-packet.reencode	input:mutate.play.clientbound.set_time.0.flip1	Paper orders Map<Holder<WorldClock>,..> by identity hash (differs across JVM runs); Rivet HashMap order is random too	805
 codec.reencode	input:BlockPos.CODEC.hand110.mut2.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
 codec.reencode	input:ComponentSerialization.CODEC.hand096.mut2.json	ComponentSerialization decode differs (empty selector accepted, nbt block source rejected)	804
 codec.reencode	input:ComponentSerialization.CODEC.hand097.json	ComponentSerialization decode differs (empty selector accepted, nbt block source rejected)	804

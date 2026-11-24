@@ -36,11 +36,11 @@
     {
       "op": "packet.reencode",
       "corpus": "corpus/packet.reencode.jsonl",
-      "corpus_sha256": "a05d7fd85c611cad66bf0391338ebc9ab87bc3aee837bc1b930e6fa1e4cea2d7",
-      "corpus_n": 2514,
+      "corpus_sha256": "13dc8858e07da14dccfddab4a727772993d5cf1b6a15b6ac6675c2e8bcb07226",
+      "corpus_n": 2503,
       "output": "packet.reencode.jsonl",
-      "output_sha256": "35dc0aef425ae51394fcf3ed892f4a2301acfe61aca3bfbd3097b85683050f09",
-      "output_n": 2514
+      "output_sha256": "e204f9b36e9655533e39e93f10004de49c28413765a413ef14e65c31d7e22b58",
+      "output_n": 2503
     },
     {
       "op": "snbt.parse",

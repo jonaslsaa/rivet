@@ -19,6 +19,25 @@ use serde_json::{Value, json};
 use super::packet::{self, Entry, encode_hex};
 use super::packet_seeds;
 
+/// Inputs whose Paper answer differs from one JVM run to the next: the packets
+/// re-encode a collection ordered by object identity hash (`update_tags`,
+/// `login` dimension set, `set_time` clock map), so with two or more entries the
+/// byte order is not stable and no golden can be recorded (#793, #805). They are
+/// left out of the corpus; single-entry seeds of the same packets stay.
+const PAPER_NONDETERMINISTIC: &[&str] = &[
+    "capture.041.configuration.clientbound.update_tags",
+    "seed.configuration.clientbound.update_tags.3",
+    "mutate.configuration.clientbound.update_tags.3.flip0",
+    "capture.179.play.clientbound.login",
+    "seed.play.clientbound.login.0",
+    "mutate.play.clientbound.login.0.flip1",
+    "mutate.play.clientbound.login.0.replace",
+    "capture.196.play.clientbound.set_time",
+    "seed.play.clientbound.set_time.0",
+    "mutate.play.clientbound.set_time.0.flip0",
+    "mutate.play.clientbound.set_time.0.flip1",
+];
+
 /// The committed seed of every pseudo-random choice in this corpus.
 pub const CORPUS_SEED: u64 = 0x5249_5645_5430_0004;
 
@@ -198,5 +217,14 @@ pub fn emit() -> Result<String, String> {
             );
         }
     }
-    Ok(out)
+    let kept: String = out
+        .lines()
+        .filter(|line| {
+            !PAPER_NONDETERMINISTIC
+                .iter()
+                .any(|id| line.starts_with(&format!("{{\"id\":\"{id}\",")))
+        })
+        .map(|line| format!("{line}\n"))
+        .collect();
+    Ok(kept)
 }

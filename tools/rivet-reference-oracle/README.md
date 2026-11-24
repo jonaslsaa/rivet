@@ -23,7 +23,22 @@ The tool currently supports:
   (`tools/rivet-oracle/fixtures/text/`) and the `rivet-parity` differential
   checks.
 
-All five operations live in one op registry (`OPS` in
+- `codec.reencode` — `{codec, ops, input}`: decode `input` with a named vanilla
+  `Codec` constant (`Class.CONSTANT`, the keys of `CodecTable`) under `RegistryOps`
+  over the frozen vanilla server registries (`ops` is `json`, input a JSON value,
+  or `nbt`, input SNBT text) and re-encode. Answers `{accept:true, canonical}`
+  (the encoder's compact JSON/SNBT) or `{accept:false, phase:"decode"|"encode"}`.
+- `packet.reencode` — `{state, direction, packet_id, body}`: look the packet up in
+  `ProtocolInfo`, decode the hex body, re-encode and answer `{name, body}`; an
+  unregistered id, a decode failure or a `DecoderException` is an input
+  rejection. Paper's `GlobalConfiguration` is initialised with defaults first.
+
+Registry loading logs to stdout, so the first `codec.reencode`/`packet.reencode`
+request silences log4j until the registries are ready (live mode speaks JSON
+Lines on that stream). `harvest_datapack.py` extracts `codec.reencode` seeds
+from the vanilla data pack in the Paper jar into `fixtures/ops/corpus-src/`.
+
+All seven operations live in one op registry (`OPS` in
 `RivetReferenceOracle.java`). Each op declares its result-key order (the
 canonical-JSON contract: results are re-emitted in exactly that order, an
 undeclared key or a raw floating-point number is an `unavailable` fault — floats
