@@ -188,26 +188,100 @@ OP_SURFACES = {
          "net.minecraft.network.protocol.login.LoginProtocols", "net.minecraft.network.protocol.status.StatusProtocols",
          "net.minecraft.network.protocol.handshake.HandshakeProtocols"]),
     "codec.reencode": (
-        ["crates/rivet-world/src/item/**", "crates/rivet-registry/src/block_state_codec.rs",
-         "crates/rivet-registry/src/core/*.rs", "crates/rivet-registry/src/identifier.rs",
-         "crates/rivet-util/src/valueproviders/**", "crates/rivet-util/src/random.rs",
-         "crates/rivet-text/src/text_color.rs", "crates/rivet-text/src/component_serialization.rs",
-         "crates/rivet-world/src/levelgen/heightproviders/**", "crates/rivet-world/src/levelgen/structure/templatesystem/**",
-         "crates/rivet-world/src/levelgen/feature/featuresize/**", "crates/rivet-world/src/levelgen/vertical_anchor.rs",
-         "crates/rivet-world/src/levelgen/heightmap.rs", "crates/rivet-world/src/levelgen/synth/normal_noise.rs",
-         "crates/rivet-world/src/levelgen/presets/world_preset.rs", "crates/rivet-world/src/levelgen/settings/geode_*.rs",
-         "crates/rivet-world/src/levelgen/carver/carver_debug_settings.rs", "crates/rivet-world/src/effect/instance.rs",
-         "crates/rivet-world/src/level/world_data_configuration.rs", "crates/rivet-world/src/level/data_pack_config.rs",
-         "crates/rivet-world/src/flag/feature_flags.rs",
-         "crates/rivet-world/src/scores/**", "crates/rivet-world/src/biome/**",
-         "crates/rivet-world/src/level/border/**", "crates/rivet-world/src/level/saveddata/**",
-         "crates/rivet-world/src/level/level_settings.rs", "crates/rivet-world/src/level/storage/level_data.rs",
-         "crates/rivet-world/src/levelgen/blending/**", "crates/rivet-world/src/levelgen/noise/noise_settings.rs",
-         "crates/rivet-world/src/levelgen/placement/**", "crates/rivet-world/src/levelgen/generation_step.rs",
-         "crates/rivet-world/src/levelgen/carver/canyon_carver_configuration.rs",
+        # Exact files of the ported codecs in rivet-parity's table (ops/codec.rs), plus the
+        # directories of polymorphic roots whose every variant is reached through the root codec.
+        ["crates/rivet-util/src/valueproviders/**",
+         "crates/rivet-world/src/levelgen/heightproviders/**",
+         "crates/rivet-world/src/levelgen/structure/templatesystem/**",
+         "crates/rivet-world/src/levelgen/feature/featuresize/**",
          "crates/rivet-world/src/levelgen/feature/foliageplacers/**",
-         "crates/rivet-world/src/levelgen/feature/configurations/**",
-         "crates/rivet-world/src/ticks.rs", "crates/rivet-world/src/entity/mod.rs"],
+         "crates/rivet-registry/src/block_state_codec.rs",
+         "crates/rivet-registry/src/core/block_pos.rs",
+         "crates/rivet-registry/src/core/difficulty.rs",
+         "crates/rivet-registry/src/core/direction.rs",
+         "crates/rivet-registry/src/core/game_type.rs",
+         "crates/rivet-registry/src/core/global_pos.rs",
+         "crates/rivet-registry/src/core/rotations.rs",
+         "crates/rivet-registry/src/core/uuid_util.rs",
+         "crates/rivet-registry/src/identifier.rs",
+         "crates/rivet-text/src/component_serialization.rs",
+         "crates/rivet-text/src/font_description.rs",
+         "crates/rivet-text/src/text_color.rs",
+         "crates/rivet-util/src/random.rs",
+         "crates/rivet-world/src/biome/biome.rs",
+         "crates/rivet-world/src/biome/biome_special_effects.rs",
+         "crates/rivet-world/src/biome/climate.rs",
+         "crates/rivet-world/src/biome/mob_spawn_settings.rs",
+         "crates/rivet-world/src/biome/multi_noise_biome_source_parameter_list.rs",
+         "crates/rivet-world/src/effect/instance.rs",
+         "crates/rivet-world/src/entity/mod.rs",
+         "crates/rivet-world/src/flag/feature_flags.rs",
+         "crates/rivet-world/src/item/component_patch.rs",
+         "crates/rivet-world/src/item/components/combat.rs",
+         "crates/rivet-world/src/item/components/consumable.rs",
+         "crates/rivet-world/src/item/components/core.rs",
+         "crates/rivet-world/src/item/components/display.rs",
+         "crates/rivet-world/src/item/components/world_and_books.rs",
+         "crates/rivet-world/src/item/item_stack.rs",
+         "crates/rivet-world/src/item/recursive_components.rs",
+         "crates/rivet-world/src/level/border/world_border.rs",
+         "crates/rivet-world/src/level/data_pack_config.rs",
+         "crates/rivet-world/src/level/level_settings.rs",
+         "crates/rivet-world/src/level/saveddata/wandering_trader_data.rs",
+         "crates/rivet-world/src/level/saveddata/weather_data.rs",
+         "crates/rivet-world/src/level/storage/level_data.rs",
+         "crates/rivet-world/src/level/world_data_configuration.rs",
+         "crates/rivet-world/src/levelgen/blending/blending_data.rs",
+         "crates/rivet-world/src/levelgen/carver/canyon_carver_configuration.rs",
+         "crates/rivet-world/src/levelgen/carver/carver_debug_settings.rs",
+         "crates/rivet-world/src/levelgen/feature/configurations/block_state_configuration.rs",
+         "crates/rivet-world/src/levelgen/feature/configurations/column_feature_configuration.rs",
+         "crates/rivet-world/src/levelgen/feature/configurations/count_configuration.rs",
+         "crates/rivet-world/src/levelgen/feature/configurations/delta_feature_configuration.rs",
+         "crates/rivet-world/src/levelgen/feature/configurations/end_gateway_configuration.rs",
+         "crates/rivet-world/src/levelgen/feature/configurations/end_spike_configuration.rs",
+         "crates/rivet-world/src/levelgen/feature/configurations/layer_configuration.rs",
+         "crates/rivet-world/src/levelgen/feature/configurations/none_feature_configuration.rs",
+         "crates/rivet-world/src/levelgen/feature/configurations/ore_configuration.rs",
+         "crates/rivet-world/src/levelgen/feature/configurations/probability_feature_configuration.rs",
+         "crates/rivet-world/src/levelgen/feature/configurations/replace_block_configuration.rs",
+         "crates/rivet-world/src/levelgen/feature/configurations/replace_sphere_configuration.rs",
+         "crates/rivet-world/src/levelgen/feature/configurations/sculk_patch_configuration.rs",
+         "crates/rivet-world/src/levelgen/feature/configurations/twisting_vines_config.rs",
+         "crates/rivet-world/src/levelgen/feature/configurations/underwater_magma_configuration.rs",
+         "crates/rivet-world/src/levelgen/generation_step.rs",
+         "crates/rivet-world/src/levelgen/heightmap.rs",
+         "crates/rivet-world/src/levelgen/noise/noise_settings.rs",
+         "crates/rivet-world/src/levelgen/placement/biome_filter.rs",
+         "crates/rivet-world/src/levelgen/placement/cave_surface.rs",
+         "crates/rivet-world/src/levelgen/placement/count_on_every_layer_placement.rs",
+         "crates/rivet-world/src/levelgen/placement/count_placement.rs",
+         "crates/rivet-world/src/levelgen/placement/fixed_placement.rs",
+         "crates/rivet-world/src/levelgen/placement/height_range_placement.rs",
+         "crates/rivet-world/src/levelgen/placement/heightmap_placement.rs",
+         "crates/rivet-world/src/levelgen/placement/in_square_placement.rs",
+         "crates/rivet-world/src/levelgen/placement/noise_based_count_placement.rs",
+         "crates/rivet-world/src/levelgen/placement/noise_threshold_count_placement.rs",
+         "crates/rivet-world/src/levelgen/placement/random_offset_placement.rs",
+         "crates/rivet-world/src/levelgen/placement/rarity_filter.rs",
+         "crates/rivet-world/src/levelgen/placement/surface_relative_threshold_filter.rs",
+         "crates/rivet-world/src/levelgen/placement/surface_water_depth_filter.rs",
+         "crates/rivet-world/src/levelgen/presets/world_preset.rs",
+         "crates/rivet-world/src/levelgen/settings/below_zero_retrogen.rs",
+         "crates/rivet-world/src/levelgen/settings/geode_crack_settings.rs",
+         "crates/rivet-world/src/levelgen/settings/geode_layer_settings.rs",
+         "crates/rivet-world/src/levelgen/settings/world_options.rs",
+         "crates/rivet-world/src/levelgen/synth/normal_noise.rs",
+         "crates/rivet-world/src/levelgen/vertical_anchor.rs",
+         "crates/rivet-world/src/scores/criteria.rs",
+         "crates/rivet-world/src/scores/display_slot.rs",
+         "crates/rivet-world/src/scores/number_format.rs",
+         "crates/rivet-world/src/scores/objective.rs",
+         "crates/rivet-world/src/scores/save_data.rs",
+         "crates/rivet-world/src/scores/scoreboard.rs",
+         "crates/rivet-world/src/scores/team.rs",
+         "crates/rivet-world/src/scores/team_color.rs",
+         "crates/rivet-world/src/ticks.rs"],
         ["net.minecraft.world.item.ItemStack", "net.minecraft.core.component.DataComponentPatch",
          "net.minecraft.world.item.component.Consumable", "net.minecraft.util.valueproviders.IntProviders",
          "net.minecraft.world.level.levelgen.structure.templatesystem.RuleTest",
@@ -870,9 +944,25 @@ def render(rows: list[dict], previous: dict[str, dict[str, str]]) -> str:
     return buf.getvalue()
 
 
+def op_excluded_counts() -> dict[str, int]:
+    """Whole-input exclusions (`input:` / `skip:` rows) per recorded op."""
+    path = REPO / OPS_DIR / "exclusions.tsv"
+    counts: dict[str, int] = {}
+    if path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines()[1:]:
+            cells = line.split("\t")
+            if len(cells) == 4 and cells[1].startswith(("input:", "skip:")):
+                counts[cells[0]] = counts.get(cells[0], 0) + 1
+    return counts
+
+
+OP_ROW_RE = re.compile(r"^op\.(.+)\.(recorded|live)$")
+
+
 def validate(text: str) -> list[str]:
     """Malformed-ledger findings for a rendered VERIFY.tsv."""
     errors = []
+    excluded = op_excluded_counts()
     lines = text.splitlines()
     if not lines or lines[0].split("\t") != COLUMNS:
         return ["header does not match the VERIFY.tsv columns"]
@@ -903,6 +993,15 @@ def validate(text: str) -> list[str]:
             errors.append(f"{r['id']}: PASS at {r['layer']} without a negative control (VERIFICATION 2.4)")
         if r["status"] == "PASS" and r["mismatched"] not in ("-", "0"):
             errors.append(f"{r['id']}: PASS with mismatches")
+        # An op row's scoreboard count is its executed inputs: every recorded
+        # input that no exclusions row takes out. A recorded result that does
+        # not add up is stale (the corpus or the exclusions moved since).
+        m = OP_ROW_RE.match(r["id"])
+        if m and r["status"] == "PASS" and r["corpus_n"].isdigit() and r["matched"].isdigit():
+            expected = int(r["corpus_n"]) - excluded.get(m.group(1), 0)
+            if int(r["matched"]) != expected:
+                errors.append(f"{r['id']}: matched={r['matched']} but corpus_n={r['corpus_n']} minus "
+                              f"{excluded.get(m.group(1), 0)} excluded inputs is {expected}: re-record the row")
     return errors
 
 
