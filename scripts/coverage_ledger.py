@@ -60,8 +60,10 @@ file `<dirs>/<stem>.rs` (or `<dirs>/<stem>/mod.rs`) is a candidate for a Java
 class when `stem` equals the class name in snake case (compared with
 underscores removed and lower-cased, so `AABB` -> `aabb.rs`). A candidate is a
 *mirrored* path when either
-  - exact mount: the file's crate mounts a Java package prefix at its `src/`
-    root (MOUNTS) and `<dirs>` equals the rest of the class's package, or
+  - exact mount: the file's crate mounts a Java package prefix at a directory
+    under `src/` (MOUNTS; usually the root, `server/dataconverter/` for
+    `ca.spottedleaf.dataconverter` in rivet-server) and `<dirs>` equals that
+    directory followed by the rest of the class's package, or
   - suffix: `<dirs>` is non-empty and equals the trailing segments of the
     class's package (`rivet-world/src/levelgen/feature/` for
     `net.minecraft.world.level.levelgen.feature`).
@@ -170,20 +172,25 @@ COLUMNS = [
 TARGET_BUCKETS = {"A", "D"}
 NON_TARGET_STATUS = {"B": "n/a(datagen)", "C": "deferred(dfu-audit)", "E": "adapter", "F": "adapter"}
 
-# Crate -> Java package prefixes mounted at the crate's `src/` root.
+# Crate -> (Java package prefix, directory under `src/` it is mounted at).
+# `""` is the crate root. DataConverter is ported as one consistent subtree
+# under rivet-server's `server/` module.
 MOUNTS = {
-    "rivet-core": ["net.minecraft"],
-    "rivet-util": ["net.minecraft.util"],
-    "rivet-serialization": ["com.mojang.serialization"],
-    "rivet-nbt": ["net.minecraft.nbt"],
-    "rivet-text": ["net.minecraft.network.chat"],
-    "rivet-brigadier": ["com.mojang.brigadier"],
-    "rivet-registry": ["net.minecraft.core", "net.minecraft.resources", "net.minecraft.tags"],
-    "rivet-protocol": ["net.minecraft.network"],
-    "rivet-world": ["net.minecraft.world", "net.minecraft.world.level"],
-    "rivet-entity": ["net.minecraft.world.entity"],
-    "rivet-server": ["net.minecraft"],
+    "rivet-core": [("net.minecraft", "")],
+    "rivet-util": [("net.minecraft.util", "")],
+    "rivet-serialization": [("com.mojang.serialization", "")],
+    "rivet-nbt": [("net.minecraft.nbt", "")],
+    "rivet-text": [("net.minecraft.network.chat", "")],
+    "rivet-brigadier": [("com.mojang.brigadier", "")],
+    "rivet-registry": [("net.minecraft.core", ""), ("net.minecraft.resources", ""),
+                       ("net.minecraft.tags", "")],
+    "rivet-protocol": [("net.minecraft.network", "")],
+    "rivet-world": [("net.minecraft.world", ""), ("net.minecraft.world.level", "")],
+    "rivet-entity": [("net.minecraft.world.entity", "")],
+    "rivet-server": [("net.minecraft", ""),
+                     ("ca.spottedleaf.dataconverter", "server/dataconverter")],
 }
+
 
 OBJECT_ALIASES = {
     "toString": ["fmt", "to_string"],
@@ -616,14 +623,22 @@ def load_rust() -> list[RustFile]:
     return files
 
 
+def mounted_dirs(crate: str, pkg: str) -> list[list[str]]:
+    """The `src/`-relative dir segments `pkg` maps to under each of `crate`'s
+    MOUNTS that covers it."""
+    out = []
+    for prefix, mount_dir in MOUNTS.get(crate, []):
+        if pkg == prefix or pkg.startswith(prefix + "."):
+            out.append(segs(mount_dir) + segs(pkg[len(prefix):]))
+    return out
+
+
 def mirror_score(rf: RustFile, pkg: str) -> tuple[int, int] | None:
     """(exact mount?, matched dir segments) if rf sits at a mirrored path."""
     dirs = segs("/".join(rf.dirs))
     psegs = segs(pkg)
-    for prefix in MOUNTS.get(rf.crate, []):
-        if pkg == prefix or pkg.startswith(prefix + "."):
-            if dirs == segs(pkg[len(prefix):]):
-                return (1, len(dirs))
+    if dirs in mounted_dirs(rf.crate, pkg):
+        return (1, len(dirs))
     if dirs and len(dirs) <= len(psegs) and psegs[-len(dirs):] == dirs:
         return (0, len(dirs))
     return None
@@ -636,6 +651,8 @@ def is_package_module(rf: RustFile, pkg: str) -> bool:
         return False
     mod = segs("/".join(rf.dirs + [rf.stem]))
     psegs = segs(pkg)
+    if mod in mounted_dirs(rf.crate, pkg):
+        return True
     return len(mod) <= len(psegs) and psegs[-len(mod):] == mod
 
 

@@ -140,6 +140,18 @@ class MirrorTest(unittest.TestCase):
         pkg_mod = self.rf("crates/rivet-world/src/levelgen/feature.rs")
         self.assertIsNone(cl.mirror_score(pkg_mod, "net.minecraft.world.level.levelgen.feature"))
 
+    def test_subdirectory_mount(self):
+        # rivet-server mounts ca.spottedleaf.dataconverter at server/dataconverter/.
+        dt = self.rf("crates/rivet-server/src/server/dataconverter/converters/datatypes/data_type.rs")
+        self.assertEqual(cl.mirror_score(dt, "ca.spottedleaf.dataconverter.converters.datatypes"), (1, 4))
+        # The package's own module file is a package module, not a class home.
+        types_mod = self.rf("crates/rivet-server/src/server/dataconverter/types/mod.rs")
+        self.assertIsNone(cl.mirror_score(types_mod, "ca.spottedleaf.dataconverter.types"))
+        self.assertTrue(cl.is_package_module(types_mod, "ca.spottedleaf.dataconverter.types"))
+        # The mount only applies in the crate that declares it.
+        elsewhere = self.rf("crates/rivet-world/src/server/dataconverter/types/types.rs")
+        self.assertIsNone(cl.mirror_score(elsewhere, "ca.spottedleaf.dataconverter.types"))
+
     def test_buckets(self):
         self.assertEqual(cl.bucket_for("minecraft", "net.minecraft.world.entity"), "A")
         self.assertEqual(cl.bucket_for("minecraft", "ca.spottedleaf.dataconverter.types"), "A")
@@ -196,6 +208,21 @@ class RealClassTest(unittest.TestCase):
         self.assertEqual(r["assigned_crate"], "rivet-server")
         self.assertEqual(r["rust_path"], "crates/rivet-entity/src/ai/goal/float_goal.rs")
         self.assertEqual((r["method_total"], r["method_covered"], r["status"]), ("3", "3", "complete"))
+
+    def test_data_hook_under_subdirectory_mount(self):
+        """ca/spottedleaf/dataconverter/converters/datatypes/DataHook.java is an
+        interface declaring preHook and postHook (2 methods).
+        crates/rivet-server/src/server/dataconverter/converters/datatypes/data_hook.rs
+        is the DataHook trait with fn pre_hook and fn post_hook and no markers
+        (its #[cfg(test)] impl is ignored). rivet-server mounts
+        ca.spottedleaf.dataconverter at server/dataconverter/, so the file is the
+        mirrored home: 2 of 2 -> complete."""
+        r = self.rows["ca.spottedleaf.dataconverter.converters.datatypes.DataHook"]
+        self.assertEqual(
+            r["rust_path"],
+            "crates/rivet-server/src/server/dataconverter/converters/datatypes/data_hook.rs")
+        self.assertEqual((r["method_total"], r["method_covered"]), ("2", "2"))
+        self.assertEqual((r["stub_count"], r["rivettodo_count"], r["status"]), ("0", "0", "complete"))
 
     def test_entity_absent_spine_hub(self):
         """Entity.java (5,462 LOC) has no mirrored home: rivet-world/src/entity/mod.rs
