@@ -65,6 +65,9 @@ pub struct PathNavigation {
     max_visited_nodes_multiplier: f32,
     path_finder: PathFinder,
     is_stuck: bool,
+    /// `mob.getAttributeValue(Attributes.FOLLOW_RANGE)`, kept current by
+    /// [`PathNavigation::on_follow_range_updated`].
+    follow_range: f64,
     required_path_length: f32,
 }
 
@@ -72,53 +75,54 @@ impl PathNavigation {
     pub const MAX_TIME_RECOMPUTE: i64 = 20;
     pub const STUCK_CHECK_INTERVAL: i32 = 100;
     pub const STUCK_THRESHOLD_DISTANCE_FACTOR: f32 = 0.25;
-    pub const DEFAULT_FOLLOW_RANGE: f32 = 16.0;
+    /// Initial `PathNavigation.requiredPathLength`.
+    pub const DEFAULT_REQUIRED_PATH_LENGTH: f32 = 16.0;
 
     #[must_use]
-    pub fn ground(max_visited_nodes: i32) -> Self {
+    pub fn ground(follow_range: f64) -> Self {
         Self::with_variant(
             NavigationVariant::Ground {
                 evaluator: WalkNodeEvaluator::new(),
                 avoid_sun: false,
                 can_path_to_targets_below_surface: false,
             },
-            max_visited_nodes,
+            follow_range,
         )
     }
 
     #[must_use]
-    pub fn flying(max_visited_nodes: i32) -> Self {
+    pub fn flying(follow_range: f64) -> Self {
         Self::with_variant(
             NavigationVariant::Flying {
                 evaluator: FlyNodeEvaluator::new(),
             },
-            max_visited_nodes,
+            follow_range,
         )
     }
 
     #[must_use]
-    pub fn water_bound(max_visited_nodes: i32, allow_breaching: bool) -> Self {
+    pub fn water_bound(follow_range: f64, allow_breaching: bool) -> Self {
         Self::with_variant(
             NavigationVariant::WaterBound {
                 evaluator: SwimNodeEvaluator::new(allow_breaching),
                 allow_breaching,
             },
-            max_visited_nodes,
+            follow_range,
         )
     }
 
     #[must_use]
-    pub fn amphibious(max_visited_nodes: i32) -> Self {
+    pub fn amphibious(follow_range: f64) -> Self {
         Self::with_variant(
             NavigationVariant::Amphibious {
                 evaluator: AmphibiousNodeEvaluator::new(false),
             },
-            max_visited_nodes,
+            follow_range,
         )
     }
 
     #[must_use]
-    pub fn wall_climber(max_visited_nodes: i32) -> Self {
+    pub fn wall_climber(follow_range: f64) -> Self {
         Self::with_variant(
             NavigationVariant::WallClimber {
                 evaluator: WalkNodeEvaluator::new(),
@@ -126,12 +130,15 @@ impl PathNavigation {
                 can_path_to_targets_below_surface: false,
                 path_to_position: None,
             },
-            max_visited_nodes,
+            follow_range,
         )
     }
 
+    /// Mirrors the `PathNavigation(Mob, Level)` constructor: `follow_range` is the
+    /// mob's `FOLLOW_RANGE` attribute (base) value at construction, and the path
+    /// finder starts with `Mth.floor(followRange * 16.0)` visited nodes.
     #[must_use]
-    pub fn with_variant(variant: NavigationVariant, max_visited_nodes: i32) -> Self {
+    pub fn with_variant(variant: NavigationVariant, follow_range: f64) -> Self {
         Self {
             variant,
             path: None,
@@ -149,14 +156,42 @@ impl PathNavigation {
             target_pos: None,
             reach_range: 0,
             max_visited_nodes_multiplier: 1.0,
-            path_finder: PathFinder::new(max_visited_nodes),
+            path_finder: PathFinder::new(mth::floor_d(follow_range * 16.0)),
             is_stuck: false,
-            required_path_length: Self::DEFAULT_FOLLOW_RANGE,
+            follow_range,
+            required_path_length: Self::DEFAULT_REQUIRED_PATH_LENGTH,
         }
     }
 
-    pub fn set_follow_range(&mut self, follow_range: f32) {
-        self.required_path_length = follow_range;
+    /// Mirrors `Mob.onAttributeUpdated` for `FOLLOW_RANGE`: records the new
+    /// attribute value and calls `updatePathfinderMaxVisitedNodes()`.
+    pub fn on_follow_range_updated(&mut self, follow_range: f64) {
+        self.follow_range = follow_range;
+        self.update_pathfinder_max_visited_nodes();
+    }
+
+    /// Mirrors `PathNavigation.updatePathfinderMaxVisitedNodes()`.
+    pub fn update_pathfinder_max_visited_nodes(&mut self) {
+        let max_visited_nodes = mth::floor(self.max_path_length() * 16.0);
+        self.path_finder.set_max_visited_nodes(max_visited_nodes);
+    }
+
+    /// Mirrors `PathNavigation.setRequiredPathLength(float)`.
+    pub fn set_required_path_length(&mut self, length: f32) {
+        self.required_path_length = length;
+        self.update_pathfinder_max_visited_nodes();
+    }
+
+    /// Mirrors `PathNavigation.getMaxPathLength()`:
+    /// `Math.max((float) followRange, requiredPathLength)`.
+    #[must_use]
+    pub fn max_path_length(&self) -> f32 {
+        mth::max_f32(self.follow_range as f32, self.required_path_length)
+    }
+
+    #[must_use]
+    pub const fn max_visited_nodes(&self) -> i32 {
+        self.path_finder.max_visited_nodes
     }
 
     pub fn set_speed_modifier(&mut self, speed_modifier: f64) {
@@ -380,7 +415,7 @@ impl PathNavigation {
             random,
             &[target],
             reach_range,
-            self.required_path_length,
+            self.max_path_length(),
         )
     }
 
@@ -413,7 +448,10 @@ impl PathNavigation {
         column
     }
 
-    /// Mirrors `PathNavigation.createPath(Set<BlockPos>, int, boolean, int, float)`.
+    /// Mirrors `PathNavigation.createPath(Set<BlockPos>, Entity, int, boolean, int, float)`.
+    ///
+    /// `max_path_length` is [`PathNavigation::max_path_length`] for every overload
+    /// except `createPath(BlockPos, int, int)`.
     pub fn create_path_targets<W: PathWorldView + ?Sized>(
         &mut self,
         mob: &mut MobPathingState,
@@ -438,6 +476,17 @@ impl PathNavigation {
         {
             return Some(existing.copy());
         }
+
+        // Paper - don't path out of world border
+        let targets: Vec<BlockPos> = targets
+            .iter()
+            .copied()
+            .filter(|&target| world.is_within_world_border(target))
+            .collect();
+        if targets.is_empty() {
+            return None;
+        }
+        let targets = targets.as_slice();
 
         let multiplier = self.max_visited_nodes_multiplier;
         let path = match &mut self.variant {
@@ -898,31 +947,48 @@ impl PathNavigation {
         self.is_stuck = false;
     }
 
-    /// Mirrors `PathNavigation.canMoveDirectly(Vec3, Vec3)`.
+    /// Mirrors `PathNavigation.canMoveDirectly(Vec3, Vec3)` and its overrides.
     #[must_use]
     pub fn can_move_directly<W: PathWorldView + ?Sized>(
         &self,
         mob: &MobPathingState,
         world: &W,
-        from: Vec3,
-        to: Vec3,
+        start_pos: Vec3,
+        stop_pos: Vec3,
     ) -> bool {
         match self.variant {
-            NavigationVariant::Flying { .. } => world.is_clear_for_movement_between(from, to, true),
+            NavigationVariant::Flying { .. } => {
+                Self::is_clear_for_movement_between(mob, world, start_pos, stop_pos, true)
+            }
             NavigationVariant::Amphibious { .. } => {
-                mob.is_in_liquid() && world.is_clear_for_movement_between(from, to, false)
+                mob.is_in_liquid()
+                    && Self::is_clear_for_movement_between(mob, world, start_pos, stop_pos, false)
             }
             NavigationVariant::WaterBound { .. } => {
-                world.is_clear_for_movement_between(from, to, false)
+                Self::is_clear_for_movement_between(mob, world, start_pos, stop_pos, false)
             }
             NavigationVariant::Ground { .. } | NavigationVariant::WallClimber { .. } => false,
         }
     }
 
+    /// Mirrors `PathNavigation.isClearForMovementBetween(Mob, Vec3, Vec3, boolean)`:
+    /// the clip ends at the mob's mid-height above `stop_pos`.
+    fn is_clear_for_movement_between<W: PathWorldView + ?Sized>(
+        mob: &MobPathingState,
+        world: &W,
+        start_pos: Vec3,
+        stop_pos: Vec3,
+        blocked_by_fluids: bool,
+    ) -> bool {
+        let to = Vec3::new(
+            stop_pos.x,
+            stop_pos.y + f64::from(mob.bb_height) * 0.5,
+            stop_pos.z,
+        );
+        world.is_clear_for_movement_between(start_pos, to, blocked_by_fluids)
+    }
+
     /// Mirrors `PathNavigation.isStableDestination(BlockPos)` and its overrides.
-    ///
-    /// `isSolidRender` / `entityCanStandOn` are approximated by a non-empty
-    /// collision shape until block shape data is exposed through `BlockPathInfo`.
     #[must_use]
     pub fn is_stable_destination<W: PathWorldView + ?Sized>(
         &self,
@@ -932,9 +998,39 @@ impl PathNavigation {
         let below = BlockPos::new(pos.x, pos.y - 1, pos.z);
         match self.variant {
             NavigationVariant::Amphibious { .. } => !world.block_info(below).is_air,
-            NavigationVariant::WaterBound { .. } => !world.block_info(pos).has_collision(),
-            NavigationVariant::Flying { .. } => world.block_info(pos).has_collision(),
-            _ => world.block_info(below).has_collision(),
+            NavigationVariant::WaterBound { .. } => !world.block_info(pos).is_solid_render,
+            NavigationVariant::Flying { .. } => world.block_info(pos).entity_can_stand_on,
+            NavigationVariant::Ground { .. } | NavigationVariant::WallClimber { .. } => {
+                world.block_info(below).is_solid_render
+            }
         }
+    }
+
+    /// Mirrors `PathNavigation.shouldRecomputePath(BlockPos)`, called by
+    /// `ServerLevel.sendBlockUpdated` for a changed block.
+    #[must_use]
+    pub fn should_recompute_path(&self, mob: &MobPathingState, pos: BlockPos) -> bool {
+        if self.has_delayed_recomputation {
+            return false;
+        }
+        let Some(path) = self.path.as_ref() else {
+            return false;
+        };
+        if path.is_done() || path.get_node_count() == 0 {
+            return false;
+        }
+        let Some(target) = path.get_end_node() else {
+            return false;
+        };
+        let middle_x = (f64::from(target.x) + mob.pos.x) / 2.0;
+        let middle_y = (f64::from(target.y) + mob.pos.y) / 2.0;
+        let middle_z = (f64::from(target.z) + mob.pos.z) / 2.0;
+        // `Vec3i.closerToCenterThan(Position, double)`
+        let dx = f64::from(pos.x) + 0.5 - middle_x;
+        let dy = f64::from(pos.y) + 0.5 - middle_y;
+        let dz = f64::from(pos.z) + 0.5 - middle_z;
+        // `!path.isDone()` guarantees `nextNodeIndex < nodeCount`.
+        let distance = (path.get_node_count() - path.get_next_node_index()) as f64;
+        dx * dx + dy * dy + dz * dz < distance * distance
     }
 }

@@ -1489,9 +1489,6 @@ impl NodeEvaluator for SwimNodeEvaluator {
             for dy in y..(y + self.config.entity_height) {
                 for dz in z..(z + self.config.entity_depth) {
                     let info = ctx.get_block_info(BlockPos::new(dx, dy, dz));
-                    if !info.is_loaded {
-                        return PathType::Blocked;
-                    }
                     if !info.is_water && !info.is_lava {
                         if info.is_air {
                             let below = ctx.get_block_info(BlockPos::new(dx, dy - 1, dz));

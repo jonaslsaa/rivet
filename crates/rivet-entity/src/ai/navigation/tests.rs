@@ -19,6 +19,8 @@ struct TestWorld {
     blocks: HashMap<BlockPos, BlockPathInfo>,
     default_floor_y: Option<i32>,
     sea_level: i32,
+    /// `(minX, minZ, maxX, maxZ)` of the world border; unbounded when `None`.
+    border: Option<(i32, i32, i32, i32)>,
 }
 
 impl TestWorld {
@@ -27,6 +29,7 @@ impl TestWorld {
             blocks: HashMap::new(),
             default_floor_y: Some(floor_y),
             sea_level: 63,
+            border: None,
         }
     }
 
@@ -35,6 +38,7 @@ impl TestWorld {
             blocks: HashMap::new(),
             default_floor_y: None,
             sea_level: 63,
+            border: None,
         }
     }
 
@@ -69,6 +73,55 @@ impl PathWorldView for TestWorld {
         }
         BlockPathInfo::AIR
     }
+
+    fn is_within_world_border(&self, pos: BlockPos) -> bool {
+        self.border.is_none_or(|(min_x, min_z, max_x, max_z)| {
+            pos.x >= min_x && pos.x < max_x && pos.z >= min_z && pos.z < max_z
+        })
+    }
+
+    /// Block shapes are `[0, 1] x [0, collision_max_y] x [0, 1]` boxes; a water or
+    /// lava cell's fluid shape is a source's `[0, 1] x [0, 8/9] x [0, 1]` box.
+    fn clip_hits_block(
+        &self,
+        pos: BlockPos,
+        from: Vec3,
+        to: Vec3,
+        blocked_by_fluids: bool,
+    ) -> bool {
+        let info = self.block_info(pos);
+        if info.is_air {
+            return false;
+        }
+        let box_clips = |height: f64| voxel_box_clips(pos, height, from, to);
+        info.collision_max_y.is_some_and(box_clips)
+            || (blocked_by_fluids && (info.is_water || info.is_lava) && box_clips(8.0 / 9.0))
+    }
+}
+
+/// `VoxelShape.clip(from, to, pos) != null` for the single box
+/// `[0, 1] x [0, height] x [0, 1]` offset by `pos`.
+fn voxel_box_clips(pos: BlockPos, height: f64, from: Vec3, to: Vec3) -> bool {
+    use crate::projectile::phys::{Aabb as PhysAabb, Vec3 as PhysVec3};
+
+    let (dx, dy, dz) = (to.x - from.x, to.y - from.y, to.z - from.z);
+    if dx * dx + dy * dy + dz * dz < 1.0e-7 {
+        return false;
+    }
+    let (x, y, z) = (f64::from(pos.x), f64::from(pos.y), f64::from(pos.z));
+    let shape = PhysAabb::new(x, y, z, x + 1.0, y + height, z + 1.0);
+    let test_point = PhysVec3::new(
+        from.x + dx * 0.001,
+        from.y + dy * 0.001,
+        from.z + dz * 0.001,
+    );
+    shape.contains(test_point)
+        || shape
+            .clip(
+                PhysVec3::new(from.x, from.y, from.z),
+                PhysVec3::new(to.x, to.y, to.z),
+            )
+            .is_some()
 }
 
 /// Mob `RandomSource` double backed by Java's LCG.
@@ -547,7 +600,7 @@ fn ground_navigation_follows_path_and_detects_stuck() {
     // cannot fire before the 100-tick stuck check.
     mob.speed = 0.04;
 
-    let mut nav = PathNavigation::ground(200);
+    let mut nav = PathNavigation::ground(16.0);
     let mut move_control = MoveControl::new();
 
     assert!(nav.move_to_xyz(&mut mob, &world, &mut TestRandom::new(), 4.5, 1.0, 0.5, 1.0));
@@ -590,7 +643,7 @@ fn ground_navigation_follows_path_and_detects_stuck() {
     // path times out once the timer exceeds 30, i.e. on game tick 32.
     let mut fast_mob = MobPathingState::new(Vec3::new(0.5, 1.0, 0.5), 0.6, 1.8);
     fast_mob.speed = 2.0;
-    let mut fast_nav = PathNavigation::ground(200);
+    let mut fast_nav = PathNavigation::ground(16.0);
     let mut fast_mc = MoveControl::new();
     assert!(fast_nav.move_to_xyz(
         &mut fast_mob,
@@ -632,7 +685,7 @@ fn ground_navigation_avoid_sun_trims_sky_exposed_nodes_on_move_to() {
     world.set(1, 1, 0, shaded_air);
 
     let mut mob = MobPathingState::new(Vec3::new(0.5, 1.0, 0.5), 0.6, 1.8);
-    let mut nav = PathNavigation::ground(200);
+    let mut nav = PathNavigation::ground(16.0);
     nav.set_avoid_sun(true);
 
     // createPath does not trim; moveTo(Path) does.
@@ -651,7 +704,7 @@ fn ground_navigation_avoid_sun_trims_sky_exposed_nodes_on_move_to() {
 
     // A mob already under open sky (at `y + 0.5`) does not trim.
     let open_world = TestWorld::flat(0);
-    let mut nav = PathNavigation::ground(200);
+    let mut nav = PathNavigation::ground(16.0);
     nav.set_avoid_sun(true);
     let path = nav.create_path(
         &mut mob,
@@ -674,7 +727,7 @@ fn move_to_path_lifts_cauldron_nodes() {
     let nodes = vec![Node::new(0, 1, 0), Node::new(1, 1, 0), Node::new(2, 1, 0)];
     let path = Path::new(nodes, BlockPos::new(2, 1, 0), true);
     let mob = MobPathingState::new(Vec3::new(0.5, 1.0, 0.5), 0.6, 1.8);
-    let mut nav = PathNavigation::ground(64);
+    let mut nav = PathNavigation::ground(16.0);
     assert!(nav.move_to_path(Some(path), 1.0, &mob, &world));
 
     let trimmed = nav.path.as_ref().unwrap();
@@ -688,7 +741,7 @@ fn move_to_path_lifts_cauldron_nodes() {
 fn wall_climber_navigation_falls_back_to_direct_move_control() {
     let world = TestWorld::flat(0);
     let mut mob = MobPathingState::new(Vec3::new(0.5, 1.0, 0.5), 1.4, 0.9);
-    let mut nav = PathNavigation::wall_climber(200);
+    let mut nav = PathNavigation::wall_climber(16.0);
     let mut move_control = MoveControl::new();
 
     // Create path records path_to_position; stopping path leaves fallback active
@@ -936,7 +989,7 @@ fn amphibious_evaluator_preserves_water_height_and_water_border() {
 fn wall_climber_fallback_checks_3d_distance_when_below_target() {
     let world = TestWorld::flat(0);
     let mut mob = MobPathingState::new(Vec3::new(0.5, 1.0, 0.5), 1.4, 0.9);
-    let mut nav = PathNavigation::wall_climber(200);
+    let mut nav = PathNavigation::wall_climber(16.0);
     let mut move_control = MoveControl::new();
 
     // Target is directly above mob (horiz_dist == 0 < bb_width, but dy == 5.0)
@@ -1049,7 +1102,7 @@ fn ground_navigation_does_not_prematurely_cut_corner_around_wall() {
     let path = Path::new(vec![n0, n1], BlockPos::new(1, 1, 2), true);
 
     let mut mob = MobPathingState::new(Vec3::new(0.6, 1.0, 1.3), 0.6, 1.8);
-    let mut nav = PathNavigation::ground(64);
+    let mut nav = PathNavigation::ground(16.0);
     let mut mc = MoveControl::new();
     assert!(nav.move_to_path(Some(path), 1.0, &mob, &world));
     nav.tick(&mut mob, &world, &mut TestRandom::new(), &mut mc, 1);
@@ -1079,7 +1132,7 @@ fn wall_climber_fallback_keeps_climbing_toward_elevated_target() {
     let world = TestWorld::flat(0);
     // Spider at (0.5, 1.0, 0.5) directly underneath elevated target (0, 6, 0)
     let mut mob = MobPathingState::new(Vec3::new(0.5, 1.0, 0.5), 1.4, 0.9);
-    let mut nav = PathNavigation::wall_climber(64);
+    let mut nav = PathNavigation::wall_climber(16.0);
     let mut mc = MoveControl::new();
 
     // Create path to elevated target (0, 6, 0) which sets WallClimber's path_to_position,
@@ -1375,7 +1428,7 @@ fn path_finder_candidate_selection_uses_paper_comparators() {
 fn ground_create_path_surface_search_scans_up_and_rejects_unloaded_targets() {
     let world = TestWorld::empty();
     let mut mob = MobPathingState::new(Vec3::new(0.5, 1.0, 0.5), 0.6, 1.8);
-    let mut nav = PathNavigation::ground(16);
+    let mut nav = PathNavigation::ground(16.0);
     // No ground below an air target: Paper scans upward from y + 1 to max_y + 1.
     let _ = nav.create_path(
         &mut mob,
@@ -1391,7 +1444,7 @@ fn ground_create_path_surface_search_scans_up_and_rejects_unloaded_targets() {
 
     let mut unloaded = TestWorld::flat(0);
     unloaded.set(3, 1, 0, BlockPathInfo::UNLOADED);
-    let mut nav = PathNavigation::ground(16);
+    let mut nav = PathNavigation::ground(16.0);
     assert!(
         nav.create_path(
             &mut mob,
@@ -1465,4 +1518,229 @@ fn body_rotation_waits_ten_stable_ticks_before_facing_front() {
     // headStableTime 11: fraction 0.1, remaining angle 4.5.
     brc.client_tick(&mut mob);
     assert!((mob.y_body_rot - 5.5).abs() < 1e-5);
+}
+
+#[test]
+fn can_move_directly_clips_to_mob_mid_height_above_stop() {
+    let mut world = TestWorld::empty();
+    // Ceiling cell above the flyer's next node.
+    world.set(0, 13, 0, BlockPathInfo::SOLID);
+    let mob = MobPathingState::new(Vec3::new(0.5, 10.0, 0.5), 0.6, 2.6);
+    let nav = PathNavigation::flying(16.0);
+    let start = Vec3::new(0.5, 10.0, 0.5);
+    let stop = Vec3::new(0.5, 12.0, 0.5);
+    // A foot-level ray (10.0 -> 12.0) never reaches y = 13; Paper's ray ends at
+    // `stop.y + bbHeight * 0.5 = 13.3` and hits the ceiling.
+    assert!(world.is_clear_for_movement_between(start, stop, true));
+    assert!(!nav.can_move_directly(&mob, &world, start, stop));
+
+    // Going down, the offset keeps the ray above a block a foot-level ray would hit.
+    let mut floor = TestWorld::empty();
+    floor.set(0, 8, 0, BlockPathInfo::SOLID);
+    let tall = MobPathingState::new(Vec3::new(0.5, 10.0, 0.5), 0.6, 2.0);
+    let swim = PathNavigation::water_bound(16.0, false);
+    let down = Vec3::new(0.5, 8.0, 0.5);
+    assert!(!floor.is_clear_for_movement_between(start, down, false));
+    assert!(swim.can_move_directly(&tall, &floor, start, down));
+}
+
+#[test]
+fn clear_for_movement_clips_block_and_fluid_shapes_like_level_clip() {
+    let mut world = TestWorld::empty();
+    // `from == to` is an immediate miss, even inside a solid block.
+    world.set(0, 5, 0, BlockPathInfo::SOLID);
+    let inside = Vec3::new(0.5, 5.5, 0.5);
+    assert!(world.is_clear_for_movement_between(inside, inside, true));
+
+    // A ray above a bottom slab's collision box misses it; one through it hits.
+    let slab = BlockPathInfo {
+        collision_max_y: Some(0.5),
+        ..BlockPathInfo::SOLID
+    };
+    world.set(2, 5, 0, slab);
+    assert!(world.is_clear_for_movement_between(
+        Vec3::new(1.5, 5.75, 0.5),
+        Vec3::new(3.5, 5.75, 0.5),
+        false
+    ));
+    assert!(!world.is_clear_for_movement_between(
+        Vec3::new(1.5, 5.25, 0.5),
+        Vec3::new(3.5, 5.25, 0.5),
+        false
+    ));
+
+    // Fluids only block with `Fluid.ANY`, and only through the fluid shape
+    // (a source is 8/9 of a block tall).
+    world.set(2, 7, 0, BlockPathInfo::WATER);
+    let low = (Vec3::new(1.5, 7.5, 0.5), Vec3::new(3.5, 7.5, 0.5));
+    let high = (Vec3::new(1.5, 7.95, 0.5), Vec3::new(3.5, 7.95, 0.5));
+    assert!(world.is_clear_for_movement_between(low.0, low.1, false));
+    assert!(!world.is_clear_for_movement_between(low.0, low.1, true));
+    assert!(world.is_clear_for_movement_between(high.0, high.1, true));
+}
+
+#[test]
+fn max_path_length_combines_follow_range_and_required_path_length() {
+    // The constructor seeds the node budget from the base follow range only.
+    let mut nav = PathNavigation::ground(10.0);
+    assert_eq!(nav.max_visited_nodes(), 160);
+    // `max((float) FOLLOW_RANGE, requiredPathLength = 16)`.
+    assert_eq!(nav.max_path_length(), 16.0);
+
+    nav.on_follow_range_updated(10.0);
+    assert_eq!(nav.max_visited_nodes(), 256);
+
+    nav.set_required_path_length(48.0);
+    assert_eq!(nav.max_path_length(), 48.0);
+    assert_eq!(nav.max_visited_nodes(), 768);
+
+    nav.on_follow_range_updated(64.0);
+    assert_eq!(nav.max_path_length(), 64.0);
+    assert_eq!(nav.max_visited_nodes(), 1024);
+}
+
+#[test]
+fn create_path_drops_targets_outside_world_border() {
+    let mut world = TestWorld::flat(0);
+    world.border = Some((-8, -8, 4, 8));
+    let mut mob = MobPathingState::new(Vec3::new(0.5, 1.0, 0.5), 0.6, 1.8);
+    let mut nav = PathNavigation::ground(16.0);
+    let outside = BlockPos::new(4, 1, 0);
+    let inside = BlockPos::new(3, 1, 0);
+
+    assert!(
+        nav.create_path_targets(
+            &mut mob,
+            &world,
+            &mut TestRandom::new(),
+            &[outside],
+            0,
+            16.0
+        )
+        .is_none()
+    );
+    let path = nav
+        .create_path_targets(
+            &mut mob,
+            &world,
+            &mut TestRandom::new(),
+            &[outside, inside],
+            0,
+            16.0,
+        )
+        .expect("path to the in-border target");
+    assert_eq!(path.get_target(), inside);
+}
+
+#[test]
+fn should_recompute_path_uses_remaining_nodes_around_midpoint() {
+    let world = TestWorld::flat(0);
+    let mut mob = MobPathingState::new(Vec3::new(0.5, 1.0, 0.5), 0.6, 1.8);
+    let mut nav = PathNavigation::ground(16.0);
+    assert!(!nav.should_recompute_path(&mob, BlockPos::new(2, 1, 0)));
+
+    let path = nav.create_path(
+        &mut mob,
+        &world,
+        &mut TestRandom::new(),
+        BlockPos::new(4, 1, 0),
+        0,
+    );
+    assert!(nav.move_to_path(path, 1.0, &mob, &world));
+    // End node (4, 1, 0), mob (0.5, 1.0, 0.5): midpoint (2.25, 1.0, 0.25),
+    // radius = 5 remaining nodes.
+    assert!(nav.should_recompute_path(&mob, BlockPos::new(2, 1, 0)));
+    // (6, 1, 3) centre is (6.5, 1.5, 3.5): 4.25^2 + 0.5^2 + 3.25^2 = 28.875 > 25.
+    assert!(!nav.should_recompute_path(&mob, BlockPos::new(6, 1, 3)));
+    // (5, 1, 3) centre is (5.5, 1.5, 3.5): 3.25^2 + 0.5^2 + 3.25^2 = 21.375 < 25.
+    assert!(nav.should_recompute_path(&mob, BlockPos::new(5, 1, 3)));
+
+    nav.has_delayed_recomputation = true;
+    assert!(!nav.should_recompute_path(&mob, BlockPos::new(2, 1, 0)));
+}
+
+#[test]
+fn stable_destination_uses_solid_render_and_entity_can_stand_on() {
+    let mut world = TestWorld::empty();
+    // Glass-like: full collision, not solid-render, full top face.
+    let glass = BlockPathInfo {
+        is_solid_render: false,
+        ..BlockPathInfo::SOLID
+    };
+    // Bottom slab: has collision, neither solid-render nor a full top face.
+    let slab = BlockPathInfo {
+        is_solid_render: false,
+        entity_can_stand_on: false,
+        collision_max_y: Some(0.5),
+        ..BlockPathInfo::SOLID
+    };
+    world.set(0, 4, 0, glass);
+    world.set(1, 4, 0, slab);
+    world.set(2, 4, 0, BlockPathInfo::SOLID);
+
+    let ground = PathNavigation::ground(16.0);
+    assert!(!ground.is_stable_destination(&world, BlockPos::new(0, 5, 0)));
+    assert!(!ground.is_stable_destination(&world, BlockPos::new(1, 5, 0)));
+    assert!(ground.is_stable_destination(&world, BlockPos::new(2, 5, 0)));
+
+    let water = PathNavigation::water_bound(16.0, false);
+    assert!(water.is_stable_destination(&world, BlockPos::new(0, 4, 0)));
+    assert!(water.is_stable_destination(&world, BlockPos::new(1, 4, 0)));
+    assert!(!water.is_stable_destination(&world, BlockPos::new(2, 4, 0)));
+
+    let flying = PathNavigation::flying(16.0);
+    assert!(flying.is_stable_destination(&world, BlockPos::new(0, 4, 0)));
+    assert!(!flying.is_stable_destination(&world, BlockPos::new(1, 4, 0)));
+}
+
+#[test]
+fn controls_store_x_rot_through_entity_set_x_rot() {
+    // FlyingMoveControl: rotlerp(0, xRotD < 0, 20) = -20 + 360 = 340, which
+    // `setXRot` stores as clamp(340 % 360, -90, 90) = 90.
+    let mut flyer = MobPathingState::new(Vec3::new(0.0, 5.0, 0.0), 0.6, 0.6);
+    flyer.on_ground = false;
+    let mut fmc = FlyingMoveControl::new(20, false);
+    fmc.set_wanted_position(5.0, 8.0, 0.0, 1.0);
+    fmc.tick(&mut flyer);
+    assert_eq!(flyer.x_rot, 90.0);
+
+    // SmoothSwimmingLookControl aims at xRotD + 10 = 100 for a target directly
+    // below; `setXRot` clamps it to 90.
+    let mut swimmer = MobPathingState::new(Vec3::ZERO, 0.9, 0.6);
+    let mut slc = SmoothSwimmingLookControl::new(10);
+    slc.base
+        .set_look_at(0.0, swimmer.eye_y() - 5.0, 0.0, 10.0, 180.0);
+    slc.tick(&mut swimmer, false);
+    assert_eq!(swimmer.x_rot, 90.0);
+
+    // Non-finite values are discarded.
+    swimmer.set_x_rot(f32::NAN);
+    swimmer.set_y_rot(f32::INFINITY);
+    assert_eq!(swimmer.x_rot, 90.0);
+    assert_eq!(swimmer.y_rot, 0.0);
+}
+
+#[test]
+fn unloaded_region_cells_read_as_empty_chunk_air_outside_path_type() {
+    use crate::ai::goal::Aabb;
+
+    let mut world = TestWorld::flat(0);
+    world.set(1, 1, 0, BlockPathInfo::UNLOADED);
+    // `EmptyLevelChunk` adds no collision.
+    assert!(world.is_aabb_collision_free(Aabb::new(1.2, 1.0, 0.2, 1.8, 1.9, 0.8)));
+
+    // SwimNodeEvaluator: an unloaded (air) cell above water is BREACH.
+    use crate::ai::navigation::NodeEvaluator;
+    let mut pool = TestWorld::flat(0);
+    pool.fill_water(-2, 1, -2, 2, 3, 2);
+    pool.set(0, 4, 0, BlockPathInfo::UNLOADED);
+    let mut swimmer = MobPathingState::new(Vec3::new(0.5, 2.0, 0.5), 0.6, 0.6);
+    swimmer.in_water = true;
+    let mut eval = SwimNodeEvaluator::new(true);
+    eval.prepare(&mut swimmer, &pool);
+    let mut ctx = PathfindingContext::new(&pool, None, BlockPos::new(0, 2, 0));
+    assert_eq!(
+        eval.get_path_type_of_mob(&mut ctx, &swimmer, 0, 4, 0),
+        PathType::Breach
+    );
 }

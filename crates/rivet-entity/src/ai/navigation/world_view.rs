@@ -48,6 +48,11 @@ pub struct BlockPathInfo {
     pub is_cauldron: bool,
     /// `blockState.isSolid()` (the legacy-solid flag).
     pub is_solid: bool,
+    /// `blockState.isSolidRender()`.
+    pub is_solid_render: bool,
+    /// `blockState.entityCanStandOn(level, pos, mob)`: whether the block's collision
+    /// shape under the navigating mob's `CollisionContext` has a full `UP` face.
+    pub entity_can_stand_on: bool,
     /// `blockState.isPathfindable(PathComputationType.LAND)`.
     pub is_pathfindable_land: bool,
     /// `blockState.isPathfindable(PathComputationType.WATER)`.
@@ -84,6 +89,8 @@ impl BlockPathInfo {
         is_closed_fence_gate: false,
         is_cauldron: false,
         is_solid: false,
+        is_solid_render: false,
+        entity_can_stand_on: false,
         is_pathfindable_land: true,
         is_pathfindable_water: false,
         collision_max_y: None,
@@ -114,16 +121,23 @@ impl BlockPathInfo {
         is_closed_fence_gate: false,
         is_cauldron: false,
         is_solid: true,
+        is_solid_render: true,
+        entity_can_stand_on: true,
         is_pathfindable_land: false,
         is_pathfindable_water: false,
         collision_max_y: Some(1.0),
         can_see_sky: false,
     };
 
-    /// Unloaded chunk sentinel (Paper: `getBlockStateIfLoaded == null`).
+    /// A position whose chunk is missing from the `PathNavigationRegion`.
+    ///
+    /// Only Paper's patched `getPathTypeFromState` sees the chunk as missing
+    /// (`getBlockStateIfLoaded == null` gives `BLOCKED`); every other region read
+    /// goes through `EmptyLevelChunk`, so the remaining facts are those of `AIR`
+    /// with no collision and no fluid.
     pub const UNLOADED: Self = Self {
         is_loaded: false,
-        ..Self::SOLID
+        ..Self::AIR
     };
 
     /// Standard water source/flowing block.
@@ -295,6 +309,10 @@ impl BlockPathInfo {
 }
 
 /// Read-only world view used by pathfinding evaluators, navigation, and controls.
+///
+/// A view serves one navigating mob: entity-dependent facts
+/// ([`BlockPathInfo::entity_can_stand_on`], [`PathWorldView::clip_hits_block`])
+/// use that mob's `CollisionContext`.
 pub trait PathWorldView {
     fn min_y(&self) -> i32 {
         -64
@@ -314,7 +332,10 @@ pub trait PathWorldView {
     /// Returns `true` if `aabb` does not intersect any block collision shape.
     ///
     /// Default implementation checks every integer block cell overlapped by `aabb`
-    /// using `block_info(pos).collision_max_y`.
+    /// using `block_info(pos).collision_max_y`. Cells in chunks missing from the
+    /// region read as [`BlockPathInfo::UNLOADED`] and, like Paper's
+    /// `PathNavigationRegion.getChunkForCollisions` (`EmptyLevelChunk`), add no
+    /// collision.
     fn is_aabb_collision_free(&self, aabb: Aabb) -> bool {
         let min_x = mth::floor_d(aabb.min_x + 1.0e-7);
         let max_x = mth::floor_d(aabb.max_x - 1.0e-7);
@@ -330,12 +351,6 @@ pub trait PathWorldView {
             for y in start_y..=max_y {
                 for z in min_z..=max_z {
                     let info = self.block_info(BlockPos::new(x, y, z));
-                    if !info.is_loaded {
-                        if y >= min_y {
-                            return false;
-                        }
-                        continue;
-                    }
                     if let Some(max_local_y) = info.collision_max_y {
                         let block_top = y as f64 + max_local_y;
                         if aabb.min_y < block_top - 1.0e-7 && aabb.max_y > y as f64 + 1.0e-7 {
@@ -348,118 +363,136 @@ pub trait PathWorldView {
         true
     }
 
-    /// Mirrors `PathNavigation.isClearForMovementBetween(Mob, Vec3, Vec3, boolean)`.
+    /// Paper's `WorldBorder.isWithinBounds(BlockPos)`:
+    /// `x >= minX && x < maxX && z >= minZ && z < maxZ` on the block coordinates.
+    fn is_within_world_border(&self, pos: BlockPos) -> bool;
+
+    /// One cell of Paper's `Level.clip` (Moonrise `fastClip`) for a
+    /// `ClipContext(from, to, Block.COLLIDER, fluid, mob)`.
     ///
-    /// Uses Paper's 3D DDA voxel traversal (`BlockGetter.traverseBlocks`) so every block
-    /// cell intersected by the segment `from..to` is checked without skipping corners.
-    fn is_clear_for_movement_between(&self, from: Vec3, to: Vec3, include_fluids: bool) -> bool {
-        let is_cell_clear = |pos: BlockPos| -> bool {
-            let info = self.block_info(pos);
-            if !info.is_loaded || info.has_collision() {
-                return false;
-            }
-            if include_fluids && (info.is_water || info.is_lava) {
-                return false;
-            }
-            true
-        };
+    /// Returns `true` when the cell at `pos` produces a hit: the block's
+    /// collision shape under the navigating mob's `CollisionContext` clips the
+    /// segment `from..to` (`VoxelShape.clip(from, to, pos) != null`), or
+    /// `blocked_by_fluids` (`ClipContext.Fluid.ANY`) and the cell's fluid shape
+    /// clips it. Air and positions outside the build height never hit. `Level.clip`
+    /// reads chunks through `Level.getChunk`, so the implementation sees the
+    /// level's real block at `pos`, never the region's unloaded sentinel.
+    fn clip_hits_block(&self, pos: BlockPos, from: Vec3, to: Vec3, blocked_by_fluids: bool)
+    -> bool;
 
-        if from == to {
-            return is_cell_clear(BlockPos::new(
-                mth::floor_d(from.x),
-                mth::floor_d(from.y),
-                mth::floor_d(from.z),
-            ));
+    /// `Level.clip(new ClipContext(from, to, Block.COLLIDER, fluid, mob)).getType() == MISS`,
+    /// the clip inside `PathNavigation.isClearForMovementBetween`.
+    ///
+    /// Exact port of Paper 26.2's Moonrise `Level.fastClip` voxel walk; each visited
+    /// cell is tested with [`Self::clip_hits_block`] and the first hit ends the walk.
+    fn is_clear_for_movement_between(&self, from: Vec3, to: Vec3, blocked_by_fluids: bool) -> bool {
+        // `CollisionUtil.COLLISION_EPSILON`
+        const COLLISION_EPSILON: f64 = 1.0e-7;
+        let adj_x = COLLISION_EPSILON * (from.x - to.x);
+        let adj_y = COLLISION_EPSILON * (from.y - to.y);
+        let adj_z = COLLISION_EPSILON * (from.z - to.z);
+        if adj_x == 0.0 && adj_y == 0.0 && adj_z == 0.0 {
+            return true;
         }
 
-        let lerp = |delta: f64, start: f64, end: f64| start + delta * (end - start);
-        let frac = |v: f64| v - mth::floor_d(v) as f64;
-        let sign = |v: f64| -> i32 {
-            if v == 0.0 {
-                0
-            } else if v > 0.0 {
-                1
+        let to_x_adj = to.x - adj_x;
+        let to_y_adj = to.y - adj_y;
+        let to_z_adj = to.z - adj_z;
+        let from_x_adj = from.x + adj_x;
+        let from_y_adj = from.y + adj_y;
+        let from_z_adj = from.z + adj_z;
+
+        let mut curr_x = mth::floor_d(from_x_adj);
+        let mut curr_y = mth::floor_d(from_y_adj);
+        let mut curr_z = mth::floor_d(from_z_adj);
+
+        let diff_x = to_x_adj - from_x_adj;
+        let diff_y = to_y_adj - from_y_adj;
+        let diff_z = to_z_adj - from_z_adj;
+
+        // `Math.signum` then `(int)` truncation.
+        let signum = |v: f64| -> f64 {
+            if v > 0.0 {
+                1.0
+            } else if v < 0.0 {
+                -1.0
             } else {
-                -1
+                v
             }
         };
+        let dx_double = signum(diff_x);
+        let dy_double = signum(diff_y);
+        let dz_double = signum(diff_z);
+        let dx = dx_double as i32;
+        let dy = dy_double as i32;
+        let dz = dz_double as i32;
 
-        let to_x = lerp(-1.0e-7, to.x, from.x);
-        let to_y = lerp(-1.0e-7, to.y, from.y);
-        let to_z = lerp(-1.0e-7, to.z, from.z);
-        let from_x = lerp(-1.0e-7, from.x, to.x);
-        let from_y = lerp(-1.0e-7, from.y, to.y);
-        let from_z = lerp(-1.0e-7, from.z, to.z);
-
-        let mut cur_x = mth::floor_d(from_x);
-        let mut cur_y = mth::floor_d(from_y);
-        let mut cur_z = mth::floor_d(from_z);
-        if !is_cell_clear(BlockPos::new(cur_x, cur_y, cur_z)) {
-            return false;
-        }
-
-        let dx = to_x - from_x;
-        let dy = to_y - from_y;
-        let dz = to_z - from_z;
-        let sign_x = sign(dx);
-        let sign_y = sign(dy);
-        let sign_z = sign(dz);
-        let t_delta_x = if sign_x == 0 {
+        let normalized_diff_x = if diff_x == 0.0 {
             f64::MAX
         } else {
-            f64::from(sign_x) / dx
+            dx_double / diff_x
         };
-        let t_delta_y = if sign_y == 0 {
+        let normalized_diff_y = if diff_y == 0.0 {
             f64::MAX
         } else {
-            f64::from(sign_y) / dy
+            dy_double / diff_y
         };
-        let t_delta_z = if sign_z == 0 {
+        let normalized_diff_z = if diff_z == 0.0 {
             f64::MAX
         } else {
-            f64::from(sign_z) / dz
+            dz_double / diff_z
         };
-        let mut t_x = t_delta_x
-            * if sign_x > 0 {
-                1.0 - frac(from_x)
+
+        let frac = mth::frac_f64;
+        let mut normalized_curr_x = normalized_diff_x
+            * if diff_x > 0.0 {
+                1.0 - frac(from_x_adj)
             } else {
-                frac(from_x)
+                frac(from_x_adj)
             };
-        let mut t_y = t_delta_y
-            * if sign_y > 0 {
-                1.0 - frac(from_y)
+        let mut normalized_curr_y = normalized_diff_y
+            * if diff_y > 0.0 {
+                1.0 - frac(from_y_adj)
             } else {
-                frac(from_y)
+                frac(from_y_adj)
             };
-        let mut t_z = t_delta_z
-            * if sign_z > 0 {
-                1.0 - frac(from_z)
+        let mut normalized_curr_z = normalized_diff_z
+            * if diff_z > 0.0 {
+                1.0 - frac(from_z_adj)
             } else {
-                frac(from_z)
+                frac(from_z_adj)
             };
 
-        while t_x <= 1.0 || t_y <= 1.0 || t_z <= 1.0 {
-            if t_x < t_y {
-                if t_x < t_z {
-                    cur_x += sign_x;
-                    t_x += t_delta_x;
+        loop {
+            if self.clip_hits_block(
+                BlockPos::new(curr_x, curr_y, curr_z),
+                from,
+                to,
+                blocked_by_fluids,
+            ) {
+                return false;
+            }
+
+            if normalized_curr_x > 1.0 && normalized_curr_y > 1.0 && normalized_curr_z > 1.0 {
+                return true;
+            }
+
+            if normalized_curr_x < normalized_curr_y {
+                if normalized_curr_x < normalized_curr_z {
+                    curr_x = curr_x.wrapping_add(dx);
+                    normalized_curr_x += normalized_diff_x;
                 } else {
-                    cur_z += sign_z;
-                    t_z += t_delta_z;
+                    curr_z = curr_z.wrapping_add(dz);
+                    normalized_curr_z += normalized_diff_z;
                 }
-            } else if t_y < t_z {
-                cur_y += sign_y;
-                t_y += t_delta_y;
+            } else if normalized_curr_y < normalized_curr_z {
+                curr_y = curr_y.wrapping_add(dy);
+                normalized_curr_y += normalized_diff_y;
             } else {
-                cur_z += sign_z;
-                t_z += t_delta_z;
-            }
-
-            if !is_cell_clear(BlockPos::new(cur_x, cur_y, cur_z)) {
-                return false;
+                curr_z = curr_z.wrapping_add(dz);
+                normalized_curr_z += normalized_diff_z;
             }
         }
-        true
     }
 }
 
@@ -594,6 +627,21 @@ impl MobPathingState {
             delta_movement: Vec3::ZERO,
             has_mob_passenger: false,
             malus_overrides: [None; PathType::COUNT],
+        }
+    }
+
+    /// Mirrors `Entity.setYRot(float)`: a non-finite value is discarded.
+    pub fn set_y_rot(&mut self, y_rot: f32) {
+        if y_rot.is_finite() {
+            self.y_rot = y_rot;
+        }
+    }
+
+    /// Mirrors `Entity.setXRot(float)`: a non-finite value is discarded, otherwise
+    /// `xRot = Math.clamp(xRot % 360.0F, -90.0F, 90.0F)`.
+    pub fn set_x_rot(&mut self, x_rot: f32) {
+        if x_rot.is_finite() {
+            self.x_rot = (x_rot % 360.0).clamp(-90.0, 90.0);
         }
     }
 

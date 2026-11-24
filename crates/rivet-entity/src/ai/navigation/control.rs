@@ -210,7 +210,7 @@ impl MoveControl {
                 }
 
                 let y_rot_d = atan2_degrees(zd, xd) as f32 - 90.0;
-                mob.y_rot = rotlerp(mob.y_rot, y_rot_d, Self::MAX_TURN);
+                mob.set_y_rot(rotlerp(mob.y_rot, y_rot_d, Self::MAX_TURN));
                 mob.set_speed((self.speed_modifier * mob.movement_speed) as f32);
 
                 let pos = mob.block_position();
@@ -280,7 +280,7 @@ impl FlyingMoveControl {
             }
 
             let y_rot_d = atan2_degrees(zd, xd) as f32 - 90.0;
-            mob.y_rot = rotlerp(mob.y_rot, y_rot_d, 90.0);
+            mob.set_y_rot(rotlerp(mob.y_rot, y_rot_d, 90.0));
 
             let speed = if mob.on_ground {
                 (self.base.speed_modifier * mob.movement_speed) as f32
@@ -292,7 +292,7 @@ impl FlyingMoveControl {
             let sd = (xd * xd + zd * zd).sqrt();
             if yd.abs() > ROTATION_EPSILON || sd.abs() > ROTATION_EPSILON {
                 let x_rot_d = (-atan2_degrees(yd, sd)) as f32;
-                mob.x_rot = rotlerp(mob.x_rot, x_rot_d, self.max_turn as f32);
+                mob.set_x_rot(rotlerp(mob.x_rot, x_rot_d, self.max_turn as f32));
                 mob.yya = if yd > 0.0 { speed } else { -speed };
             }
         } else {
@@ -374,7 +374,7 @@ impl SmoothSwimmingMoveControl {
             }
 
             let y_rot_d = atan2_degrees(zd, xd) as f32 - 90.0;
-            mob.y_rot = rotlerp(mob.y_rot, y_rot_d, self.max_turn_y as f32);
+            mob.set_y_rot(rotlerp(mob.y_rot, y_rot_d, self.max_turn_y as f32));
             mob.y_body_rot = mob.y_rot;
             mob.y_head_rot = mob.y_rot;
 
@@ -389,7 +389,7 @@ impl SmoothSwimmingMoveControl {
                         -(self.max_turn_x as f32),
                         self.max_turn_x as f32,
                     );
-                    mob.x_rot = rotate_towards(mob.x_rot, x_rot_d, 5.0);
+                    mob.set_x_rot(rotate_towards(mob.x_rot, x_rot_d, 5.0));
                 }
                 let cos = mth::cos(f64::from(mob.x_rot * mth::DEG_TO_RAD));
                 let sin = mth::sin(f64::from(mob.x_rot * mth::DEG_TO_RAD));
@@ -495,7 +495,7 @@ impl LookControl {
         reset_x_rot_on_tick: bool,
     ) {
         if reset_x_rot_on_tick {
-            mob.x_rot = 0.0;
+            mob.set_x_rot(0.0);
         }
 
         if self.look_at_cooldown > 0 {
@@ -504,7 +504,7 @@ impl LookControl {
                 mob.y_head_rot = rotate_towards(mob.y_head_rot, y_rot_d, self.y_max_rot_speed);
             }
             if let Some(x_rot_d) = self.get_x_rot_d(mob) {
-                mob.x_rot = rotate_towards(mob.x_rot, x_rot_d, self.x_max_rot_angle);
+                mob.set_x_rot(rotate_towards(mob.x_rot, x_rot_d, self.x_max_rot_angle));
             }
         } else {
             mob.y_head_rot = rotate_towards(mob.y_head_rot, mob.y_body_rot, 10.0);
@@ -552,15 +552,15 @@ impl SmoothSwimmingLookControl {
                 );
             }
             if let Some(x_rot_d) = self.base.get_x_rot_d(mob) {
-                mob.x_rot = rotate_towards(
+                mob.set_x_rot(rotate_towards(
                     mob.x_rot,
                     x_rot_d + Self::HEAD_TILT_X,
                     self.base.x_max_rot_angle,
-                );
+                ));
             }
         } else {
             if navigation_is_done {
-                mob.x_rot = rotate_towards(mob.x_rot, 0.0, 5.0);
+                mob.set_x_rot(rotate_towards(mob.x_rot, 0.0, 5.0));
             }
             mob.y_head_rot =
                 rotate_towards(mob.y_head_rot, mob.y_body_rot, self.base.y_max_rot_speed);
