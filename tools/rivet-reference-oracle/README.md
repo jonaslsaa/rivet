@@ -33,12 +33,31 @@ The tool currently supports:
   unregistered id, a decode failure or a `DecoderException` is an input
   rejection. Paper's `GlobalConfiguration` is initialised with defaults first.
 
+- `feature.place` — `{feature, seed, region}`: place one configured feature of the
+  vanilla registry into a fixed synthetic region (a 3 x 3 window of proto chunks
+  behind a `WorldGenRegion`-like facade; the `region` profile names the base fill,
+  origin, biome and sea level) with `XoroshiroRandomSource(seed)`. Answers
+  `{placed, rng_next, scheduled, blocks[, threw]}`: the changed blocks (position and
+  global state id, sorted), the ticks scheduled, the placement random's next long.
+- `carver.carve` — `{carver, seed, index}`: carve a 3 x 3 chunk grid of stone with one
+  configured carver the way `applyCarvers` loops, and answer per chunk the start and
+  carve counts, the carving mask and the changed blocks as index runs.
+- `structure.start` — `{structure_set, seed, dimension}`: scan the chunk grid
+  [-48, 47]^2 of the dimension for the set's structure chunks (Paper's keyed,
+  spigot-salted placements) and answer the candidates and the start of each: the
+  pieces' type, bounding box, rotation, mirror and generation depth. No block is placed.
+  The three `corpusCheck`s make `--record` fail unless the corpus covers every
+  registry entry for every one of `WORLDGEN_SEEDS`; the region and grid contracts are
+  on the Java ops and in `docs/VERIFICATION.md` section 5 item 5.
+
 Registry loading logs to stdout, so the first `codec.reencode`/`packet.reencode`
 request silences log4j until the registries are ready (live mode speaks JSON
 Lines on that stream). `harvest_datapack.py` extracts `codec.reencode` seeds
-from the vanilla data pack in the Paper jar into `fixtures/ops/corpus-src/`.
+from the vanilla data pack in the Paper jar into `fixtures/ops/corpus-src/`; the same
+script writes `worldgen-registries.json`, the key list of the configured features,
+configured carvers and structure sets the worldgen sweep covers.
 
-All seven operations live in one op registry (`OPS` in
+All ten operations live in one op registry (`OPS` in
 `RivetReferenceOracle.java`). Each op declares its result-key order (the
 canonical-JSON contract: results are re-emitted in exactly that order, an
 undeclared key or a raw floating-point number is an `unavailable` fault — floats
@@ -68,8 +87,11 @@ tools/rivet-reference-oracle/run.sh --record tools/rivet-reference-oracle/fixtur
 ```
 
 `cargo run -p rivet-parity -- ops check` (offline, also a cargo test) compares
-the Rust handlers with the recordings; `ops live` streams the corpora through a
-live oracle and also requires Paper to still reproduce the recordings;
+the Rust handlers with the recordings (the worldgen sweeps take about 11 minutes in
+the debug profile; the cargo tests replay them in parallel); `ops live` streams the
+corpora through a live oracle and also requires Paper to still reproduce the
+recordings (the worldgen sweep ops compare Rust for the two seeds of
+`corpus-src/worldgen-live-seeds.json` only);
 `rivet-oracle regen --check --only rivet-reference-oracle` re-records into scratch twice and
 byte-diffs (see `tools/rivet-oracle/README.md`). Editing this Java file changes
 the op source SHA-256 the manifest pins, so the offline check fails until the

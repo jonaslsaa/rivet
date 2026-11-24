@@ -961,7 +961,7 @@ impl OverworldNoiseBiomeSource {
         &self.source
     }
     /// Clone the source table while retaining the world's registry holders.
-    pub(super) fn shared_source(&self) -> Arc<dyn BiomeSource> {
+    pub fn shared_source(&self) -> Arc<dyn BiomeSource> {
         Arc::new(self.source.clone())
     }
     /// Registry-less standalone sampler. Its Direct holders carry real IDs
@@ -2497,7 +2497,7 @@ impl FeatureConfiguration for DeferredGeneratedFeatureConfiguration {
 /// features are mutually recursive; they are adopted only after the temporary
 /// access is fully dropped, so a decode failure cannot publish a partially
 /// populated access into the world.
-pub(super) fn build_feature_access(worldgen: &RegistryAccess) -> RegistryAccess {
+pub fn build_feature_access(worldgen: &RegistryAccess) -> RegistryAccess {
     let (placed, configured) = build_generated_feature_closure(worldgen)
         .unwrap_or_else(|error| panic!("generated feature closure refused atomically: {error}"));
     let feature_layer = RegistryAccess::from_pairs(vec![

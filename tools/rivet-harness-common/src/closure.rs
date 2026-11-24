@@ -59,6 +59,11 @@ pub struct Closure {
     /// the inputs that ran, so `matched + mismatched == executed` and
     /// `executed + excluded == declared`), and are always reported.
     pub excluded: usize,
+    /// Inputs the Rust side has no implementation for (a port that does not
+    /// exist yet, with a reason): declared, never executed, never matched and
+    /// never a mismatch. They are reported by count and reason, so a row can
+    /// never read as covering them.
+    pub unavailable: usize,
 }
 
 impl Closure {
@@ -74,7 +79,7 @@ impl Closure {
         if self.executed == 0 {
             return Status::Unverified;
         }
-        if self.executed + self.excluded != self.declared {
+        if self.executed + self.excluded + self.unavailable != self.declared {
             return Status::Fail;
         }
         if !negative_detected {
@@ -94,6 +99,9 @@ impl fmt::Display for Closure {
         if self.excluded > 0 {
             write!(f, " excluded={}", self.excluded)?;
         }
+        if self.unavailable > 0 {
+            write!(f, " unavailable={}", self.unavailable)?;
+        }
         Ok(())
     }
 }
@@ -109,6 +117,7 @@ mod tests {
             matched,
             mismatched,
             excluded: 0,
+            unavailable: 0,
         }
     }
 
@@ -152,6 +161,7 @@ mod tests {
             matched: 3,
             mismatched: 0,
             excluded: 2,
+            unavailable: 0,
         };
         assert_eq!(excluded.status(true), Status::Pass);
         assert!(excluded.to_string().ends_with("excluded=2"));
@@ -186,5 +196,38 @@ mod tests {
         assert_eq!(Fail.exit_code(), 1);
         assert_eq!(Unverified.exit_code(), 3);
         assert_eq!(Pass.exit_code(), 0);
+    }
+
+    #[test]
+    fn unavailable_inputs_close_the_accounting_and_are_never_matched() {
+        let partial = Closure {
+            declared: 10,
+            executed: 6,
+            matched: 6,
+            mismatched: 0,
+            excluded: 1,
+            unavailable: 3,
+        };
+        assert_eq!(partial.status(true), Status::Pass);
+        assert!(partial.to_string().ends_with("excluded=1 unavailable=3"));
+        // An unavailable input is neither silently executed nor silently dropped.
+        assert_eq!(
+            Closure {
+                unavailable: 2,
+                ..partial
+            }
+            .status(true),
+            Status::Fail
+        );
+        // A row whose every input is unavailable executed nothing: UNVERIFIED.
+        assert_eq!(
+            Closure {
+                declared: 4,
+                unavailable: 4,
+                ..Closure::default()
+            }
+            .status(true),
+            Status::Unverified
+        );
     }
 }

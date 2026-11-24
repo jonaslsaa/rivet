@@ -41,6 +41,9 @@ pub fn handler(op: &str) -> Option<Handler> {
         "component.json" => Some(component_json),
         "packet.reencode" => Some(super::packet::packet_reencode),
         "codec.reencode" => Some(super::codec::codec_reencode),
+        "feature.place" => Some(super::worldgen::feature::feature_place),
+        "carver.carve" => Some(super::worldgen::carver::carver_carve),
+        "structure.start" => Some(super::worldgen::structure::structure_start),
         _ => None,
     }
 }

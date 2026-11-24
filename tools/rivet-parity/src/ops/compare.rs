@@ -26,6 +26,12 @@ pub enum Outcome {
     /// No verdict: an infrastructure fault (Java `unavailable`, malformed
     /// response, a missing request field). Never equal to anything.
     Unavailable(String),
+    /// The Rust side has no implementation of this input (the feature, carver
+    /// or structure is not ported, or Rivet has no data for it): the reason is
+    /// reported and the input is counted `unavailable`, apart from matched and
+    /// mismatched. Only a Rust handler produces it, only for the worldgen
+    /// sweep ops, and it is never equal to anything.
+    Unported(String),
 }
 
 impl Outcome {
@@ -36,6 +42,9 @@ impl Outcome {
             Outcome::Rejected => json!({"id": id, "ok": false, "kind": "input_rejected"}),
             Outcome::Unavailable(reason) => {
                 json!({"id": id, "ok": false, "kind": "unavailable", "reason": reason})
+            }
+            Outcome::Unported(reason) => {
+                json!({"id": id, "ok": false, "kind": "unported", "reason": reason})
             }
         };
         serde_json::to_string(&value).expect("JSON values always serialize")
@@ -388,6 +397,9 @@ pub enum InputVerdict {
     Matched,
     Mismatched,
     Excluded,
+    /// The Rust side has no implementation ([`Outcome::Unported`]): not
+    /// executed, not matched, not a mismatch.
+    Unavailable,
 }
 
 /// Counts and divergences of one op comparison.
@@ -405,6 +417,11 @@ pub struct Comparison {
     pub stale: Vec<String>,
     pub mismatched_ids: Vec<String>,
     pub first: Option<Divergence>,
+    /// Inputs the Rust side has no implementation for ([`Outcome::Unported`]),
+    /// not executed and not compared.
+    pub unavailable: usize,
+    /// How many unavailable inputs each reason accounts for.
+    pub unavailable_reasons: std::collections::BTreeMap<String, usize>,
 }
 
 /// Compare `expected` (Paper) with `actual` (Rivet) outcomes, input by input.
@@ -459,6 +476,22 @@ pub fn compare(
             comparison.per_input.push((id, InputVerdict::Excluded));
             continue;
         }
+        // The Rust side has no implementation of this input: counted apart
+        // from executed inputs, with its reason, never as a match. A Paper
+        // fault on the expected side is still a mismatch (the golden is
+        // broken, not the port absent).
+        if let (Some((_, Outcome::Unported(reason))), Some((_, expected_outcome))) =
+            (actual.get(index), expected.get(index))
+            && !matches!(expected_outcome, Outcome::Unavailable(_))
+        {
+            comparison.unavailable += 1;
+            *comparison
+                .unavailable_reasons
+                .entry(reason.clone())
+                .or_default() += 1;
+            comparison.per_input.push((id, InputVerdict::Unavailable));
+            continue;
+        }
         comparison.executed += 1;
         if verdicts && expected_line == actual_line {
             comparison.matched += 1;
@@ -511,8 +544,25 @@ pub fn tamper(outcome: &Outcome) -> Outcome {
             result.insert("tampered".into(), Value::Bool(true));
             Outcome::Accepted(result)
         }
-        Outcome::Unavailable(_) => Outcome::Rejected,
+        Outcome::Unavailable(_) | Outcome::Unported(_) => Outcome::Rejected,
     }
+}
+
+/// The first input a tamper negative can corrupt: one the comparator matched,
+/// that no exclusion covers, and that Rust actually executed (an unported
+/// input never reaches a comparison, so corrupting it detects nothing).
+pub fn tamper_index(
+    op: &str,
+    expected: &[(String, Outcome)],
+    actual: &[(String, Outcome)],
+    exclusions: &[Exclusion],
+    clean: &Comparison,
+) -> Option<usize> {
+    (0..expected.len().min(actual.len())).find(|&i| {
+        !clean.mismatched_ids.contains(&expected[i].0)
+            && !input_excluded(op, &expected[i].0, exclusions)
+            && !matches!(actual[i].1, Outcome::Unported(_))
+    })
 }
 
 /// The mandatory negative control for one comparator: tamper the expected
@@ -526,10 +576,7 @@ pub fn tamper_negative(
     exclusions: &[Exclusion],
 ) -> Option<rivet_harness_common::negative::Verdict> {
     let clean = compare(op, expected, actual, exclusions);
-    let index = (0..expected.len().min(actual.len())).find(|&i| {
-        !clean.mismatched_ids.contains(&expected[i].0)
-            && !input_excluded(op, &expected[i].0, exclusions)
-    })?;
+    let index = tamper_index(op, expected, actual, exclusions, &clean)?;
     let mut tampered = expected.to_vec();
     tampered[index].1 = tamper(&tampered[index].1);
     let result = compare(op, &tampered, actual, exclusions);
@@ -755,5 +802,34 @@ mod tests {
         assert!(verdict.passed());
         let all_bad = vec![("a".to_owned(), accepted(&[("x", json!(1))]))];
         assert!(tamper_negative("op", &paper[..1], &all_bad, &[]).is_none());
+    }
+
+    #[test]
+    fn unported_inputs_are_counted_apart_never_matched_or_mismatched() {
+        let paper = vec![
+            ("a".to_owned(), accepted(&[("v", json!(1))])),
+            ("b".to_owned(), accepted(&[("v", json!(2))])),
+            ("c".to_owned(), Outcome::Rejected),
+        ];
+        let rivet = vec![
+            ("a".to_owned(), accepted(&[("v", json!(1))])),
+            ("b".to_owned(), Outcome::Unported("not ported".into())),
+            ("c".to_owned(), Outcome::Unported("not ported".into())),
+        ];
+        let comparison = compare("op", &paper, &rivet, &[]);
+        assert_eq!(comparison.executed, 1);
+        assert_eq!(comparison.matched, 1);
+        assert_eq!(comparison.unavailable, 2);
+        assert!(comparison.mismatched_ids.is_empty());
+        assert_eq!(comparison.unavailable_reasons["not ported"], 2);
+        assert_eq!(comparison.per_input[1].1, InputVerdict::Unavailable);
+        // The tamper negative runs on an input the Rust side executed.
+        let verdict = tamper_negative("op", &paper, &rivet, &[]).expect("input a matched");
+        assert!(verdict.passed());
+        // A broken golden is never excused by an unported answer.
+        let broken = vec![("a".to_owned(), Outcome::Unavailable("crash".into()))];
+        let unported = vec![("a".to_owned(), Outcome::Unported("not ported".into()))];
+        let result = compare("op", &broken, &unported, &[]);
+        assert_eq!((result.unavailable, result.mismatched_ids.len()), (0, 1));
     }
 }

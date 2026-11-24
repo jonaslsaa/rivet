@@ -289,3 +289,17 @@ codec.reencode	input:IntProviders.POSITIVE_CODEC.poison08.json	JSON number narro
 codec.reencode	input:ProvidesTrimMaterial.CODEC.poison09.json	Registry id not validated: Rivet keeps an unregistered holder/registry id, Paper declines at decode	811
 codec.reencode	input:ProvidesTrimMaterial.CODEC.poison10.json	Registry id not validated: Rivet keeps an unregistered holder/registry id, Paper declines at decode	811
 codec.reencode	input:ProvidesTrimMaterial.CODEC.poison11.json	Registry id not validated: Rivet keeps an unregistered holder/registry id, Paper declines at decode	811
+feature.place	input:minecraft:forest_rock#0	BlockBlobFeature origin shifts parsed as -(1 + n) in Rivet, -1 + n in Paper	820
+feature.place	input:minecraft:forest_rock#1	BlockBlobFeature origin shifts parsed as -(1 + n) in Rivet, -1 + n in Paper	820
+feature.place	input:minecraft:forest_rock#42	BlockBlobFeature origin shifts parsed as -(1 + n) in Rivet, -1 + n in Paper	820
+feature.place	input:minecraft:forest_rock#1337	BlockBlobFeature origin shifts parsed as -(1 + n) in Rivet, -1 + n in Paper	820
+feature.place	input:minecraft:forest_rock#-1	BlockBlobFeature origin shifts parsed as -(1 + n) in Rivet, -1 + n in Paper	820
+feature.place	input:minecraft:forest_rock#8675309	BlockBlobFeature origin shifts parsed as -(1 + n) in Rivet, -1 + n in Paper	820
+feature.place	input:minecraft:forest_rock#4611686018427387905	BlockBlobFeature origin shifts parsed as -(1 + n) in Rivet, -1 + n in Paper	820
+feature.place	input:minecraft:forest_rock#-9223372036854775808	BlockBlobFeature origin shifts parsed as -(1 + n) in Rivet, -1 + n in Paper	820
+feature.place	input:minecraft:iceberg_blue#1	IcebergFeature draws the steep loop bound once in Rivet, on every iteration in Paper	821
+feature.place	input:minecraft:iceberg_blue#-1	IcebergFeature draws the steep loop bound once in Rivet, on every iteration in Paper	821
+feature.place	input:minecraft:iceberg_blue#4611686018427387905	IcebergFeature draws the steep loop bound once in Rivet, on every iteration in Paper	821
+feature.place	input:minecraft:iceberg_packed#1	IcebergFeature draws the steep loop bound once in Rivet, on every iteration in Paper	821
+feature.place	input:minecraft:iceberg_packed#-1	IcebergFeature draws the steep loop bound once in Rivet, on every iteration in Paper	821
+feature.place	input:minecraft:iceberg_packed#4611686018427387905	IcebergFeature draws the steep loop bound once in Rivet, on every iteration in Paper	821

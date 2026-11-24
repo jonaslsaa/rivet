@@ -4,8 +4,17 @@
   "paper": "26.2-DEV-main@0a99345",
   "paper_commit": "0a99345",
   "op_source": "tools/rivet-reference-oracle/src/RivetReferenceOracle.java",
-  "op_source_sha256": "d5a5f81c8a30726cc20fdfc073a285743902e83da81f0368ba5afc1fca60abdf",
+  "op_source_sha256": "4d26eaab67cf9b7fc8cf0ca82d213f858afc1c9515227be45fddf1ddba222cbc",
   "ops": [
+    {
+      "op": "carver.carve",
+      "corpus": "corpus/carver.carve.jsonl",
+      "corpus_sha256": "790091c0958e88d3c781906bad2822ad30d345652bd54c72dc43844abf0441ab",
+      "corpus_n": 32,
+      "output": "carver.carve.jsonl",
+      "output_sha256": "795f4f9efc792ab113a970b47006a570f2c1f41afe2682ffaf109f4495f4db79",
+      "output_n": 32
+    },
     {
       "op": "codec.reencode",
       "corpus": "corpus/codec.reencode.jsonl",
@@ -23,6 +32,15 @@
       "output": "component.json.jsonl",
       "output_sha256": "704687d0133e5bfe5d4f387e9e4c3b176054a873ccfb143b6a4ea28779e94740",
       "output_n": 62
+    },
+    {
+      "op": "feature.place",
+      "corpus": "corpus/feature.place.jsonl",
+      "corpus_sha256": "fd6283cbb7826b4b0c280c657a26f863b47407223870b582e5e908c01f7f1c63",
+      "corpus_n": 1808,
+      "output": "feature.place.jsonl",
+      "output_sha256": "08e4b56f5f64541848a136d867223de7e03cbb462d671b9a6e6d33a6fca2d8c1",
+      "output_n": 1808
     },
     {
       "op": "nbt.decode",
@@ -50,6 +68,15 @@
       "output": "snbt.parse.jsonl",
       "output_sha256": "263c55f8b330f1953d6b9e666bc8b9e620ed48abeb357cf28df80e40dc8958a8",
       "output_n": 170
+    },
+    {
+      "op": "structure.start",
+      "corpus": "corpus/structure.start.jsonl",
+      "corpus_sha256": "0b7429cc16f08da4e6794b811729b0cbf741a94551f69289ab6bd0ce2311a2ae",
+      "corpus_n": 160,
+      "output": "structure.start.jsonl",
+      "output_sha256": "34c77d821dd813cde339f45ae3ad09442ec12bf2d6efe757e9b3ad7e925aa542",
+      "output_n": 160
     }
   ]
 }
