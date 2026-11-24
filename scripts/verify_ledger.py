@@ -181,6 +181,28 @@ OP_SURFACES = {
     "component.json": (
         ["crates/rivet-text/src/**"],
         ["net.minecraft.network.chat.ComponentSerialization"]),
+    "packet.reencode": (
+        ["crates/rivet-protocol/src/**"],
+        ["net.minecraft.network.protocol.ProtocolInfo", "net.minecraft.network.protocol.game.GameProtocols",
+         "net.minecraft.network.protocol.configuration.ConfigurationProtocols",
+         "net.minecraft.network.protocol.login.LoginProtocols", "net.minecraft.network.protocol.status.StatusProtocols",
+         "net.minecraft.network.protocol.handshake.HandshakeProtocols"]),
+    "codec.reencode": (
+        ["crates/rivet-world/src/item/**", "crates/rivet-registry/src/block_state_codec.rs",
+         "crates/rivet-registry/src/core/*.rs", "crates/rivet-registry/src/identifier.rs",
+         "crates/rivet-util/src/valueproviders/**", "crates/rivet-util/src/random.rs",
+         "crates/rivet-text/src/text_color.rs", "crates/rivet-text/src/component_serialization.rs",
+         "crates/rivet-world/src/levelgen/heightproviders/**", "crates/rivet-world/src/levelgen/structure/templatesystem/**",
+         "crates/rivet-world/src/levelgen/feature/featuresize/**", "crates/rivet-world/src/levelgen/vertical_anchor.rs",
+         "crates/rivet-world/src/levelgen/heightmap.rs", "crates/rivet-world/src/levelgen/synth/normal_noise.rs",
+         "crates/rivet-world/src/levelgen/presets/world_preset.rs", "crates/rivet-world/src/levelgen/settings/geode_*.rs",
+         "crates/rivet-world/src/levelgen/carver/carver_debug_settings.rs", "crates/rivet-world/src/effect/instance.rs",
+         "crates/rivet-world/src/level/world_data_configuration.rs", "crates/rivet-world/src/level/data_pack_config.rs",
+         "crates/rivet-world/src/flag/feature_flags.rs"],
+        ["net.minecraft.world.item.ItemStack", "net.minecraft.core.component.DataComponentPatch",
+         "net.minecraft.world.item.component.Consumable", "net.minecraft.util.valueproviders.IntProviders",
+         "net.minecraft.world.level.levelgen.structure.templatesystem.RuleTest",
+         "net.minecraft.world.level.levelgen.synth.NormalNoise", "net.minecraft.network.chat.ComponentSerialization"]),
 }
 
 
