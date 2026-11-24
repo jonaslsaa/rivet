@@ -450,7 +450,21 @@ fn run() -> Result<(), (u8, String)> {
             let traces = if command == "check" {
                 committed_traces(&names).map_err(fail)?
             } else {
-                twin(&names)?
+                let fresh = twin(&names)?;
+                // Record mode re-run must reproduce the committed recordings
+                // byte for byte (VERIFICATION 2.1): drift is a harness failure.
+                for name in &names {
+                    let committed = paper_dir().join(format!("{name}.trace.jsonl"));
+                    if committed.exists() && read(&committed).map_err(fail)? != fresh[name] {
+                        return Err((
+                            1,
+                            format!(
+                                "{name}: fresh Paper trace differs from the committed recording; re-record"
+                            ),
+                        ));
+                    }
+                }
+                fresh
             };
             let outcomes = differential(&names, &traces).map_err(fail)?;
             report(&outcomes);
