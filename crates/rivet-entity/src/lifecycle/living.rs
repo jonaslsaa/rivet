@@ -460,6 +460,8 @@ impl LivingEntity {
 
         // getLastHurtByMob() resolves the EntityReference: a removed (or unloaded) attacker
         // resolves to null, so neither branch runs and the reference and timestamp are kept.
+        // RivetTodo(#779) EntityReference UUID re-resolution: a removed attacker that is
+        // re-findable by UUID (reloaded chunk) should resolve again; the ID model cannot.
         let hurt_by_alive = self.last_hurt_by_mob.and_then(|hurt_by| {
             if hurt_by == self.entity.id {
                 (!self.entity.is_removed()).then(|| self.is_alive())

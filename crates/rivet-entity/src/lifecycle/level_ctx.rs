@@ -764,6 +764,7 @@ impl LevelCtx {
     ///
     /// A living passenger that left a still-`valid` vehicle then runs the
     /// `LivingEntity#stopRiding(boolean)` override's `dismountVehicle(oldVehicle)`.
+    // RivetTodo(#779) LivingEntity#stopRiding/dismountVehicle repositioning (dismountTo, getDismountLocationForPassenger, findFreePosition, snapTo) not fully ported: block-aware DismountHelper floor search and Level#findFreePosition collision checks need the block-less LevelCtx to gain a world view
     pub fn stop_riding(&mut self, passenger_id: i32, suppress_cancellation: bool) -> bool {
         let (vehicle_id, removal_reason) = {
             let Some(p) = self.get(passenger_id) else {
@@ -1173,6 +1174,7 @@ impl LevelCtx {
         } else {
             passenger.set_pos(new_pos.x, new_pos.y, new_pos.z);
         }
+        // RivetTodo(#779) AbstractBoat#positionRider rotation (deltaRotation, clampRotation) partially ported: deltaRotation is pinned to 0.0 until boat movement lands
         if vehicle.entity_type.is_boat && !passenger.entity_type.can_turn_in_boats {
             // RivetTodo(#422) AbstractBoat.deltaRotation is driven by the boat movement
             // (AbstractBoat#controlBoat / floatBoat), which is not ported; it stays 0.0F.
