@@ -6,7 +6,8 @@
 //! cannot drift apart. The current consumers are `rivet-capture` and
 //! `rivet-client`'s `run-scenario` binary, which previously duplicated the
 //! boot loop, kill-on-drop, port reservation, and JSONL line policy across
-//! their `server.rs`/`main.rs` modules. `rivet-oracle` is a future consumer:
+//! their `server.rs`/`main.rs` modules; `rivet-parity` drives the Paper
+//! reference oracle through [`oracle_client`]. `rivet-oracle` is a future consumer:
 //! it has not been migrated yet, but the surface is std-only, so adopting it
 //! adds no external (non-std) packages to the consumer's dependency tree — the
 //! only new lockfile entry is the crate itself (serde_json is a dev-dependency,
