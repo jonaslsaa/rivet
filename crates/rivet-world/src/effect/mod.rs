@@ -29,6 +29,7 @@ mod tests;
 
 pub use instance::{
     BlendState, INFINITE_DURATION, MAX_AMPLIFIER, MIN_AMPLIFIER, MobEffectInstance,
+    mob_effect_instance_codec,
 };
 pub use mob_effect::{MobEffectDef, MobEffectId, MobEffects};
 pub use potion::{BASE_POTION_COLOR, PotionBrewing, PotionContents, PotionDef, PotionId, Potions};
