@@ -19,8 +19,10 @@ No garbage collector to lean on, so: **index/arena storage, IDs over references*
 Single-threaded synchronous game tick owning all world state (matches vanilla's model and Bukkit's main-thread confinement — required for the plugin adapter). `tokio` for network IO at the edges, `rayon` for chunk generation/lighting worker pools; both communicate with the tick thread via channels, never locks on hot game state. Folia-style region threading is explicitly out of scope until after M4.
 
 ## D6 — Plugin story
-1. **JVM adapter first**: `paper-api` jar unchanged; the implementation layer regenerated as Java shims calling a `rivet-ffi` C ABI (Java FFM/Panama on the Java side — not JNI C glue). Plugin code runs on a dedicated tick-synchronized thread. API-clean plugins only; NMS reflection is out of scope.
+1. **JVM adapter first**: `paper-api` jar unchanged; the implementation layer regenerated as Java shims calling a `rivet-ffi` C ABI (Java FFM/Panama on the Java side — not JNI C glue). Plugin code runs on the tick thread itself, as Bukkit plugins run on Paper's server main thread (D20). API-clean plugins only; NMS reflection is out of scope.
 2. Native Rust plugin API second, WASM ABI later. Neither before M4.
+
+*Item 1 amended 2026-11-24 by D20; previously "Plugin code runs on a dedicated tick-synchronized thread."*
 
 ## D7 — Pumpkin usage policy
 `working/Pumpkin` is for **learning and unblocking only**: study its design decisions, consult it when stuck on a parity problem. **Never copy code from it while porting** — our source of truth is Paper's Java. (Rationale: fidelity to Paper is the differentiator; mixing in a second reimplementation's interpretations breaks the "faithful port" verification story.)
@@ -45,7 +47,8 @@ Recorded numbers (release build, Temurin 25.0.2 arm64; representative measured r
 - the worst-case single 100k-event storm (~10-12.1 ms) does NOT fit the 5 ms budget — recorded honestly; the go/no-go is driven by realistic per-tick volume, not the synthetic storm.
 - exception containment is proven: the Java upcall target catches every plugin `Throwable` and returns an explicit ABI-safe status; Rust surfaces it as an error result (`ERR_CALLBACK`), so a foreign exception can never unwind through Rust.
 
-Decisions locked: `rivet-ffi` C ABI with marshal-only u64 IDs (never pointers across the boundary); batched event publishing for bulk state, per-plugin handler dispatch on the callback path; plugin code on a dedicated tick-synchronized thread (D5).
+Decisions locked: `rivet-ffi` C ABI with marshal-only u64 IDs (never pointers across the boundary); batched event publishing for bulk state, per-plugin handler dispatch on the callback path; plugin code on the tick thread, called through FFM upcalls (D5, D20).
+*Amended 2026-11-24 by D20; previously "plugin code on a dedicated tick-synchronized thread (D5)". The measurements above are unchanged: the Rust→Java→Rust round trip is exactly D20's call path.*
 
 ## D12 — CompoundTag is insertion-ordered (NBT key order for byte-identical chunk NBT)
 Locked 2026-08-07 for issue #226 (M2 gate preflight). Java's `CompoundTag` wraps an `Object2ObjectOpenHashMap<String, Tag>` (fastutil) that iterates in fastutil hash order; reproducing that byte-for-byte in Rust would require a Java-identical hasher. Rivet instead stores tags in an insertion-ordered `indexmap::IndexMap`:
@@ -141,3 +144,11 @@ Locked 2026-11-23 (docs/VERIFICATION.md §3–§4; ROADMAP §0.1–§0.2).
 
 - **Hard stops** (no new translate-wave anywhere): T2 or T3 red on `main`; any scoreboard row regressed; `regen --check` drift; the oracle unbootable for more than one batch. **Subsystem stops:** debt over threshold, or the subsystem's milestone-terminal row still `INACTIVE`/`UNVERIFIED` while units downstream of it are being ported (VERIFICATION §3.5).
 - **Spine exception** (ROADMAP §0.2). The P1 spine proceeds despite the debt thresholds, because no gameplay verification can run without it. Every spine cluster PR ships with, or after, a Java-sourced row for its surface, and P2 leaf fan-out in a family is gated by that family's `debt_ratio`.
+
+## D20 — Plugin code runs on the tick thread (amends D6 and D11)
+Locked 2026-11-24 by the controller. Bukkit plugins run on Paper's server main thread, and Rivet's tick thread is that thread (D5), so plugin code runs on it.
+- **One thread, nested calls.** The JVM is created in-process (D11). Rust calls Java listener, scheduler (`mainThreadHeartbeat`), command and plugin lifecycle code through FFM upcalls made from the tick thread itself, and the Java shims' downcalls into `rivet-ffi` run on that same thread, nested inside the upcall, against the `ctx` the upcalling frame lends (OWNERSHIP.md §JVM adapter boundary). D11's measured Rust→Java→Rust round trip (~215-250 ns) is this path. There is no plugin thread, no rendezvous and no handoff of a `ctx` between threads.
+- **`rivet-ffi` is confined to the tick thread.** The runtime belongs to the thread that called `rivet_ffi_v1_init`, the tick thread; a call from any other thread returns `WrongThread` (#772). Where `rivet-ffi`'s doc comments say "dedicated tick-synchronized thread", that thread is the tick thread.
+- **Other JVM threads never touch game state.** Bukkit async tasks (`runTaskAsynchronously`, `runTaskTimerAsynchronously`), threads a plugin starts and asynchronous events (`Event.isAsynchronous()`) run on JVM threads other than the tick thread. Their API calls are rejected or marshalled onto the tick thread exactly as Paper does off its main thread: rejected where Paper rejects (`AsyncCatcher.catchOp` throws `IllegalStateException("Asynchronous <reason>!")`; `PaperEventManager.callEvent` throws for a synchronous event fired off the main thread while the server is not stopping), marshalled where Paper marshals (`MCUtil.ensureMain` queues on `MinecraftServer.processQueue`, and its `Supplier` form blocks the caller until the tick thread has run it; `BukkitScheduler.runTask` runs at the next `mainThreadHeartbeat`). A call that Paper leaves unguarded off the main thread is a data race in Paper, not behaviour; the shim rejects it as `catchOp` does, and a corpus plugin that depends on one is a parity mismatch under D19.
+- **Consequence.** All game code runs on the one tick thread. Per-server mutable state of the behaviour singletons needs no atomics, no `Arc` and no thread handoff (OWNERSHIP.md §Mutable singleton state).
+- This supersedes `WORKFLOWS.md`'s "dedicated main thread that is tick-synchronized with the Rust tick loop".
