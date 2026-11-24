@@ -145,6 +145,7 @@ mod json;
 mod light_stage;
 mod loaded_world;
 mod mutate;
+mod regen;
 mod semantic_hash;
 mod surface_column;
 
@@ -4087,6 +4088,15 @@ fn print_usage() {
     println!(
         "                                              needing the materialized Paper runtime)"
     );
+    println!(
+        "  cargo run -p rivet-oracle -- regen --check [--only <glob>] [--changed <git-range>] [--jobs N]"
+    );
+    println!(
+        "                                             run every probes.tsv producer twice into work/regen/"
+    );
+    println!(
+        "                                             and byte-diff against the committed goldens (T3)"
+    );
     println!();
     println!(
         "Every gate mode enforces the manifest's pinned Paper commit (fixtures/**/manifest.json"
@@ -4293,6 +4303,9 @@ fn run() -> Result<(), Error> {
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("regen") {
+        std::process::exit(regen::run_cli(&args[1..]));
+    }
     if let Some(exit) = hash_cli_exit(&args) {
         std::process::exit(exit);
     }

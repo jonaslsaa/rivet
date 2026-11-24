@@ -50,15 +50,36 @@ fn java_math_max(a: f64, b: f64) -> f64 {
     if a >= b { a } else { b }
 }
 
+/// Exact `java.lang.Math.min(double, double)`: NaN-propagating, and `-0.0`
+/// wins over `+0.0`.
+fn java_math_min(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        return f64::NAN;
+    }
+    if a == 0.0 && b == 0.0 {
+        return if a.is_sign_negative() || b.is_sign_negative() {
+            -0.0
+        } else {
+            0.0
+        };
+    }
+    if a <= b { a } else { b }
+}
+
 /// `new AABB(pos).distanceToSqr(point)` (`AABB(BlockPos)` spans
 /// `pos .. pos + 1`; `Mth.lengthSquared(dx, dy, dz)`).
 pub fn block_aabb_distance_to_sqr(pos: BlockPos, point: Vec3) -> f64 {
-    let min_x = pos.get_x() as f64;
-    let min_y = pos.get_y() as f64;
-    let min_z = pos.get_z() as f64;
-    let max_x = pos.get_x().wrapping_add(1) as f64;
-    let max_y = pos.get_y().wrapping_add(1) as f64;
-    let max_z = pos.get_z().wrapping_add(1) as f64;
+    // The `AABB(double x1.., x2..)` constructor normalises with `Math.min` /
+    // `Math.max`; the int `+ 1` wraps, so at `i32::MAX` the corners swap.
+    let (x1, y1, z1) = (pos.get_x() as f64, pos.get_y() as f64, pos.get_z() as f64);
+    let (x2, y2, z2) = (
+        pos.get_x().wrapping_add(1) as f64,
+        pos.get_y().wrapping_add(1) as f64,
+        pos.get_z().wrapping_add(1) as f64,
+    );
+    let (min_x, max_x) = (java_math_min(x1, x2), java_math_max(x1, x2));
+    let (min_y, max_y) = (java_math_min(y1, y2), java_math_max(y1, y2));
+    let (min_z, max_z) = (java_math_min(z1, z2), java_math_max(z1, z2));
     let dx = java_math_max(java_math_max(min_x - point.x, point.x - max_x), 0.0);
     let dy = java_math_max(java_math_max(min_y - point.y, point.y - max_y), 0.0);
     let dz = java_math_max(java_math_max(min_z - point.z, point.z - max_z), 0.0);
@@ -738,6 +759,23 @@ mod tests {
         assert_eq!(
             block_aabb_distance_to_sqr(pos, Vec3::new(4.0, 2.5, 3.5)),
             4.0
+        );
+    }
+
+    #[test]
+    fn block_aabb_normalises_wrapped_corners_like_java() {
+        // `new AABB(BlockPos(MAX, MAX, MAX))` builds x1 = 2147483647 and
+        // x2 = (int) (MAX + 1) = -2147483648; the constructor's Math.min/max
+        // makes the box [-2147483648, 2147483647], so the origin is inside.
+        let pos = BlockPos::new(i32::MAX, i32::MAX, i32::MAX);
+        assert_eq!(
+            block_aabb_distance_to_sqr(pos, Vec3::new(0.0, 0.0, 0.0)),
+            0.0
+        );
+        // 3 below the normalised min on x only: dx = 3, others inside.
+        assert_eq!(
+            block_aabb_distance_to_sqr(pos, Vec3::new(-2147483651.0, 0.0, 0.0)),
+            9.0
         );
     }
 

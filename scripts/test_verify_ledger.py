@@ -190,16 +190,43 @@ class RealTreeTest(unittest.TestCase):
 
     def test_flowing_fluid_probe_row(self):
         """run_flowing_fluid_probe.sh writes flowing-fluid.jsonl plus the two fluid
-        TSVs; crates/rivet-world/src/fluid/paper_fixture.rs reads all three via
-        include_str! and is a #[cfg(test)] module of fluid/mod.rs, so the row
-        credits the production files it imports, not the fixture module itself.
+        TSVs and (its first argument, FlowingFluidProbe.java args[0])
+        crates/rivet-world/src/fluid/block_behaviors.tsv, per probes.tsv and
+        `rivet-oracle regen --check`; crates/rivet-world/src/fluid/paper_fixture.rs
+        reads the three oracle fixtures via include_str! and is a #[cfg(test)]
+        module of fluid/mod.rs, so the row credits the production files it
+        imports, not the fixture module itself; fluid/containers.rs
+        include_str!s block_behaviors.tsv in production code.
         FlowingFluidProbe.java imports net.minecraft.world.level.material.* and
         names `FlowingFluid`, so the wildcard resolves it."""
         r = self.rows["probe.flowing-fluid"]
-        self.assertEqual(r["consumers"], ["crates/rivet-world/src/fluid/paper_fixture.rs"])
+        self.assertEqual(r["consumers"], ["crates/rivet-world/src/fluid/containers.rs",
+                                          "crates/rivet-world/src/fluid/paper_fixture.rs"])
+        self.assertIn("crates/rivet-world/src/fluid/block_behaviors.tsv", r["fixtures"])
         self.assertNotIn("crates/rivet-world/src/fluid/paper_fixture.rs", r["rust_globs"])
         self.assertTrue(r["rust_globs"])
         self.assertIn("net.minecraft.world.level.material.FlowingFluid", r["java_classes"])
+
+    def test_probe_ownership_comes_from_probes_tsv(self):
+        """Every probe.* row claims exactly what tools/rivet-oracle/probes.tsv
+        lists for its script (directories of the oracle fixtures as one entry),
+        and every recorded oracle op gets a recorded and a live row with a
+        negative."""
+        owned = vl.probe_outputs(vl.probe_table())
+        update = owned["run_update_shape_probe.sh"]
+        self.assertEqual(update, ["block-update-shape-owners.tsv", "voxel-edge-faces.tsv"])
+        self.assertEqual(owned["run_worldgen_sampler.sh"], ["worldgen"])
+        self.assertEqual(owned["run_directory_lock_probe.sh"], [])
+        self.assertNotIn("run.sh", owned)
+        for op in ("snbt.parse", "nbt.decode", "component.json"):
+            for kind in ("recorded", "live"):
+                r = self.rows[f"op.{op}.{kind}"]
+                self.assertEqual(r["negative"], "y")
+                self.assertEqual(r["seed_status"], "UNVERIFIED")
+        self.assertEqual(self.rows["op.snbt.parse.recorded"]["corpus_n"], "170")
+        self.assertEqual(self.rows["regen.probes"]["tier"], "T3")
+        self.assertEqual(self.rows["regen.probes"]["layer"], "L1")
+        self.assertEqual(self.rows["regen.probes"]["negative"], "y")
 
     def test_inactive_and_boot_rows_are_never_pass(self):
         self.assertEqual(self.rows["hash.diff"]["seed_status"], "INACTIVE")

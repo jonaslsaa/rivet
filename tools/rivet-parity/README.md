@@ -165,3 +165,34 @@ is written in place at the workspace root (the crate resolves it relative to
 `CARGO_MANIFEST_DIR`), so it works from any worktree. A run with
 `--limit-fixtures=N` appends a `_Snapshot:_` note recording the cap, so a
 capped snapshot is not mistaken for full-corpus coverage.
+
+## Oracle ops (`rivet-parity ops`)
+
+The generic oracle-op framework (docs/VERIFICATION.md §2.1, §2.4). The Java
+side is `RivetReferenceOracle`'s op registry; the Rust twins are
+`src/ops/handlers.rs`; the committed recordings live in
+`tools/rivet-reference-oracle/fixtures/ops/` (`corpus/<op>.jsonl`,
+`<op>.jsonl`, `manifest.json`, `exclusions.tsv`). Recorded today:
+`snbt.parse` (170 inputs), `nbt.decode` (40) and `component.json` (62), with
+corpora derived from this tool's own corpus (`ops emit-corpus`; a test pins
+the committed files to it). `nbt.encode` is not recorded: its binary field
+order is the D12 `compound_key_order` divergence, which stays on the semantic
+comparator above.
+
+| command | JVM | what it proves |
+| --- | --- | --- |
+| `ops check` | none | manifest closure (SHA-256 of corpus, output and op source; counts; ids aligned; no unrecorded corpus), then every Rust handler vs Paper's recorded answers, plus each comparator's tamper negative. Also the cargo test `recorded_ops_match_rust_handlers_offline`. |
+| `ops live` | one boot | every corpus streamed through live Paper (pipelined): Paper vs Rivet, and live Paper vs the recording (a stale golden is a FAIL). The negative re-asks Paper once with `oracle_client`'s tamper hook armed and requires the comparator to name the tampered input. |
+| `ops check\|live --break-handler <op>` | — | swaps in a deliberately broken Rust handler; exits 0 only when that op FAILs with a first divergence naming it. The cargo test `deliberately_broken_rust_handler_is_detected_and_named` runs it for every op. |
+| `ops emit-corpus <dir>` | none | regenerate the corpora. |
+
+The comparator: both sides become canonical lines
+`{"id","ok":true,"result":{...}}` / `{"id","ok":false,"kind":"input_rejected"}`
+(result keys in the op's declared order, floats as bit hex, Java exception
+text and human decimals never compared) and must be byte-equal. A Rust panic or
+a Paper answer without a verdict is a mismatch. The first divergence names the
+op, the input id and the differing fields. Exclusions come only from the
+committed `exclusions.tsv` (`op`, `field` under `result.`, `reason`, `issue`);
+it is empty. Each op row asserts closure (declared == executed, zero executed
+is UNVERIFIED) and needs its detected tamper negative to PASS. Exit codes are
+the usual 0 PASS / 1 FAIL / 3 UNVERIFIED.

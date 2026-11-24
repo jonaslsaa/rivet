@@ -1,0 +1,170 @@
+{"id":"parse.byte-min","ok":true,"result":{"tag_id":1,"tag_type":"BYTE","snbt":"-128b","pretty_snbt":"-128b"}}
+{"id":"parse.byte-max","ok":true,"result":{"tag_id":1,"tag_type":"BYTE","snbt":"127b","pretty_snbt":"127b"}}
+{"id":"parse.byte-upper-B","ok":true,"result":{"tag_id":1,"tag_type":"BYTE","snbt":"5b","pretty_snbt":"5b"}}
+{"id":"parse.short-min","ok":true,"result":{"tag_id":2,"tag_type":"SHORT","snbt":"-32768s","pretty_snbt":"-32768s"}}
+{"id":"parse.short-max","ok":true,"result":{"tag_id":2,"tag_type":"SHORT","snbt":"32767s","pretty_snbt":"32767s"}}
+{"id":"parse.short-upper-S","ok":true,"result":{"tag_id":2,"tag_type":"SHORT","snbt":"5s","pretty_snbt":"5s"}}
+{"id":"parse.int-min","ok":true,"result":{"tag_id":3,"tag_type":"INT","snbt":"-2147483648","pretty_snbt":"-2147483648"}}
+{"id":"parse.int-max","ok":true,"result":{"tag_id":3,"tag_type":"INT","snbt":"2147483647","pretty_snbt":"2147483647"}}
+{"id":"parse.int-upper-I","ok":true,"result":{"tag_id":3,"tag_type":"INT","snbt":"5","pretty_snbt":"5"}}
+{"id":"parse.long-min","ok":true,"result":{"tag_id":4,"tag_type":"LONG","snbt":"-9223372036854775808L","pretty_snbt":"-9223372036854775808L"}}
+{"id":"parse.long-max","ok":true,"result":{"tag_id":4,"tag_type":"LONG","snbt":"9223372036854775807L","pretty_snbt":"9223372036854775807L"}}
+{"id":"parse.long-upper-L","ok":true,"result":{"tag_id":4,"tag_type":"LONG","snbt":"5L","pretty_snbt":"5L"}}
+{"id":"parse.unsigned-byte","ok":true,"result":{"tag_id":1,"tag_type":"BYTE","snbt":"1b","pretty_snbt":"1b"}}
+{"id":"parse.unsigned-short","ok":true,"result":{"tag_id":2,"tag_type":"SHORT","snbt":"1s","pretty_snbt":"1s"}}
+{"id":"parse.unsigned-int","ok":true,"result":{"tag_id":3,"tag_type":"INT","snbt":"1","pretty_snbt":"1"}}
+{"id":"parse.unsigned-long","ok":true,"result":{"tag_id":4,"tag_type":"LONG","snbt":"1L","pretty_snbt":"1L"}}
+{"id":"parse.signed-byte","ok":true,"result":{"tag_id":1,"tag_type":"BYTE","snbt":"1b","pretty_snbt":"1b"}}
+{"id":"parse.signed-short","ok":true,"result":{"tag_id":2,"tag_type":"SHORT","snbt":"1s","pretty_snbt":"1s"}}
+{"id":"parse.signed-int","ok":true,"result":{"tag_id":3,"tag_type":"INT","snbt":"1","pretty_snbt":"1"}}
+{"id":"parse.signed-long","ok":true,"result":{"tag_id":4,"tag_type":"LONG","snbt":"1L","pretty_snbt":"1L"}}
+{"id":"parse.unsigned-byte-upper","ok":true,"result":{"tag_id":1,"tag_type":"BYTE","snbt":"1b","pretty_snbt":"1b"}}
+{"id":"parse.hex","ok":true,"result":{"tag_id":3,"tag_type":"INT","snbt":"16","pretty_snbt":"16"}}
+{"id":"parse.hex-upper-X","ok":true,"result":{"tag_id":3,"tag_type":"INT","snbt":"31","pretty_snbt":"31"}}
+{"id":"parse.hex-unsigned-int-max","ok":true,"result":{"tag_id":3,"tag_type":"INT","snbt":"-1","pretty_snbt":"-1"}}
+{"id":"parse.hex-unsigned-long-max","ok":true,"result":{"tag_id":4,"tag_type":"LONG","snbt":"-1L","pretty_snbt":"-1L"}}
+{"id":"parse.hex-b-is-digit","ok":true,"result":{"tag_id":3,"tag_type":"INT","snbt":"4091","pretty_snbt":"4091"}}
+{"id":"parse.binary","ok":true,"result":{"tag_id":3,"tag_type":"INT","snbt":"5","pretty_snbt":"5"}}
+{"id":"parse.binary-upper-B","ok":true,"result":{"tag_id":3,"tag_type":"INT","snbt":"5","pretty_snbt":"5"}}
+{"id":"parse.binary-long","ok":true,"result":{"tag_id":4,"tag_type":"LONG","snbt":"4294967295L","pretty_snbt":"4294967295L"}}
+{"id":"parse.underscore-thousands","ok":true,"result":{"tag_id":3,"tag_type":"INT","snbt":"1000","pretty_snbt":"1000"}}
+{"id":"parse.underscore-hex","ok":true,"result":{"tag_id":3,"tag_type":"INT","snbt":"16","pretty_snbt":"16"}}
+{"id":"parse.underscore-binary","ok":true,"result":{"tag_id":3,"tag_type":"INT","snbt":"5","pretty_snbt":"5"}}
+{"id":"parse.float-underscores","ok":true,"result":{"tag_id":6,"tag_type":"DOUBLE","snbt":"10.5d","pretty_snbt":"10.5d"}}
+{"id":"parse.zero","ok":true,"result":{"tag_id":3,"tag_type":"INT","snbt":"0","pretty_snbt":"0"}}
+{"id":"parse.zero-long","ok":true,"result":{"tag_id":4,"tag_type":"LONG","snbt":"0L","pretty_snbt":"0L"}}
+{"id":"parse.float-one","ok":true,"result":{"tag_id":5,"tag_type":"FLOAT","snbt":"1.0f","pretty_snbt":"1.0f"}}
+{"id":"parse.float-zero","ok":true,"result":{"tag_id":5,"tag_type":"FLOAT","snbt":"0.0f","pretty_snbt":"0.0f"}}
+{"id":"parse.float-neg-zero","ok":true,"result":{"tag_id":5,"tag_type":"FLOAT","snbt":"0.0f","pretty_snbt":"0.0f"}}
+{"id":"parse.float-half","ok":true,"result":{"tag_id":5,"tag_type":"FLOAT","snbt":"0.5f","pretty_snbt":"0.5f"}}
+{"id":"parse.float-neg","ok":true,"result":{"tag_id":5,"tag_type":"FLOAT","snbt":"-1.5f","pretty_snbt":"-1.5f"}}
+{"id":"parse.float-max","ok":true,"result":{"tag_id":5,"tag_type":"FLOAT","snbt":"3.4028235E38f","pretty_snbt":"3.4028235E38f"}}
+{"id":"parse.float-min-normal","ok":true,"result":{"tag_id":5,"tag_type":"FLOAT","snbt":"1.1754944E-38f","pretty_snbt":"1.1754944E-38f"}}
+{"id":"parse.float-min-subnormal","ok":true,"result":{"tag_id":5,"tag_type":"FLOAT","snbt":"1.4E-45f","pretty_snbt":"1.4E-45f"}}
+{"id":"parse.float-sci-upper","ok":true,"result":{"tag_id":5,"tag_type":"FLOAT","snbt":"1.0E7f","pretty_snbt":"1.0E7f"}}
+{"id":"parse.float-sci-lower","ok":true,"result":{"tag_id":5,"tag_type":"FLOAT","snbt":"1.0E-4f","pretty_snbt":"1.0E-4f"}}
+{"id":"parse.float-pi-ish","ok":true,"result":{"tag_id":5,"tag_type":"FLOAT","snbt":"3.1415927f","pretty_snbt":"3.1415927f"}}
+{"id":"parse.double-one","ok":true,"result":{"tag_id":6,"tag_type":"DOUBLE","snbt":"1.0d","pretty_snbt":"1.0d"}}
+{"id":"parse.double-neg-zero","ok":true,"result":{"tag_id":6,"tag_type":"DOUBLE","snbt":"0.0d","pretty_snbt":"0.0d"}}
+{"id":"parse.double-max","ok":true,"result":{"tag_id":6,"tag_type":"DOUBLE","snbt":"1.7976931348623157E308d","pretty_snbt":"1.7976931348623157E308d"}}
+{"id":"parse.double-min-normal","ok":true,"result":{"tag_id":6,"tag_type":"DOUBLE","snbt":"2.2250738585072014E-308d","pretty_snbt":"2.2250738585072014E-308d"}}
+{"id":"parse.double-min-subnormal","ok":true,"result":{"tag_id":6,"tag_type":"DOUBLE","snbt":"4.9E-324d","pretty_snbt":"4.9E-324d"}}
+{"id":"parse.double-sci","ok":true,"result":{"tag_id":6,"tag_type":"DOUBLE","snbt":"1.0E7d","pretty_snbt":"1.0E7d"}}
+{"id":"parse.double-pi-ish","ok":true,"result":{"tag_id":6,"tag_type":"DOUBLE","snbt":"3.141592653589793d","pretty_snbt":"3.141592653589793d"}}
+{"id":"parse.plain-double","ok":true,"result":{"tag_id":6,"tag_type":"DOUBLE","snbt":"2.25d","pretty_snbt":"2.25d"}}
+{"id":"parse.dot-five","ok":true,"result":{"tag_id":6,"tag_type":"DOUBLE","snbt":"0.5d","pretty_snbt":"0.5d"}}
+{"id":"parse.trailing-dot","ok":true,"result":{"tag_id":6,"tag_type":"DOUBLE","snbt":"1.0d","pretty_snbt":"1.0d"}}
+{"id":"parse.exp","ok":true,"result":{"tag_id":6,"tag_type":"DOUBLE","snbt":"1000.0d","pretty_snbt":"1000.0d"}}
+{"id":"parse.exp-neg","ok":true,"result":{"tag_id":6,"tag_type":"DOUBLE","snbt":"0.001d","pretty_snbt":"0.001d"}}
+{"id":"parse.exp-plus-f","ok":true,"result":{"tag_id":5,"tag_type":"FLOAT","snbt":"1000.0f","pretty_snbt":"1000.0f"}}
+{"id":"parse.exp-upper-E","ok":true,"result":{"tag_id":6,"tag_type":"DOUBLE","snbt":"1000.0d","pretty_snbt":"1000.0d"}}
+{"id":"parse.string-double","ok":true,"result":{"tag_id":8,"tag_type":"STRING","snbt":"\"hi\"","pretty_snbt":"\"hi\""}}
+{"id":"parse.string-single","ok":true,"result":{"tag_id":8,"tag_type":"STRING","snbt":"\"hi\"","pretty_snbt":"\"hi\""}}
+{"id":"parse.string-esc-nl","ok":true,"result":{"tag_id":8,"tag_type":"STRING","snbt":"\"a\\nb\"","pretty_snbt":"\"a\\nb\""}}
+{"id":"parse.string-esc-tab","ok":true,"result":{"tag_id":8,"tag_type":"STRING","snbt":"\"a\\tb\"","pretty_snbt":"\"a\\tb\""}}
+{"id":"parse.string-esc-backslash","ok":true,"result":{"tag_id":8,"tag_type":"STRING","snbt":"\"a\\\\b\"","pretty_snbt":"\"a\\\\b\""}}
+{"id":"parse.string-esc-quote","ok":true,"result":{"tag_id":8,"tag_type":"STRING","snbt":"'a\"b'","pretty_snbt":"'a\"b'"}}
+{"id":"parse.string-esc-apos","ok":true,"result":{"tag_id":8,"tag_type":"STRING","snbt":"\"a'b\"","pretty_snbt":"\"a'b\""}}
+{"id":"parse.string-literal-single-in-double","ok":true,"result":{"tag_id":8,"tag_type":"STRING","snbt":"\"a'b\"","pretty_snbt":"\"a'b\""}}
+{"id":"parse.string-literal-double-in-single","ok":true,"result":{"tag_id":8,"tag_type":"STRING","snbt":"'a\"b'","pretty_snbt":"'a\"b'"}}
+{"id":"parse.string-hex-x","ok":true,"result":{"tag_id":8,"tag_type":"STRING","snbt":"\"A\"","pretty_snbt":"\"A\""}}
+{"id":"parse.string-hex-u","ok":true,"result":{"tag_id":8,"tag_type":"STRING","snbt":"\"A\"","pretty_snbt":"\"A\""}}
+{"id":"parse.string-hex-upper-U","ok":true,"result":{"tag_id":8,"tag_type":"STRING","snbt":"\"A\"","pretty_snbt":"\"A\""}}
+{"id":"parse.string-esc-backspace","ok":true,"result":{"tag_id":8,"tag_type":"STRING","snbt":"\"\\b\"","pretty_snbt":"\"\\b\""}}
+{"id":"parse.string-esc-ff","ok":true,"result":{"tag_id":8,"tag_type":"STRING","snbt":"\"\\f\"","pretty_snbt":"\"\\f\""}}
+{"id":"parse.string-esc-return","ok":true,"result":{"tag_id":8,"tag_type":"STRING","snbt":"\"\\r\"","pretty_snbt":"\"\\r\""}}
+{"id":"parse.string-esc-space","ok":true,"result":{"tag_id":8,"tag_type":"STRING","snbt":"\" \"","pretty_snbt":"\" \""}}
+{"id":"parse.string-emoji","ok":true,"result":{"tag_id":8,"tag_type":"STRING","snbt":"\"😀\"","pretty_snbt":"\"😀\""}}
+{"id":"parse.string-emoji-rocket","ok":true,"result":{"tag_id":8,"tag_type":"STRING","snbt":"\"🚀\"","pretty_snbt":"\"🚀\""}}
+{"id":"parse.string-utf8","ok":true,"result":{"tag_id":8,"tag_type":"STRING","snbt":"\"héllo wörld\"","pretty_snbt":"\"héllo wörld\""}}
+{"id":"parse.string-cjk","ok":true,"result":{"tag_id":8,"tag_type":"STRING","snbt":"\"日本語\"","pretty_snbt":"\"日本語\""}}
+{"id":"parse.string-empty","ok":true,"result":{"tag_id":8,"tag_type":"STRING","snbt":"\"\"","pretty_snbt":"\"\""}}
+{"id":"parse.string-single-empty","ok":true,"result":{"tag_id":8,"tag_type":"STRING","snbt":"\"\"","pretty_snbt":"\"\""}}
+{"id":"parse.string-unquoted","ok":true,"result":{"tag_id":8,"tag_type":"STRING","snbt":"\"hello\"","pretty_snbt":"\"hello\""}}
+{"id":"parse.string-unquoted-underscore","ok":true,"result":{"tag_id":8,"tag_type":"STRING","snbt":"\"hello_world\"","pretty_snbt":"\"hello_world\""}}
+{"id":"parse.string-unquoted-dot","ok":true,"result":{"tag_id":8,"tag_type":"STRING","snbt":"\"a.b\"","pretty_snbt":"\"a.b\""}}
+{"id":"parse.string-unquoted-dash","ok":true,"result":{"tag_id":8,"tag_type":"STRING","snbt":"\"abc-def\"","pretty_snbt":"\"abc-def\""}}
+{"id":"parse.string-unquoted-plus","ok":true,"result":{"tag_id":8,"tag_type":"STRING","snbt":"\"abc+def\"","pretty_snbt":"\"abc+def\""}}
+{"id":"parse.string-unquoted-underscore-start","ok":true,"result":{"tag_id":8,"tag_type":"STRING","snbt":"\"_1\"","pretty_snbt":"\"_1\""}}
+{"id":"parse.string-unquoted-lone","ok":true,"result":{"tag_id":8,"tag_type":"STRING","snbt":"\"x\"","pretty_snbt":"\"x\""}}
+{"id":"parse.string-unquoted-nan","ok":true,"result":{"tag_id":8,"tag_type":"STRING","snbt":"\"NaN\"","pretty_snbt":"\"NaN\""}}
+{"id":"parse.true","ok":true,"result":{"tag_id":1,"tag_type":"BYTE","snbt":"1b","pretty_snbt":"1b"}}
+{"id":"parse.false","ok":true,"result":{"tag_id":1,"tag_type":"BYTE","snbt":"0b","pretty_snbt":"0b"}}
+{"id":"parse.true-upper","ok":true,"result":{"tag_id":1,"tag_type":"BYTE","snbt":"1b","pretty_snbt":"1b"}}
+{"id":"parse.false-mixed","ok":true,"result":{"tag_id":1,"tag_type":"BYTE","snbt":"0b","pretty_snbt":"0b"}}
+{"id":"parse.true-word","ok":true,"result":{"tag_id":8,"tag_type":"STRING","snbt":"\"truex\"","pretty_snbt":"\"truex\""}}
+{"id":"parse.builtin-bool-1","ok":true,"result":{"tag_id":1,"tag_type":"BYTE","snbt":"1b","pretty_snbt":"1b"}}
+{"id":"parse.builtin-bool-0","ok":true,"result":{"tag_id":1,"tag_type":"BYTE","snbt":"0b","pretty_snbt":"0b"}}
+{"id":"parse.builtin-bool-true","ok":true,"result":{"tag_id":1,"tag_type":"BYTE","snbt":"1b","pretty_snbt":"1b"}}
+{"id":"parse.builtin-bool-false","ok":true,"result":{"tag_id":1,"tag_type":"BYTE","snbt":"0b","pretty_snbt":"0b"}}
+{"id":"parse.builtin-uuid","ok":true,"result":{"tag_id":11,"tag_type":"INT[]","snbt":"[I;16909060,84281096,151653132,219025168]","pretty_snbt":"[I; 16909060, 84281096, 151653132, 219025168]"}}
+{"id":"parse.byte-array-empty","ok":true,"result":{"tag_id":7,"tag_type":"BYTE[]","snbt":"[B;]","pretty_snbt":"[B;]"}}
+{"id":"parse.byte-array","ok":true,"result":{"tag_id":7,"tag_type":"BYTE[]","snbt":"[B;1B,-1B,2B]","pretty_snbt":"[B; 1B, -1B, 2B]"}}
+{"id":"parse.byte-array-unsigned","ok":true,"result":{"tag_id":7,"tag_type":"BYTE[]","snbt":"[B;0B,-1B]","pretty_snbt":"[B; 0B, -1B]"}}
+{"id":"parse.byte-array-mixed-suffix","ok":true,"result":{"tag_id":7,"tag_type":"BYTE[]","snbt":"[B;1B,2B,3B]","pretty_snbt":"[B; 1B, 2B, 3B]"}}
+{"id":"parse.int-array-empty","ok":true,"result":{"tag_id":11,"tag_type":"INT[]","snbt":"[I;]","pretty_snbt":"[I;]"}}
+{"id":"parse.int-array","ok":true,"result":{"tag_id":11,"tag_type":"INT[]","snbt":"[I;1,2]","pretty_snbt":"[I; 1, 2]"}}
+{"id":"parse.int-array-widened","ok":true,"result":{"tag_id":11,"tag_type":"INT[]","snbt":"[I;1,2]","pretty_snbt":"[I; 1, 2]"}}
+{"id":"parse.int-array-hex","ok":true,"result":{"tag_id":11,"tag_type":"INT[]","snbt":"[I;255,2]","pretty_snbt":"[I; 255, 2]"}}
+{"id":"parse.int-array-negative","ok":true,"result":{"tag_id":11,"tag_type":"INT[]","snbt":"[I;-1,-2]","pretty_snbt":"[I; -1, -2]"}}
+{"id":"parse.long-array-empty","ok":true,"result":{"tag_id":12,"tag_type":"LONG[]","snbt":"[L;]","pretty_snbt":"[L;]"}}
+{"id":"parse.long-array","ok":true,"result":{"tag_id":12,"tag_type":"LONG[]","snbt":"[L;1L,2L]","pretty_snbt":"[L; 1L, 2L]"}}
+{"id":"parse.long-array-widened","ok":true,"result":{"tag_id":12,"tag_type":"LONG[]","snbt":"[L;1L,2L]","pretty_snbt":"[L; 1L, 2L]"}}
+{"id":"parse.long-array-long-max","ok":true,"result":{"tag_id":12,"tag_type":"LONG[]","snbt":"[L;9223372036854775807L]","pretty_snbt":"[L; 9223372036854775807L]"}}
+{"id":"parse.list-empty","ok":true,"result":{"tag_id":9,"tag_type":"LIST","snbt":"[]","pretty_snbt":"[]"}}
+{"id":"parse.list-ints","ok":true,"result":{"tag_id":9,"tag_type":"LIST","snbt":"[1,2]","pretty_snbt":"[\n    1,\n    2\n]"}}
+{"id":"parse.list-mixed","ok":true,"result":{"tag_id":9,"tag_type":"LIST","snbt":"[1,\"a\"]","pretty_snbt":"[\n    1,\n    \"a\"\n]"}}
+{"id":"parse.list-strings","ok":true,"result":{"tag_id":9,"tag_type":"LIST","snbt":"[\"a\",\"b\"]","pretty_snbt":"[\n    \"a\",\n    \"b\"\n]"}}
+{"id":"parse.list-compounds","ok":true,"result":{"tag_id":9,"tag_type":"LIST","snbt":"[{a:1},{a:2}]","pretty_snbt":"[\n    {\n        a: 1\n    },\n    {\n        a: 2\n    }\n]"}}
+{"id":"parse.list-doubles","ok":true,"result":{"tag_id":9,"tag_type":"LIST","snbt":"[1.5d,2.5d]","pretty_snbt":"[\n    1.5d,\n    2.5d\n]"}}
+{"id":"parse.list-longs","ok":true,"result":{"tag_id":9,"tag_type":"LIST","snbt":"[1L,2L]","pretty_snbt":"[\n    1L,\n    2L\n]"}}
+{"id":"parse.list-nested","ok":true,"result":{"tag_id":9,"tag_type":"LIST","snbt":"[[1],[2]]","pretty_snbt":"[\n    [\n        1\n    ],\n    [\n        2\n    ]\n]"}}
+{"id":"parse.list-nested-arrays","ok":true,"result":{"tag_id":9,"tag_type":"LIST","snbt":"[[B;1B],[B;2B]]","pretty_snbt":"[\n    [B; 1B],\n    [B; 2B]\n]"}}
+{"id":"parse.list-trailing-comma","ok":true,"result":{"tag_id":9,"tag_type":"LIST","snbt":"[1]","pretty_snbt":"[\n    1\n]"}}
+{"id":"parse.list-single","ok":true,"result":{"tag_id":9,"tag_type":"LIST","snbt":"[42]","pretty_snbt":"[\n    42\n]"}}
+{"id":"parse.compound-empty","ok":true,"result":{"tag_id":10,"tag_type":"COMPOUND","snbt":"{}","pretty_snbt":"{}"}}
+{"id":"parse.compound-simple","ok":true,"result":{"tag_id":10,"tag_type":"COMPOUND","snbt":"{a:1}","pretty_snbt":"{\n    a: 1\n}"}}
+{"id":"parse.compound-multi","ok":true,"result":{"tag_id":10,"tag_type":"COMPOUND","snbt":"{a:1,b:\"two\"}","pretty_snbt":"{\n    a: 1,\n    b: \"two\"\n}"}}
+{"id":"parse.compound-nested","ok":true,"result":{"tag_id":10,"tag_type":"COMPOUND","snbt":"{outer:{inner:1}}","pretty_snbt":"{\n    outer: {\n        inner: 1\n    }\n}"}}
+{"id":"parse.compound-bool-flag","ok":true,"result":{"tag_id":10,"tag_type":"COMPOUND","snbt":"{flag:1b}","pretty_snbt":"{\n    flag: 1b\n}"}}
+{"id":"parse.compound-all-types","ok":true,"result":{"tag_id":10,"tag_type":"COMPOUND","snbt":"{byte:1b,double:6.5d,float:5.5f,int:3,long:4L,short:2s,str:\"x\"}","pretty_snbt":"{\n    byte: 1b,\n    double: 6.5d,\n    float: 5.5f,\n    int: 3,\n    long: 4L,\n    short: 2s,\n    str: \"x\"\n}"}}
+{"id":"parse.compound-arrays","ok":true,"result":{"tag_id":10,"tag_type":"COMPOUND","snbt":"{a:[I;1,2],b:[B;1B]}","pretty_snbt":"{\n    a: [I; 1, 2],\n    b: [B; 1B]\n}"}}
+{"id":"parse.compound-key-quoted-digit","ok":true,"result":{"tag_id":10,"tag_type":"COMPOUND","snbt":"{\"123\":1}","pretty_snbt":"{\n    123: 1\n}"}}
+{"id":"parse.compound-key-quoted-true","ok":true,"result":{"tag_id":10,"tag_type":"COMPOUND","snbt":"{\"true\":1}","pretty_snbt":"{\n    true: 1\n}"}}
+{"id":"parse.compound-key-dot","ok":true,"result":{"tag_id":10,"tag_type":"COMPOUND","snbt":"{a.b:1}","pretty_snbt":"{\n    a.b: 1\n}"}}
+{"id":"parse.compound-key-hyphen","ok":true,"result":{"tag_id":10,"tag_type":"COMPOUND","snbt":"{a-b:1}","pretty_snbt":"{\n    a-b: 1\n}"}}
+{"id":"parse.compound-key-plus","ok":true,"result":{"tag_id":10,"tag_type":"COMPOUND","snbt":"{a+b:1}","pretty_snbt":"{\n    a+b: 1\n}"}}
+{"id":"parse.compound-key-underscore","ok":true,"result":{"tag_id":10,"tag_type":"COMPOUND","snbt":"{a_b:1}","pretty_snbt":"{\n    a_b: 1\n}"}}
+{"id":"parse.compound-key-space","ok":true,"result":{"tag_id":10,"tag_type":"COMPOUND","snbt":"{\"a b\":1}","pretty_snbt":"{\n    \"a b\": 1\n}"}}
+{"id":"parse.compound-key-colon","ok":true,"result":{"tag_id":10,"tag_type":"COMPOUND","snbt":"{\"a:b\":1}","pretty_snbt":"{\n    \"a:b\": 1\n}"}}
+{"id":"parse.compound-trailing-comma","ok":true,"result":{"tag_id":10,"tag_type":"COMPOUND","snbt":"{a:1}","pretty_snbt":"{\n    a: 1\n}"}}
+{"id":"parse.compound-nested-list-compounds","ok":true,"result":{"tag_id":10,"tag_type":"COMPOUND","snbt":"{a:[{x:1,y:2}]}","pretty_snbt":"{\n    a: [\n        {\n            x: 1,\n            y: 2\n        }\n    ]\n}"}}
+{"id":"parse.whitespace-compound","ok":true,"result":{"tag_id":10,"tag_type":"COMPOUND","snbt":"{a:1}","pretty_snbt":"{\n    a: 1\n}"}}
+{"id":"parse.whitespace-list","ok":true,"result":{"tag_id":9,"tag_type":"LIST","snbt":"[1,2]","pretty_snbt":"[\n    1,\n    2\n]"}}
+{"id":"parse.pretty-root-keyorder","ok":true,"result":{"tag_id":10,"tag_type":"COMPOUND","snbt":"{DataVersion:1,author:\"a\",size:2,zzz:9}","pretty_snbt":"{\n    DataVersion: 1,\n    author: \"a\",\n    size: 2,\n    zzz: 9\n}"}}
+{"id":"parse.pretty-data-blockorder","ok":true,"result":{"tag_id":10,"tag_type":"COMPOUND","snbt":"{data:[{nbt:\"n\",pos:1,state:\"s\"}]}","pretty_snbt":"{\n    data: [\n        {pos: 1, state: \"s\", nbt: \"n\"}\n    ]\n}"}}
+{"id":"parse.pretty-entities-blockpos","ok":true,"result":{"tag_id":10,"tag_type":"COMPOUND","snbt":"{entities:[{blockPos:\"bp\",pos:\"p\"}]}","pretty_snbt":"{\n    entities: [\n        {blockPos: \"bp\", pos: \"p\"}\n    ]\n}"}}
+{"id":"parse.pretty-size-noindent","ok":true,"result":{"tag_id":10,"tag_type":"COMPOUND","snbt":"{size:[1,2,3]}","pretty_snbt":"{\n    size: [1, 2, 3]\n}"}}
+{"id":"parse.pretty-palette-noindent","ok":true,"result":{"tag_id":10,"tag_type":"COMPOUND","snbt":"{palette:[{Name:\"x\"}]}","pretty_snbt":"{\n    palette: [\n        {Name: \"x\"}\n    ]\n}"}}
+{"id":"parse.pretty-root-keyorder-missing","ok":true,"result":{"tag_id":10,"tag_type":"COMPOUND","snbt":"{author:\"a\",zzz:9}","pretty_snbt":"{\n    author: \"a\",\n    zzz: 9\n}"}}
+{"id":"parse-invalid.trailing-data","ok":false,"kind":"input_rejected","detail":{"type":"com.mojang.brigadier.exceptions.CommandSyntaxException","message":"Unexpected trailing data at position 2: 1 <--[HERE]"}}
+{"id":"parse-invalid.hex-negative","ok":false,"kind":"input_rejected","detail":{"type":"com.mojang.brigadier.exceptions.CommandSyntaxException","message":"Expected literal u|U at position 5: -0x10<--[HERE]"}}
+{"id":"parse-invalid.leading-zero","ok":false,"kind":"input_rejected","detail":{"type":"com.mojang.brigadier.exceptions.CommandSyntaxException","message":"Expected literal . at position 4: 0123<--[HERE]"}}
+{"id":"parse-invalid.trailing-underscore","ok":false,"kind":"input_rejected","detail":{"type":"com.mojang.brigadier.exceptions.CommandSyntaxException","message":"Expected literal ( at position 2: 1_<--[HERE]"}}
+{"id":"parse-invalid.overflow-byte","ok":false,"kind":"input_rejected","detail":{"type":"com.mojang.brigadier.exceptions.CommandSyntaxException","message":"Failed to parse number: Value out of range. Value:\"128\" Radix:10 at position 4: 128b<--[HERE]"}}
+{"id":"parse-invalid.underflow-byte","ok":false,"kind":"input_rejected","detail":{"type":"com.mojang.brigadier.exceptions.CommandSyntaxException","message":"Failed to parse number: Value out of range. Value:\"-129\" Radix:10 at position 5: -129b<--[HERE]"}}
+{"id":"parse-invalid.overflow-short","ok":false,"kind":"input_rejected","detail":{"type":"com.mojang.brigadier.exceptions.CommandSyntaxException","message":"Expected literal b|B at position 6: 32768s<--[HERE]"}}
+{"id":"parse-invalid.overflow-int","ok":false,"kind":"input_rejected","detail":{"type":"com.mojang.brigadier.exceptions.CommandSyntaxException","message":"Expected literal . at position 10: 2147483648<--[HERE]"}}
+{"id":"parse-invalid.underflow-int","ok":false,"kind":"input_rejected","detail":{"type":"com.mojang.brigadier.exceptions.CommandSyntaxException","message":"Expected literal . at position 11: ...2147483649<--[HERE]"}}
+{"id":"parse-invalid.overflow-long","ok":false,"kind":"input_rejected","detail":{"type":"com.mojang.brigadier.exceptions.CommandSyntaxException","message":"Failed to parse number: For input string: \"9223372036854775808\" at position 20: ...854775808L<--[HERE]"}}
+{"id":"parse-invalid.inf-float","ok":false,"kind":"input_rejected","detail":{"type":"com.mojang.brigadier.exceptions.CommandSyntaxException","message":"Unexpected trailing data at position 1: 1<--[HERE]"}}
+{"id":"parse-invalid.inf-double","ok":false,"kind":"input_rejected","detail":{"type":"com.mojang.brigadier.exceptions.CommandSyntaxException","message":"Unexpected trailing data at position 1: 1<--[HERE]"}}
+{"id":"parse-invalid.unclosed-string","ok":false,"kind":"input_rejected","detail":{"type":"com.mojang.brigadier.exceptions.CommandSyntaxException","message":"Invalid string contents at position 4: \"abc<--[HERE]"}}
+{"id":"parse-invalid.unclosed-compound","ok":false,"kind":"input_rejected","detail":{"type":"com.mojang.brigadier.exceptions.CommandSyntaxException","message":"Expected literal . at position 4: {a:1<--[HERE]"}}
+{"id":"parse-invalid.unclosed-list","ok":false,"kind":"input_rejected","detail":{"type":"com.mojang.brigadier.exceptions.CommandSyntaxException","message":"Expected literal . at position 4: [1,2<--[HERE]"}}
+{"id":"parse-invalid.bad-array-element","ok":false,"kind":"input_rejected","detail":{"type":"com.mojang.brigadier.exceptions.CommandSyntaxException","message":"Invalid array element type at position 6: [B;1L]<--[HERE]"}}
+{"id":"parse-invalid.empty-key","ok":false,"kind":"input_rejected","detail":{"type":"com.mojang.brigadier.exceptions.CommandSyntaxException","message":"Expected literal \" at position 1: {<--[HERE]"}}
+{"id":"parse-invalid.double-comma","ok":false,"kind":"input_rejected","detail":{"type":"com.mojang.brigadier.exceptions.CommandSyntaxException","message":"Expected literal \" at position 5: {a:1,<--[HERE]"}}
+{"id":"parse-invalid.number-start-unquoted","ok":false,"kind":"input_rejected","detail":{"type":"com.mojang.brigadier.exceptions.CommandSyntaxException","message":"Expected literal ( at position 4: +abc<--[HERE]"}}
+{"id":"parse-invalid.uuid-bad","ok":false,"kind":"input_rejected","detail":{"type":"com.mojang.brigadier.exceptions.CommandSyntaxException","message":"Expected a string representing a valid UUID at position 12: ...id(\"nope\")<--[HERE]"}}
+{"id":"parse-invalid.unknown-builtin","ok":false,"kind":"input_rejected","detail":{"type":"com.mojang.brigadier.exceptions.CommandSyntaxException","message":"No such operation: foo/1 at position 6: foo(1)<--[HERE]"}}

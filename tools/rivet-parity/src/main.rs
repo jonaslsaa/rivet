@@ -23,6 +23,7 @@
 //! human summary on stderr. Run `cargo run -p rivet-parity -- --help`.
 
 mod corpus;
+mod ops;
 mod oracle;
 
 use std::collections::BTreeMap;
@@ -901,6 +902,9 @@ fn parse_fixture_limit(value: &str) -> usize {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("ops") {
+        std::process::exit(ops::run_cli(&args[2..]));
+    }
     let mut limit_fixtures: Option<usize> = None;
     let mut no_oracle = false;
     let mut require_oracle = false;
@@ -924,6 +928,7 @@ fn main() {
                     "rivet-parity: byte-for-byte NBT/SNBT parity diff vs the Paper Java oracle\n\
                      \n\
                      usage: cargo run -p rivet-parity [--no-oracle | --require-oracle] [--scoreboard] [--limit-fixtures N]\n\
+                     \x20      cargo run -p rivet-parity -- ops <check|live|emit-corpus> ...  (oracle-op framework)\n\
                      \n\
                      JSON-Lines transcript on stdout, human summary on stderr.\n\
                      Exit codes: 0 VERIFIED (oracle ran, no hard mismatches);\n\

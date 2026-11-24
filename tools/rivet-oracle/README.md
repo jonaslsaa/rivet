@@ -964,6 +964,54 @@ Never hand-edit fixtures; regenerate from a clean run instead. Every boot in the
 pipeline is pinned to `chunk-system` 1/1 and runs with entity spawning
 suppressed (spawn-limits 0) per the sections above.
 
+## Probe regeneration check: `regen --check` (VERIFICATION §5 item 2)
+
+`probes.tsv` maps every Java probe script under `scripts/run_*.sh` (and the
+reference oracle's op record mode, `tools/rivet-reference-oracle/run.sh
+--record`) to the committed file(s) it must reproduce. Columns: `script`,
+`mode` (`stdout` — stdout equals the outputs concatenated in order; `files` —
+`{outN}` arguments are scratch files named like output N; `dir` — `{dir}` is a
+scratch dir read by basename; `none` — no committed output exists), `args`,
+`env`, `outputs`, `note`. Several scripts have more than one row (a mode
+argument or environment switch selects a different golden); row ids are the
+script name, qualified by those arguments.
+
+```sh
+cargo run -p rivet-oracle -- regen --check                      # every row (T3 nightly)
+cargo run -p rivet-oracle -- regen --check --only 'run_poi_*'   # glob over row ids
+cargo run -p rivet-oracle -- regen --check --changed origin/main...HEAD   # T1 path trigger
+```
+
+Each selected row runs **twice** into `work/regen/<row>/run{1,2}/` at the
+checkout root (never the system temp dir: `TMPDIR` and `java.io.tmpdir` point
+into the run dir too). Run 1 is byte-diffed against the committed golden
+(`DRIFT`, with the first differing line) and against run 2
+(`NONDETERMINISTIC`). A producer that fails or exceeds `--timeout` (default
+900 s) is a FAIL. Verdicts: `PASS`, `FAIL`, or `UNVERIFIED` for `none` rows,
+for orphan goldens (a top-level `fixtures/*.{jsonl,tsv,txt}` no row produces),
+and for every row when the Paper runtime or Java 25 is missing. The table is
+closure-checked: a `run_*.sh` without a row, or a row whose script or output is
+missing, is a FAIL. Per-row results go to stdout and `work/regen/report.tsv`;
+exit 0 PASS / 1 FAIL / 3 UNVERIFIED.
+
+The Paper classpath (materialized runtime jar + libraries) is resolved once
+(`RIVET_PAPER_RUNTIME_JAR`/`RIVET_PAPER_LIBRARIES`, else this checkout's
+`work/run`, else the main checkout's) and handed to every producer; a linked
+worktree gets `work/run/versions` as a symlink and `work/run/libraries` as a
+hard-link mirror, because several scripts hard-code that path and `find` it
+without following symlinks. Rows that share a `.cache/<name>` compile dir or a
+`cd` target run sequentially in one lane; `--jobs` lanes (default 2, the RAM
+cap for concurrent JVMs) run in parallel. Each probe is still its own JVM; the
+op recorder streams every recorded op through one JVM.
+
+**Path-triggered T1 hook.** `--changed <git-range>` selects only the rows whose
+script, arguments' directories (e.g. the op corpus), committed outputs, or Java
+sources named in the script text appear in `git diff --name-only <range>`; a
+change to `probes.tsv` selects every row; no triggered row exits 0. The merge
+tier runs `regen --check --changed origin/main...HEAD` when a PR touches a
+probe, its Java source or its fixture (VERIFICATION §3.2 T1, D17), and
+`scripts/gate.sh --nightly` runs the full `regen --check` (T3).
+
 ## Chunk-hash engine (issue #54)
 
 The xxh3_64 seed-hash gate compares Paper's chunk digests against Rivet's once

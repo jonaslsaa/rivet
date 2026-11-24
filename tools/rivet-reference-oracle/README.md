@@ -23,6 +23,43 @@ The tool currently supports:
   (`tools/rivet-oracle/fixtures/text/`) and the `rivet-parity` differential
   checks.
 
+All five operations live in one op registry (`OPS` in
+`RivetReferenceOracle.java`). Each op declares its result-key order (the
+canonical-JSON contract: results are re-emitted in exactly that order, an
+undeclared key or a raw floating-point number is an `unavailable` fault — floats
+travel as IEEE-754 bit hex via `f32Bits`/`f64Bits`, with human decimals only in
+the recorded `dec` object) and which exception classes are input-rejection
+verdicts. The same handlers serve two modes:
+
+- **live** (default): one JVM boot answers any number of JSON Lines requests on
+  stdin/stdout, for any mix of ops. The Rust client is
+  `rivet_harness_common::oracle_client` (id correlation, pipelining, tamper
+  hook).
+- **record**: `run.sh --record <corpus-dir> <out-dir>` runs every
+  `<corpus-dir>/<op>.jsonl` corpus (one `{"id":...,<request fields>}` per line)
+  through Paper and writes `<out-dir>/<op>.jsonl` (one
+  `{"id","ok":true,"result"[,"dec"]}` or `{"id","ok":false,"kind":"input_rejected","detail"}`
+  line per input) plus a deterministic `manifest.json` (Paper pin and commit,
+  op source SHA-256, per-op corpus SHA-256/count and output SHA-256/count). An
+  input with no verdict aborts the recording.
+
+The committed recordings are under `fixtures/ops/` (`corpus/`, `<op>.jsonl`,
+`manifest.json`, and the comparator's `exclusions.tsv`). To re-record after
+changing an op or a corpus:
+
+```sh
+cargo run -p rivet-parity -- ops emit-corpus tools/rivet-reference-oracle/fixtures/ops/corpus
+tools/rivet-reference-oracle/run.sh --record tools/rivet-reference-oracle/fixtures/ops/corpus tools/rivet-reference-oracle/fixtures/ops
+```
+
+`cargo run -p rivet-parity -- ops check` (offline, also a cargo test) compares
+the Rust handlers with the recordings; `ops live` streams the corpora through a
+live oracle and also requires Paper to still reproduce the recordings;
+`rivet-oracle regen --check --only rivet-reference-oracle` re-records into scratch twice and
+byte-diffs (see `tools/rivet-oracle/README.md`). Editing this Java file changes
+the op source SHA-256 the manifest pins, so the offline check fails until the
+ops are re-recorded.
+
 It compiles against `working/Paper/paper-server/build/libs/paper-server-*.jar`
 and uses libraries materialized by the M0 Paper run under
 `tools/rivet-oracle/work/run/libraries`. Both locations can be overridden with
@@ -60,7 +97,8 @@ exceptions, malformed requests, and ambiguous runtime failures remain unavailabl
 evidence; clients must not treat every `ok:false` response as input rejection.
 Component codec rejection remains a successful result with `accept:false`.
 
-Run the built-in smoke test without starting a persistent session:
+Run the built-in smoke test (protocol, registry contract, float encoding)
+without starting a persistent session:
 
 ```sh
 tools/rivet-reference-oracle/run.sh --self-test

@@ -3,7 +3,7 @@
 //! Paper 26.2 `ServerGamePacketListenerImpl.handlePlayerAction` /
 //! `handleUseItemOn` / `handleUseItem` and `ServerPlayerGameMode`
 //! (`working/Paper` `0a993450`). The wire layer is proven separately against
-//! actual Paper codecs (`tools/rivet-oracle/fixtures/interaction-packets.jsonl`).
+//! actual Paper codecs by the `rivet-protocol` packet tests.
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
