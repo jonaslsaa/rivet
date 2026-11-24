@@ -9,8 +9,8 @@
 //!
 //! A cell is `""` (empty) or `<item id>[#<count>]`. Paper answers
 //! `{match, result?}`: `Recipe.matches(input, level)` and, on a match, the
-//! assembled stack as `{item, count, components}` (sorted component-patch ids,
-//! `!id` for a removal) — or `threw` when its own code throws. The Rust handler
+//! assembled stack as `{item, count, components}` (component id to the value in canonical
+//! JSON, `!id` to `""` for a removal) — or `threw` when its own code throws. The Rust handler
 //! parses the recipe document from the same harvest (`recipes[recipe]`) with
 //! `rivet_world::crafting::parse_recipe_json`, resolving item tags with
 //! `rivet-registry`'s generated table, and runs the ported matcher.
@@ -564,11 +564,53 @@ fn stack(cell: &str) -> Result<ItemStack, Outcome> {
     Ok(ItemStack::new(item, count))
 }
 
+/// Canonical JSON (compact, object keys sorted by UTF-16 code units, numbers as plain
+/// decimals without trailing zeros): the form of the oracle's `canonicalJson`.
+fn canonical_json(value: &Value) -> String {
+    match value {
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort_by(|a, b| a.encode_utf16().cmp(b.encode_utf16()));
+            let entries: Vec<String> = keys
+                .into_iter()
+                .map(|key| format!("{}:{}", json!(key), canonical_json(&map[key])))
+                .collect();
+            format!("{{{}}}", entries.join(","))
+        }
+        Value::Array(items) => {
+            let items: Vec<String> = items.iter().map(canonical_json).collect();
+            format!("[{}]", items.join(","))
+        }
+        Value::Number(number) => {
+            let text = number.to_string();
+            match text.parse::<f64>() {
+                Ok(f) if (text.contains(['.', 'e', 'E'])) && f.fract() == 0.0 && f.abs() < 1e15 => {
+                    format!("{}", f as i64)
+                }
+                _ => text,
+            }
+        }
+        other => other.to_string(),
+    }
+}
+
+/// A Rust component value is the JSON text of the recipe document (or of the assembler's own
+/// value); a bare token (`1`, `"minecraft:quartz"`) parses as JSON as well.
+fn component_text(raw: &str) -> String {
+    match serde_json::from_str::<Value>(raw) {
+        Ok(value) => canonical_json(&value),
+        Err(_) => canonical_json(&Value::String(raw.to_owned())),
+    }
+}
+
 fn describe(stack: &ItemStack) -> Value {
-    // BTreeMap keys iterate sorted by identifier, matching Java's sorted id list.
-    let mut ids: Vec<String> = stack.components().keys().map(ToString::to_string).collect();
-    ids.sort();
-    json!({"item": stack.item().name(), "count": stack.count(), "components": ids})
+    // BTreeMap keys iterate sorted by identifier, matching the oracle's sorted component ids.
+    let components: Map<String, Value> = stack
+        .components()
+        .iter()
+        .map(|(id, raw)| (id.to_string(), json!(component_text(raw))))
+        .collect();
+    json!({"item": stack.item().name(), "count": stack.count(), "components": components})
 }
 
 fn answer(matched: bool, result: Option<ItemStack>) -> Outcome {

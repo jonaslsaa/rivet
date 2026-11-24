@@ -5,6 +5,8 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.mojang.serialization.Codec;
 import com.mojang.serialization.DataResult;
+import com.mojang.serialization.DynamicOps;
+import com.mojang.serialization.JsonOps;
 import dev.rivet.oracle.RivetReferenceOracle.Op;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -46,6 +48,7 @@ import net.minecraft.world.item.enchantment.Enchantable;
 import net.minecraft.world.item.enchantment.Enchantment;
 import net.minecraft.world.item.enchantment.EnchantmentHelper;
 import net.minecraft.world.item.enchantment.EnchantmentInstance;
+import net.minecraft.core.component.DataComponentType;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.world.scores.ScoreboardSaveData;
 
@@ -275,7 +278,8 @@ final class GameplayOps {
      * {@code scoreboard.saved_data {input}}: decode the SNBT saved-data compound with
      * {@code ScoreboardSaveData.TYPE.codec()} under NbtOps, then answer the codec's own
      * re-encoding ({@code codec}) and the encoding after loading it into a scoreboard and
-     * storing it back ({@code loaded}). A decline names its phase: {@code decode},
+     * storing it back ({@code loaded}; one holder's scores sorted by objective, see
+     * {@link #sortHolderScores}). A decline names its phase: {@code decode},
      * {@code encode} or {@code load} (a scoreboard rejecting the data, e.g. a duplicate
      * objective name).
      */
@@ -317,7 +321,7 @@ final class GameplayOps {
                 dec.addProperty("error", encoded.error().map(DataResult.Error::message).orElse(""));
                 return decline(result, "encode");
             }
-            loaded = canonicalSnbt(encoded.result().get());
+            loaded = canonicalSnbt(sortHolderScores(encoded.result().get()));
         } catch (RuntimeException error) {
             dec.addProperty("thrown", error.toString());
             return decline(result, "load");
@@ -328,6 +332,39 @@ final class GameplayOps {
         return result;
     }
 
+
+    /**
+     * The stored {@code PlayerScores} list with each holder's run of consecutive entries sorted
+     * by {@code Objective}. {@code PlayerScores.scores} is a {@code Reference2ObjectOpenHashMap}
+     * keyed by {@code Objective}, which iterates by identity hash: the order of one holder's
+     * scores changes from one JVM start to the next, so it is not a property of the codec (D12).
+     * The order of the holders themselves ({@code String.hashCode}) is deterministic and kept.
+     */
+    static Tag sortHolderScores(final Tag stored) {
+        if (!(stored instanceof net.minecraft.nbt.CompoundTag compound)
+            || !(compound.get("PlayerScores") instanceof net.minecraft.nbt.ListTag scores)) {
+            return stored;
+        }
+        List<net.minecraft.nbt.CompoundTag> entries = new ArrayList<>();
+        for (int index = 0; index < scores.size(); index++) {
+            entries.add(scores.getCompoundOrEmpty(index));
+        }
+        net.minecraft.nbt.ListTag sorted = new net.minecraft.nbt.ListTag();
+        for (int from = 0; from < entries.size();) {
+            int to = from;
+            String holder = entries.get(from).getStringOr("Name", "");
+            while (to < entries.size() && entries.get(to).getStringOr("Name", "").equals(holder)) {
+                to++;
+            }
+            List<net.minecraft.nbt.CompoundTag> run = new ArrayList<>(entries.subList(from, to));
+            run.sort(Comparator.comparing(entry -> entry.getStringOr("Objective", "")));
+            run.forEach(sorted::add);
+            from = to;
+        }
+        net.minecraft.nbt.CompoundTag copy = compound.copy();
+        copy.put("PlayerScores", sorted);
+        return copy;
+    }
 
     /** {@code key:0b} printed by the tag printer, minus braces and value: the key as SNBT spells it. */
     private static String keyText(final String key) {
@@ -676,8 +713,9 @@ final class GameplayOps {
      * data pack. {@code kind} selects the input: {@code crafting {width, height, grid}},
      * {@code single {input}}, {@code smithing {template, base, addition}}. The answer is
      * {@code Recipe.matches(input, level)} and, on a match, the assembled stack:
-     * {@code {item, count, components}} with the sorted ids of its component patch
-     * ({@code !id} for a removal). An exception thrown by Paper's own matching or
+     * {@code {item, count, components}} where {@code components} maps each id of the stack's
+     * component patch to its value encoded by the component's codec under {@code JsonOps} in
+     * canonical JSON ({@code !id} to {@code ""} for a removal). An exception thrown by Paper's own matching or
      * assembling is {@code threw} (its class name) instead of an answer.
      */
     @SuppressWarnings({"unchecked", "rawtypes"})
@@ -733,14 +771,55 @@ final class GameplayOps {
         JsonObject out = new JsonObject();
         out.addProperty("item", BuiltInRegistries.ITEM.getKey(stack.getItem()).toString());
         out.addProperty("count", stack.getCount());
-        Set<String> ids = new TreeSet<>();
+        DynamicOps<JsonElement> ops = RegistryOps.create(JsonOps.INSTANCE, RivetReferenceOracle.ServerRegistries.ACCESS);
+        java.util.TreeMap<String, String> values = new java.util.TreeMap<>();
         for (var entry : stack.getComponentsPatch().entrySet()) {
             String key = BuiltInRegistries.DATA_COMPONENT_TYPE.getKey(entry.getKey()).toString();
-            ids.add(entry.getValue().isPresent() ? key : "!" + key);
+            if (entry.getValue().isEmpty()) {
+                values.put("!" + key, "");
+                continue;
+            }
+            DataComponentType type = entry.getKey();
+            DataResult<JsonElement> encoded = type.codecOrThrow().encodeStart(ops, entry.getValue().get());
+            values.put(key, canonicalJson(encoded.getOrThrow()));
         }
-        JsonArray components = new JsonArray();
-        ids.forEach(components::add);
+        JsonObject components = new JsonObject();
+        values.forEach(components::addProperty);
         out.add("components", components);
         return out;
+    }
+
+    /**
+     * Compact JSON with every object's keys sorted ({@code String.compareTo}) and numbers as
+     * plain decimals without trailing zeros: the canonical form of a component value, which the
+     * Rust side (whose component values are the recipe document's own JSON text) reproduces.
+     */
+    static String canonicalJson(final JsonElement element) {
+        if (element instanceof JsonObject object) {
+            List<String> keys = new ArrayList<>(object.keySet());
+            keys.sort(Comparator.naturalOrder());
+            StringBuilder out = new StringBuilder("{");
+            for (String key : keys) {
+                if (out.length() > 1) {
+                    out.append(',');
+                }
+                out.append(new com.google.gson.JsonPrimitive(key)).append(':').append(canonicalJson(object.get(key)));
+            }
+            return out.append('}').toString();
+        }
+        if (element instanceof JsonArray array) {
+            StringBuilder out = new StringBuilder("[");
+            for (int index = 0; index < array.size(); index++) {
+                if (index > 0) {
+                    out.append(',');
+                }
+                out.append(canonicalJson(array.get(index)));
+            }
+            return out.append(']').toString();
+        }
+        if (element instanceof com.google.gson.JsonPrimitive primitive && primitive.isNumber()) {
+            return primitive.getAsBigDecimal().stripTrailingZeros().toPlainString();
+        }
+        return element.toString();
     }
 }

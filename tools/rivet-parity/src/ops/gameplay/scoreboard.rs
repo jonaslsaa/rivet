@@ -6,7 +6,9 @@
 //! - `codec`: the codec's own re-encoding of the decoded value;
 //! - `loaded`: the encoding after the decoded data was loaded into a scoreboard
 //!   (objectives, scores, display slots, teams, in `ServerScoreboard.load` order)
-//!   and stored back (`pack*`, which drops nothing but Paper's empty-team filter).
+//!   and stored back (`pack*`, which drops nothing but Paper's empty-team filter); one
+//!   holder's `PlayerScores` entries are sorted by objective, because Paper iterates them by
+//!   `Objective` identity hash (a different order on every JVM start, D12).
 //!
 //! or `{accept:false, phase}` with the phase that declined (`decode`, `encode`,
 //! or `load` when the scoreboard rejects the data, e.g. a duplicate objective).
@@ -56,6 +58,43 @@ pub fn canonical_snbt(tag: &Tag) -> String {
     }
 }
 
+/// The stored `PlayerScores` list with each holder's run of consecutive entries sorted by
+/// `Objective` (Paper keys one holder's scores by `Objective` identity hash, so their order is
+/// not stable from one JVM start to the next; the order of the holders is kept).
+fn sort_holder_scores(stored: &Tag) -> Tag {
+    let Tag::Compound(compound) = stored else {
+        return stored.clone();
+    };
+    let Some(Tag::List(scores)) = compound.tags.get("PlayerScores") else {
+        return stored.clone();
+    };
+    let text = |tag: &Tag, key: &str| -> String {
+        match tag {
+            Tag::Compound(entry) => entry.get_string_or(key, "").to_owned(),
+            _ => String::new(),
+        }
+    };
+    let entries = &scores.list;
+    let mut sorted: Vec<Tag> = Vec::with_capacity(entries.len());
+    let mut from = 0;
+    while from < entries.len() {
+        let holder = text(&entries[from], "Name");
+        let mut to = from;
+        while to < entries.len() && text(&entries[to], "Name") == holder {
+            to += 1;
+        }
+        let mut run: Vec<Tag> = entries[from..to].to_vec();
+        run.sort_by_key(|entry| text(entry, "Objective").encode_utf16().collect::<Vec<u16>>());
+        sorted.extend(run);
+        from = to;
+    }
+    let mut copy = compound.clone();
+    let mut list = scores.clone();
+    list.list = sorted;
+    copy.tags.insert("PlayerScores".to_owned(), Tag::List(list));
+    Tag::Compound(copy)
+}
+
 pub fn scoreboard_saved_data(request: &Map<String, Value>) -> Outcome {
     let input = match string(request, "input") {
         Ok(input) => input,
@@ -71,14 +110,19 @@ pub fn scoreboard_saved_data(request: &Map<String, Value>) -> Outcome {
         result.insert("phase".into(), json!(phase));
         Outcome::Accepted(result)
     };
-    // A panic inside the ported codec or scoreboard is the Rust spelling of a Java exception.
+    // A panic inside the ported codec or scoreboard is the Rust spelling of a Java exception;
+    // it declines in the phase it happened in, as the oracle's own catch blocks do (a Java
+    // exception while loading or re-storing is `load`).
+    let phase = std::cell::Cell::new("decode");
     let answered = crate::ops::packet::guarded(|| {
         let Ok(decoded) = PackedScoreboardData::decode_nbt(&tag) else {
             return Err("decode");
         };
+        phase.set("encode");
         let Ok(direct) = decoded.encode_nbt() else {
             return Err("encode");
         };
+        phase.set("load");
         let mut scoreboard = ServerScoreboard::new();
         let loaded = scoreboard.load_packed(
             &decoded.objectives,
@@ -98,7 +142,7 @@ pub fn scoreboard_saved_data(request: &Map<String, Value>) -> Outcome {
         let Ok(stored) = stored.encode_nbt() else {
             return Err("encode");
         };
-        Ok((canonical_snbt(&direct), canonical_snbt(&stored)))
+        Ok((canonical_snbt(&direct), canonical_snbt(&sort_holder_scores(&stored))))
     });
     match answered {
         Ok(Ok((codec, loaded))) => {
@@ -109,7 +153,7 @@ pub fn scoreboard_saved_data(request: &Map<String, Value>) -> Outcome {
             Outcome::Accepted(result)
         }
         Ok(Err(phase)) => decline(phase),
-        Err(_) => decline("decode"),
+        Err(_) => decline(phase.get()),
     }
 }
 
