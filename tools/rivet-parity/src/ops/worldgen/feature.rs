@@ -462,7 +462,7 @@ fn place(access: &RegistryAccess, key: &str, seed: i64, profile: &'static Profil
     };
     let Some(configured) = registry.get_optional(&Identifier::parse(key)) else {
         return Outcome::Unported(format!(
-            "{key} is not in Rivet's generated configured-feature closure"
+            "{key} is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)"
         ));
     };
 

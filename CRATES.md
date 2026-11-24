@@ -2,7 +2,7 @@
 
 ## Workspace (bottom-up dependency order)
 
-> D15 and OWNERSHIP.md supersede this table where they differ: `rivet-entity` folds into the live-game crate `rivet-server`, the `COVERAGE.tsv` ledger assigns every class its crate, and entities use OWNERSHIP's dispatch pattern, not an `AnyEntity` enum.
+> D15 and OWNERSHIP.md supersede this table where they differ: `rivet-server` is the live-game crate (ROADMAP Batch 2.0 folded the entity crate into it), the `COVERAGE.tsv` ledger assigns every class its crate, and entities use OWNERSHIP's dispatch pattern, not an `AnyEntity` enum.
 
 | Crate | Ports | Notes |
 |---|---|---|
@@ -15,8 +15,7 @@
 | `rivet-registry` | `core.registries`, `src/generated` | **Generated** by `tools/rivet-codegen` from extracted vanilla data; committed; feature-gated; prefer compact tables over huge Rust source. |
 | `rivet-protocol` | `net.minecraft.network` | Generated packet IDs, hand-ported bodies + derive macros; no serde. |
 | `rivet-world` | `world.level`, chunks, worldgen, lighting | Single chunk pipeline design (DAG + tickets), rayon workers. |
-| `rivet-entity` | `world.entity` hierarchy | `AnyEntity` enum + embedded base structs per OWNERSHIP.md. |
-| `rivet-server` | `server.*`, Paper `src/main`, patches | The binary; tick loop, connections, events, Paper config. |
+| `rivet-server` | The live-game crate (D15): `server.*`, `world.entity` and every other class that needs live types, Paper `src/main`, patches | The binary; tick loop, connections, events, Paper config. Module path is the Java package with `net.minecraft.` dropped (`net.minecraft.world.entity.ai.goal.FloatGoal` is `rivet_server::world::entity::ai::goal::float_goal`); any other package drops only its first segment. |
 | `rivet-api` | `paper-api` shape | Native Rust API surface (M4). |
 | `rivet-ffi` | — | C ABI facade for the JVM adapter; the only crate where `unsafe` is normal. |
 | `tools/rivet-codegen` | — | Excluded from workspace; data extraction + code generation. In-repo, documented (unlike Pumpkin's out-of-tree extractor). |
@@ -49,4 +48,4 @@ The `regex` crate and its `regex-automata` engines deliberately omit lookaround 
 
 **JVM adapter:** no `jni` crate — `rivet-ffi` exposes plain `extern "C"`; the Java side binds via FFM (Panama). Java shims live in `adapter/` (Gradle), not in the cargo workspace.
 
-**Explicitly rejected:** ECS frameworks (bevy_ecs — D4), `dashmap` on tick-thread state, serde-based packet codecs, `async-trait`/boxed futures in game logic, pre-release crypto pins. Each rejection is a Pumpkin scar — see `LESSONS-PUMPKIN.md`.
+**Explicitly rejected:** ECS frameworks (bevy_ecs — D4), `dashmap` on tick-thread state, serde-based packet codecs, `async-trait`/boxed futures in game logic, pre-release crypto pins. Each rejection is a Pumpkin scar — see `docs/background.md` (Lessons from Pumpkin).

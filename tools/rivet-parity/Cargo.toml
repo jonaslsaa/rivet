@@ -9,14 +9,13 @@ description = "Byte-for-byte NBT/SNBT parity diff between rivet-nbt and the Pape
 base64 = "0.22"
 chrono = "0.4"
 bytes = { workspace = true }
+rivet-brigadier = { path = "../../crates/rivet-brigadier" }
 rivet-harness-common = { path = "../rivet-harness-common" }
 rivet-nbt = { path = "../../crates/rivet-nbt" }
 rivet-protocol = { path = "../../crates/rivet-protocol", features = ["packets"] }
 rivet-registry = { path = "../../crates/rivet-registry", features = ["blocks"] }
-rivet-serialization = { path = "../../crates/rivet-serialization" }
-# `ops worldgen`: the feature registry (`build_feature_access`) and the
-# `WorldGenRegion` the ported features place into live in rivet-server.
 rivet-server = { path = "../../crates/rivet-server" }
+rivet-serialization = { path = "../../crates/rivet-serialization" }
 rivet-text = { path = "../../crates/rivet-text" }
 rivet-util = { path = "../../crates/rivet-util" }
 rivet-world = { path = "../../crates/rivet-world" }

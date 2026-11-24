@@ -100,11 +100,11 @@ Crate assignment (D15, ROADMAP 5.1)
 -----------------------------------
 Computed per Java package from the class graph, never chosen by hand. The
 current crate is the package's majority MANIFEST.tsv `crate` (ties by name).
-  1. `rivet-entity` content is destined for `rivet-server`. So is Paper server
-     code: every D-bucket package, A-bucket packages the manifest maps to
-     `rivet-api` (Paper patches in the minecraft root; paper-api is the only
-     API source), and packages mapped to a crate that is not a workspace crate
-     (`rivet-oracle` for net.minecraft.gametest).
+  1. Paper server code is destined for `rivet-server`: every D-bucket package,
+     A-bucket packages the manifest maps to `rivet-api` (Paper patches in the
+     minecraft root; paper-api is the only API source), and packages mapped to
+     a crate that is not a workspace crate (`rivet-oracle` for
+     net.minecraft.gametest).
   2. Live types are the classes of every `net.minecraft.*` package (bucket A)
      whose crate is `rivet-server` after step 1: world.entity, server,
      commands, ... (Moonrise/DataConverter are left out of the seed so Paper's
@@ -186,7 +186,6 @@ MOUNTS = {
                        ("net.minecraft.tags", "")],
     "rivet-protocol": [("net.minecraft.network", "")],
     "rivet-world": [("net.minecraft.world", ""), ("net.minecraft.world.level", "")],
-    "rivet-entity": [("net.minecraft.world.entity", "")],
     "rivet-server": [("net.minecraft", ""),
                      ("ca.spottedleaf.dataconverter", "server/dataconverter")],
 }
@@ -560,7 +559,7 @@ def assign_crates(classes: list[JavaClass], current: dict[str, str],
     for pkg, cs in pkg_classes.items():
         counts = Counter(current[c.path] for c in cs)
         crate = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
-        if cs[0].bucket == "D" or crate in ("rivet-entity", "rivet-api") or crate not in workspace:
+        if cs[0].bucket == "D" or crate == "rivet-api" or crate not in workspace:
             crate = "rivet-server"
         pkg_crate[pkg] = crate
     live = {

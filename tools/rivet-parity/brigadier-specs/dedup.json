@@ -1,0 +1,5 @@
+{"name":"dedup","commands":[
+{"literal":"dupes","children":[{"argument":"v","type":{"kind":"string","mode":"word"},"suggests":["x","X","x","Ab","aB","ab"],"executes":1}]},
+{"literal":"sib","children":[{"argument":"a","type":{"kind":"string","mode":"word"},"suggests":["b","B"],"executes":1},{"argument":"b","type":{"kind":"string","mode":"quotable"},"suggests":["B","b"],"executes":2}]},
+{"literal":"mixed","children":[{"argument":"m","type":{"kind":"string","mode":"word"},"suggests":["q","Q","q"],"executes":1},{"literal":"qq","executes":2}]}
+]}

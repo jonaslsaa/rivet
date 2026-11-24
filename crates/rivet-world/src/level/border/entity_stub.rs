@@ -1,7 +1,7 @@
 //! STUB(mc.world.entity) — minimal `Entity` seam for the pending
 //! `net.minecraft.world.entity` unit, created only so `WorldBorder`'s
 //! `getDistanceToBorder(Entity)`/`isInsideCloseToBorder(Entity, AABB)` read
-//! `entity.getX()`/`entity.getZ()`. The real `Entity` (in `rivet-entity`)
+//! `entity.getX()`/`entity.getZ()`. The real `Entity` (in `rivet-server`)
 //! replaces this when the entity unit lands.
 //!
 //! Note: the full `EntityType` id-handle STUB already lives in

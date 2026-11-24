@@ -303,3 +303,996 @@ feature.place	input:minecraft:iceberg_blue#4611686018427387905	IcebergFeature dr
 feature.place	input:minecraft:iceberg_packed#1	IcebergFeature draws the steep loop bound once in Rivet, on every iteration in Paper	821
 feature.place	input:minecraft:iceberg_packed#-1	IcebergFeature draws the steep loop bound once in Rivet, on every iteration in Paper	821
 feature.place	input:minecraft:iceberg_packed#4611686018427387905	IcebergFeature draws the steep loop bound once in Rivet, on every iteration in Paper	821
+brigadier.dispatch	input:basic.msg.h000	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h001	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h002	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h003	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h004	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h005	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h006	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h007	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h008	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h009	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h010	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h011	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h012	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h013	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h014	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h015	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h016	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h017	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h020	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (readerInvalidBool)	822
+brigadier.dispatch	input:basic.msg.h021	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (readerInvalidBool)	822
+brigadier.dispatch	input:basic.msg.h022	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (readerInvalidBool)	822
+brigadier.dispatch	input:basic.msg.h023	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (readerInvalidBool)	822
+brigadier.dispatch	input:basic.msg.h024	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (readerInvalidBool)	822
+brigadier.dispatch	input:basic.msg.h027	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (readerExpectedBool)	822
+brigadier.dispatch	input:basic.msg.h028	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (readerInvalidBool)	822
+brigadier.dispatch	input:basic.msg.h031	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (readerInvalidBool)	822
+brigadier.dispatch	input:basic.msg.h032	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h033	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h034	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h060	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (integerTooLow)	822
+brigadier.dispatch	input:basic.msg.h061	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (integerTooHigh)	822
+brigadier.dispatch	input:basic.msg.h064	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (integerTooLow)	822
+brigadier.dispatch	input:basic.msg.h065	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h070	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (integerTooLow)	822
+brigadier.dispatch	input:basic.msg.h071	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h085	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (longTooLow)	822
+brigadier.dispatch	input:basic.msg.h086	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (longTooHigh)	822
+brigadier.dispatch	input:basic.msg.h089	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h104	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (floatTooHigh)	822
+brigadier.dispatch	input:basic.msg.h105	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (floatTooHigh)	822
+brigadier.dispatch	input:basic.msg.h106	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (floatTooLow)	822
+brigadier.dispatch	input:basic.msg.h116	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (floatTooHigh)	822
+brigadier.dispatch	input:basic.msg.h120	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h131	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (doubleTooHigh)	822
+brigadier.dispatch	input:basic.msg.h136	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (doubleTooLow)	822
+brigadier.dispatch	input:basic.msg.h137	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (doubleTooHigh)	822
+brigadier.dispatch	input:basic.msg.h139	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (doubleTooHigh)	822
+brigadier.dispatch	input:basic.msg.h140	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h141	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h159	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h165	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (readerInvalidEscape)	822
+brigadier.dispatch	input:basic.msg.h176	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (readerInvalidEscape)	822
+brigadier.dispatch	input:basic.msg.h186	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h194	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h195	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h212	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h213	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h215	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h216	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h217	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h218	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h219	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h223	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h224	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h227	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h228	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h229	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h230	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h232	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h233	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h234	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h235	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h236	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h237	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h238	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h239	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h240	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h241	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h242	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.h246	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (readerInvalidBool)	822
+brigadier.dispatch	input:basic.msg.s000	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.s007	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.s009	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.s012	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (integerTooLow)	822
+brigadier.dispatch	input:basic.msg.s013	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (integerTooLow)	822
+brigadier.dispatch	input:basic.msg.s014	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.s017	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.s019	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.s021	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.s023	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.s025	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.s027	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.s028	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.s032	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.s037	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.s041	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.s043	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (readerInvalidBool)	822
+brigadier.dispatch	input:basic.msg.s045	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (longTooHigh)	822
+brigadier.dispatch	input:basic.msg.s046	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.s047	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.s048	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.s049	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.s050	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.s052	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.s055	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (readerInvalidBool)	822
+brigadier.dispatch	input:basic.msg.s057	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:basic.msg.s059	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.ambiguities	findAmbiguities passes the overlapping example inputs in example order, Paper in java.util.HashSet order	823
+brigadier.dispatch	input:ambiguous.msg.h000	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.h001	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.h002	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.h003	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.h004	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.h005	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.h006	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.h007	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.h008	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.h009	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.h010	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.h011	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.h012	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.h013	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.h014	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.h015	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.h016	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.h017	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.h018	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.h019	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.h020	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.h021	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.h041	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.h053	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.h054	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.h058	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (readerInvalidBool)	822
+brigadier.dispatch	input:ambiguous.msg.h060	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.h064	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.h069	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.h080	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.h086	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.h087	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.h088	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.h089	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.h090	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.h091	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.h092	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.h093	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.s001	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.s002	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.s007	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.s009	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.s011	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.s012	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.s013	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.s014	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.s015	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:ambiguous.msg.s019	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h000	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h001	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h002	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h003	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h004	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h005	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h006	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h007	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h008	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h009	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h010	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h011	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h012	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h013	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h014	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h015	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h016	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h017	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h018	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h019	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h020	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h021	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h022	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h033	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h034	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h043	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h044	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h049	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h051	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h052	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h055	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h056	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h059	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h060	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h063	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h064	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h067	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h068	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h071	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h072	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h075	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h076	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h079	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h080	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h083	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h084	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h087	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h088	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h091	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h092	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h095	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h096	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h128	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.h129	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.s005	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.s007	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.s010	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.s016	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.s017	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.s018	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.s019	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.s024	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.s025	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.s027	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:forks.msg.s028	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.h000	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.h001	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.h002	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.h003	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.h004	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.h005	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.h006	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.h007	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.h008	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.h009	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.h010	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.h011	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.h012	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.h013	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.h014	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.h015	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.h016	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.h017	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.h018	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.h019	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.h020	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.h021	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.h022	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.h023	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.h037	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.h044	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.h045	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.h047	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.h056	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.h057	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.h061	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.h065	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.h071	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.h072	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.h073	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.h074	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.h075	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.h076	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.h079	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.h084	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.h087	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.s000	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.s001	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.s006	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.s011	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.s013	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.s015	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.s017	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:usage.msg.s018	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:suggest.msg.h000	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:suggest.msg.h001	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:suggest.msg.h002	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:suggest.msg.h003	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:suggest.msg.h004	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:suggest.msg.h005	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:suggest.msg.h006	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:suggest.msg.h007	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:suggest.msg.h008	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:suggest.msg.h009	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:suggest.msg.h010	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:suggest.msg.h011	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:suggest.msg.h012	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:suggest.msg.h013	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:suggest.msg.h014	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:suggest.msg.h015	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:suggest.msg.h016	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:suggest.msg.h017	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:suggest.msg.h018	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:suggest.msg.h019	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:suggest.msg.h020	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:suggest.msg.h021	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:suggest.msg.h036	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (readerInvalidBool)	822
+brigadier.dispatch	input:suggest.msg.h039	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (readerInvalidBool)	822
+brigadier.dispatch	input:suggest.msg.h047	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (readerInvalidBool)	822
+brigadier.dispatch	input:suggest.msg.h048	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (readerInvalidBool)	822
+brigadier.dispatch	input:suggest.msg.h049	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (readerInvalidBool)	822
+brigadier.dispatch	input:suggest.msg.h050	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:suggest.msg.h070	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:suggest.msg.h089	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:suggest.msg.h091	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:suggest.msg.h093	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:suggest.msg.h103	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:suggest.msg.s004	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:suggest.msg.s011	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:suggest.msg.s012	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:suggest.msg.s013	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:suggest.msg.s020	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (readerInvalidBool)	822
+brigadier.dispatch	input:suggest.msg.s023	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:suggest.msg.s026	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:suggest.msg.s027	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:suggest.msg.s028	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (readerInvalidBool)	822
+brigadier.dispatch	input:suggest.msg.s030	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:suggest.msg.s033	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:suggest.msg.s034	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:dedup.ambiguities	findAmbiguities passes the overlapping example inputs in example order, Paper in java.util.HashSet order	823
+brigadier.dispatch	input:dedup.msg.h000	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:dedup.msg.h001	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:dedup.msg.h002	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:dedup.sug.h003	Suggestions.create removes only adjacent duplicates, Paper dedups through a java.util.HashSet (case variants keep duplicates)	831
+brigadier.dispatch	input:dedup.msg.h011	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:dedup.sug.h012	Suggestions.create removes only adjacent duplicates, Paper dedups through a java.util.HashSet (case variants keep duplicates)	831
+brigadier.dispatch	input:dedup.sug.h018	Suggestions.create removes only adjacent duplicates, Paper dedups through a java.util.HashSet (case variants keep duplicates)	831
+brigadier.dispatch	input:dedup.msg.h023	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:dedup.msg.s007	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:dedup.msg.s008	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:dedup.msg.s009	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.ambiguities	findAmbiguities passes the overlapping example inputs in example order, Paper in java.util.HashSet order	823
+brigadier.dispatch	input:vanilla.msg.h000	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h001	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h002	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h003	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h004	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h005	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h006	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h007	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h008	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h009	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h015	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h016	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h020	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h021	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h022	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h023	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h026	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (integerTooLow)	822
+brigadier.dispatch	input:vanilla.msg.h032	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h035	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h039	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h043	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (integerTooHigh)	822
+brigadier.dispatch	input:vanilla.msg.h044	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (integerTooLow)	822
+brigadier.dispatch	input:vanilla.msg.h054	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h057	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (integerTooLow)	822
+brigadier.dispatch	input:vanilla.msg.h058	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (integerTooLow)	822
+brigadier.dispatch	input:vanilla.msg.h063	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h064	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h065	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h069	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h074	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h075	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h078	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (integerTooHigh)	822
+brigadier.dispatch	input:vanilla.msg.h079	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (integerTooLow)	822
+brigadier.dispatch	input:vanilla.msg.h081	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (integerTooHigh)	822
+brigadier.dispatch	input:vanilla.msg.h090	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h092	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h101	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h105	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h106	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h107	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h119	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h122	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h124	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h126	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h127	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h130	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h136	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h141	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (integerTooLow)	822
+brigadier.dispatch	input:vanilla.msg.h145	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h148	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (floatTooLow)	822
+brigadier.dispatch	input:vanilla.msg.h154	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h167	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (integerTooLow)	822
+brigadier.dispatch	input:vanilla.msg.h171	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h172	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h173	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h174	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h175	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h176	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h177	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h181	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (floatTooLow)	822
+brigadier.dispatch	input:vanilla.msg.h182	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (floatTooLow)	822
+brigadier.dispatch	input:vanilla.msg.h183	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (floatTooHigh)	822
+brigadier.dispatch	input:vanilla.msg.h185	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h186	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h191	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h192	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h193	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h197	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h200	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h206	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h208	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h209	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h216	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h218	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h219	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h224	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h226	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h227	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h228	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h229	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h230	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h243	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h249	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h251	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h253	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.h254	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.s002	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.s006	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.s010	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.s011	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.s013	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.s015	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.s017	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (integerTooLow)	822
+brigadier.dispatch	input:vanilla.msg.s019	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.s022	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+brigadier.dispatch	input:vanilla.msg.s029	exception message text: Rivet has upstream Brigadier's, Paper installs net.minecraft.commands.BrigadierExceptions (dispatcherUnknownCommand)	822
+damage.calc	input:absorb.994	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.995	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.996	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.997	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.998	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.999	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.1000	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.1001	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.1002	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.1003	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.1004	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.1005	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.1007	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.1344	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.1345	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.1346	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.1347	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.1348	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.1349	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.1350	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.1351	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.1352	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.1353	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.1354	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.1355	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.1357	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.1694	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.1695	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.1696	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.1697	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.1698	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.1699	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.1700	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.1701	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.1702	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.1703	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.1704	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.1705	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.1707	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.2044	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.2045	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.2046	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.2047	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.2048	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.2049	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.2050	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.2051	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.2052	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.2053	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.2054	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.2055	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.2057	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.2394	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.2395	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.2396	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.2397	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.2398	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.2399	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.2400	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.2401	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.2402	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.2403	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.2404	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.2405	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.2407	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.2744	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.2745	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.2746	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.2747	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.2748	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.2749	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.2750	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.2751	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.2752	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.2753	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.2754	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.2755	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.2757	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.3094	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.3095	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.3096	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.3097	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.3098	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.3099	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.3100	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.3101	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.3102	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.3103	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.3104	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.3105	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.3107	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.3444	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.3445	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.3446	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.3447	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.3448	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.3449	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.3450	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.3451	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.3452	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.3453	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.3454	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.3455	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.3457	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.3794	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.3795	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.3796	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.3797	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.3798	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.3799	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.3800	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.3801	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.3802	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.3803	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.3804	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.3805	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.3807	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.4144	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.4145	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.4146	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.4147	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.4148	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.4149	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.4150	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.4151	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.4152	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.4153	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.4154	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.4155	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.4157	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.4494	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.4495	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.4496	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.4497	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.4498	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.4499	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.4500	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.4501	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.4502	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.4503	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.4504	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.4505	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.4507	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.4844	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.4845	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.4846	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.4847	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.4848	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.4849	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.4850	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.4851	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.4852	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.4853	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.4854	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.4857	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.5194	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.5195	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.5196	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.5197	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.5198	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.5199	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.5200	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.5201	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.5202	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.5203	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.5204	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.5207	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.5544	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.5545	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.5546	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.5547	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.5548	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.5549	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.5550	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.5551	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.5552	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.5553	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.5554	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.5557	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.5894	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.5895	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.5896	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.5897	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.5898	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.5899	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.5900	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.5901	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.5902	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.5903	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.5904	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.5907	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.6594	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.6595	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.6596	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.6597	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.6598	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.6599	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.6600	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.6601	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.6602	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.6603	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.6605	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.6607	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.6949	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.6950	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.6951	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.6952	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.6953	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.6955	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+damage.calc	input:absorb.6957	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+effect	input:minecraft:speed#0	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:speed#1	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:speed#2	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:speed#3	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:speed#4	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:speed#7	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:speed#15	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:speed#63	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:speed#127	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:speed#254	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:speed#255	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:speed#2147483647	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:slowness#0	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:slowness#1	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:slowness#2	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:slowness#3	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:slowness#4	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:slowness#7	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:slowness#15	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:slowness#63	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:slowness#127	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:slowness#254	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:slowness#255	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:slowness#2147483647	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:haste#0	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:haste#1	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:haste#2	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:haste#3	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:haste#4	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:haste#7	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:haste#15	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:haste#63	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:haste#127	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:haste#254	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:haste#255	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:haste#2147483647	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:mining_fatigue#0	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:mining_fatigue#1	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:mining_fatigue#2	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:mining_fatigue#3	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:mining_fatigue#4	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:mining_fatigue#7	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:mining_fatigue#15	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:mining_fatigue#63	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:mining_fatigue#127	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:mining_fatigue#254	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:mining_fatigue#255	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:mining_fatigue#2147483647	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+scoreboard.saved_data	input:scores	packed objectives/scores/teams in Java fastutil hash order, Rivet in insertion order	818
+scoreboard.saved_data	input:teams_member_in_two	packed objectives/scores/teams in Java fastutil hash order, Rivet in insertion order	818
+scoreboard.saved_data	input:teams_duplicate_name	duplicate team name on load: Paper merges into the existing team, Rivet rejects the load	819
+scoreboard.saved_data	input:team_empty_and_filled	packed objectives/scores/teams in Java fastutil hash order, Rivet in insertion order	818
+scoreboard.saved_data	input:everything	packed objectives/scores/teams in Java fastutil hash order, Rivet in insertion order	818
+loot.roll	input:minecraft:blocks/attached_melon_stem#1	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_melon_stem#2	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_melon_stem#3	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_melon_stem#42	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_melon_stem#100	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_melon_stem#1337	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_melon_stem#4096	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_melon_stem#65537	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_melon_stem#123456789	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_melon_stem#987654321	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_melon_stem#-1	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_melon_stem#-42	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_melon_stem#9223372036854775807	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_melon_stem#-9223372036854775807	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_melon_stem#5489	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_melon_stem#31415926535	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_pumpkin_stem#1	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_pumpkin_stem#2	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_pumpkin_stem#3	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_pumpkin_stem#42	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_pumpkin_stem#100	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_pumpkin_stem#1337	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_pumpkin_stem#4096	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_pumpkin_stem#65537	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_pumpkin_stem#123456789	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_pumpkin_stem#987654321	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_pumpkin_stem#-1	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_pumpkin_stem#-42	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_pumpkin_stem#9223372036854775807	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_pumpkin_stem#-9223372036854775807	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_pumpkin_stem#5489	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_pumpkin_stem#31415926535	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/brown_mushroom_block#1	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/brown_mushroom_block#2	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/brown_mushroom_block#3	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/brown_mushroom_block#1337	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/brown_mushroom_block#4096	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/brown_mushroom_block#987654321	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/brown_mushroom_block#-1	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/brown_mushroom_block#-42	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/brown_mushroom_block#9223372036854775807	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/brown_mushroom_block#-9223372036854775807	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/brown_mushroom_block#5489	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/brown_mushroom_block#31415926535	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/chorus_flower#1	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/chorus_flower#2	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/chorus_flower#3	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/chorus_flower#42	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/chorus_flower#100	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/chorus_flower#1337	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/chorus_flower#4096	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/chorus_flower#65537	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/chorus_flower#123456789	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/chorus_flower#987654321	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/chorus_flower#-1	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/chorus_flower#-42	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/chorus_flower#9223372036854775807	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/chorus_flower#-9223372036854775807	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/chorus_flower#5489	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/chorus_flower#31415926535	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/chorus_plant#4096	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/chorus_plant#987654321	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/chorus_plant#-1	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/chorus_plant#-42	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/chorus_plant#9223372036854775807	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/chorus_plant#5489	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/copper_golem_statue#1	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/copper_golem_statue#2	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/copper_golem_statue#3	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/copper_golem_statue#42	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/copper_golem_statue#100	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/copper_golem_statue#1337	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/copper_golem_statue#4096	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/copper_golem_statue#65537	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/copper_golem_statue#123456789	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/copper_golem_statue#987654321	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/copper_golem_statue#-1	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/copper_golem_statue#-42	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/copper_golem_statue#9223372036854775807	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/copper_golem_statue#-9223372036854775807	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/copper_golem_statue#5489	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/copper_golem_statue#31415926535	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/dead_bush#1	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/dead_bush#-42	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/dead_bush#-9223372036854775807	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/dead_bush#5489	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/exposed_copper_golem_statue#1	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/exposed_copper_golem_statue#2	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/exposed_copper_golem_statue#3	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/exposed_copper_golem_statue#42	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/exposed_copper_golem_statue#100	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/exposed_copper_golem_statue#1337	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/exposed_copper_golem_statue#4096	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/exposed_copper_golem_statue#65537	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/exposed_copper_golem_statue#123456789	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/exposed_copper_golem_statue#987654321	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/exposed_copper_golem_statue#-1	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/exposed_copper_golem_statue#-42	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/exposed_copper_golem_statue#9223372036854775807	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/exposed_copper_golem_statue#-9223372036854775807	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/exposed_copper_golem_statue#5489	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/exposed_copper_golem_statue#31415926535	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/large_fern#1	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/large_fern#2	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/large_fern#3	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/large_fern#42	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/large_fern#100	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/large_fern#1337	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/large_fern#4096	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/large_fern#65537	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/large_fern#123456789	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/large_fern#987654321	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/large_fern#-1	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/large_fern#-42	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/large_fern#9223372036854775807	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/large_fern#-9223372036854775807	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/large_fern#5489	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/large_fern#31415926535	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/melon_stem#1	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/melon_stem#2	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/melon_stem#3	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/melon_stem#42	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/melon_stem#100	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/melon_stem#1337	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/melon_stem#4096	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/melon_stem#65537	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/melon_stem#123456789	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/melon_stem#987654321	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/melon_stem#-1	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/melon_stem#-42	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/melon_stem#9223372036854775807	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/melon_stem#-9223372036854775807	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/melon_stem#5489	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/melon_stem#31415926535	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/oxidized_copper_golem_statue#1	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/oxidized_copper_golem_statue#2	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/oxidized_copper_golem_statue#3	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/oxidized_copper_golem_statue#42	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/oxidized_copper_golem_statue#100	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/oxidized_copper_golem_statue#1337	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/oxidized_copper_golem_statue#4096	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/oxidized_copper_golem_statue#65537	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/oxidized_copper_golem_statue#123456789	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/oxidized_copper_golem_statue#987654321	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/oxidized_copper_golem_statue#-1	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/oxidized_copper_golem_statue#-42	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/oxidized_copper_golem_statue#9223372036854775807	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/oxidized_copper_golem_statue#-9223372036854775807	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/oxidized_copper_golem_statue#5489	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/oxidized_copper_golem_statue#31415926535	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/pumpkin_stem#1	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/pumpkin_stem#2	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/pumpkin_stem#3	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/pumpkin_stem#42	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/pumpkin_stem#100	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/pumpkin_stem#1337	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/pumpkin_stem#4096	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/pumpkin_stem#65537	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/pumpkin_stem#123456789	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/pumpkin_stem#987654321	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/pumpkin_stem#-1	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/pumpkin_stem#-42	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/pumpkin_stem#9223372036854775807	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/pumpkin_stem#-9223372036854775807	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/pumpkin_stem#5489	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/pumpkin_stem#31415926535	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/red_mushroom_block#1	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/red_mushroom_block#2	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/red_mushroom_block#3	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/red_mushroom_block#1337	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/red_mushroom_block#4096	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/red_mushroom_block#987654321	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/red_mushroom_block#-1	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/red_mushroom_block#-42	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/red_mushroom_block#9223372036854775807	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/red_mushroom_block#-9223372036854775807	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/red_mushroom_block#5489	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/red_mushroom_block#31415926535	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/resin_clump#1	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/resin_clump#2	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/resin_clump#3	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/resin_clump#42	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/resin_clump#100	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/resin_clump#1337	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/resin_clump#4096	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/resin_clump#65537	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/resin_clump#123456789	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/resin_clump#987654321	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/resin_clump#-1	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/resin_clump#-42	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/resin_clump#9223372036854775807	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/resin_clump#-9223372036854775807	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/resin_clump#5489	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/resin_clump#31415926535	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/snow#1	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/snow#2	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/snow#3	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/snow#42	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/snow#100	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/snow#1337	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/snow#4096	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/snow#65537	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/snow#123456789	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/snow#987654321	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/snow#-1	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/snow#-42	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/snow#9223372036854775807	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/snow#-9223372036854775807	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/snow#5489	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/snow#31415926535	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/tall_grass#1	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/tall_grass#2	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/tall_grass#3	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/tall_grass#42	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/tall_grass#100	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/tall_grass#1337	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/tall_grass#4096	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/tall_grass#65537	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/tall_grass#123456789	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/tall_grass#987654321	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/tall_grass#-1	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/tall_grass#-42	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/tall_grass#9223372036854775807	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/tall_grass#-9223372036854775807	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/tall_grass#5489	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/tall_grass#31415926535	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/waxed_copper_golem_statue#1	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_copper_golem_statue#2	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_copper_golem_statue#3	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_copper_golem_statue#42	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_copper_golem_statue#100	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_copper_golem_statue#1337	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_copper_golem_statue#4096	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_copper_golem_statue#65537	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_copper_golem_statue#123456789	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_copper_golem_statue#987654321	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_copper_golem_statue#-1	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_copper_golem_statue#-42	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_copper_golem_statue#9223372036854775807	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_copper_golem_statue#-9223372036854775807	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_copper_golem_statue#5489	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_copper_golem_statue#31415926535	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_exposed_copper_golem_statue#1	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_exposed_copper_golem_statue#2	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_exposed_copper_golem_statue#3	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_exposed_copper_golem_statue#42	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_exposed_copper_golem_statue#100	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_exposed_copper_golem_statue#1337	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_exposed_copper_golem_statue#4096	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_exposed_copper_golem_statue#65537	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_exposed_copper_golem_statue#123456789	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_exposed_copper_golem_statue#987654321	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_exposed_copper_golem_statue#-1	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_exposed_copper_golem_statue#-42	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_exposed_copper_golem_statue#9223372036854775807	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_exposed_copper_golem_statue#-9223372036854775807	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_exposed_copper_golem_statue#5489	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_exposed_copper_golem_statue#31415926535	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_oxidized_copper_golem_statue#1	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_oxidized_copper_golem_statue#2	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_oxidized_copper_golem_statue#3	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_oxidized_copper_golem_statue#42	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_oxidized_copper_golem_statue#100	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_oxidized_copper_golem_statue#1337	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_oxidized_copper_golem_statue#4096	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_oxidized_copper_golem_statue#65537	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_oxidized_copper_golem_statue#123456789	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_oxidized_copper_golem_statue#987654321	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_oxidized_copper_golem_statue#-1	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_oxidized_copper_golem_statue#-42	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_oxidized_copper_golem_statue#9223372036854775807	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_oxidized_copper_golem_statue#-9223372036854775807	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_oxidized_copper_golem_statue#5489	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_oxidized_copper_golem_statue#31415926535	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_weathered_copper_golem_statue#1	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_weathered_copper_golem_statue#2	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_weathered_copper_golem_statue#3	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_weathered_copper_golem_statue#42	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_weathered_copper_golem_statue#100	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_weathered_copper_golem_statue#1337	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_weathered_copper_golem_statue#4096	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_weathered_copper_golem_statue#65537	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_weathered_copper_golem_statue#123456789	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_weathered_copper_golem_statue#987654321	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_weathered_copper_golem_statue#-1	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_weathered_copper_golem_statue#-42	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_weathered_copper_golem_statue#9223372036854775807	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_weathered_copper_golem_statue#-9223372036854775807	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_weathered_copper_golem_statue#5489	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_weathered_copper_golem_statue#31415926535	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/weathered_copper_golem_statue#1	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/weathered_copper_golem_statue#2	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/weathered_copper_golem_statue#3	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/weathered_copper_golem_statue#42	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/weathered_copper_golem_statue#100	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/weathered_copper_golem_statue#1337	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/weathered_copper_golem_statue#4096	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/weathered_copper_golem_statue#65537	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/weathered_copper_golem_statue#123456789	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/weathered_copper_golem_statue#987654321	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/weathered_copper_golem_statue#-1	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/weathered_copper_golem_statue#-42	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/weathered_copper_golem_statue#9223372036854775807	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/weathered_copper_golem_statue#-9223372036854775807	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/weathered_copper_golem_statue#5489	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/weathered_copper_golem_statue#31415926535	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829

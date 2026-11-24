@@ -1,0 +1,7 @@
+{"name":"suggest","commands":[
+{"literal":"sg","children":[{"argument":"word","type":{"kind":"string","mode":"word"},"suggests":["alpha","Alps","beta",{"text":"gamma","tooltip":"the third"},{"text":"Alphabet","tooltip":"long one"},"\u00e9clair"],"executes":3,"children":[{"argument":"n","type":{"kind":"integer"},"suggests":[1,5,10,{"value":100,"tooltip":"one hundred"},-3],"executes":2,"children":[{"argument":"flag","type":{"kind":"bool"},"executes":1}]}]}]},
+{"literal":"quote","children":[{"argument":"name","type":{"kind":"string","mode":"quotable"},"suggests":["foo bar","fizz","\"x\"","fo"],"executes":2,"children":[{"argument":"rest","type":{"kind":"string","mode":"greedy"},"suggests":["one two","three"],"executes":1}]}]},
+{"literal":"fruit","children":[{"literal":"apple","executes":1},{"literal":"apricot","executes":2},{"literal":"banana","executes":3},{"argument":"custom","type":{"kind":"string","mode":"word"},"suggests":["cherry","Blueberry",{"text":"banana split","tooltip":"no literal twin"}],"executes":4}]},
+{"literal":"deep","children":[{"literal":"one","children":[{"literal":"two","children":[{"argument":"v","type":{"kind":"integer"},"suggests":[7,8,9,{"value":77,"tooltip":"seventy-seven"}],"executes":1}]}]}]},
+{"literal":"dbl","children":[{"argument":"x","type":{"kind":"double"},"suggests":["1.5","-2"],"executes":2,"children":[{"argument":"y","type":{"kind":"float"},"suggests":["0.5","1"],"executes":1}]}]}
+]}

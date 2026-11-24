@@ -327,6 +327,55 @@ OP_SURFACES = {
          "net.minecraft.network.protocol.configuration.ConfigurationProtocols",
          "net.minecraft.network.protocol.login.LoginProtocols", "net.minecraft.network.protocol.status.StatusProtocols",
          "net.minecraft.network.protocol.handshake.HandshakeProtocols"]),
+    "brigadier.dispatch": (
+        # The rivet-brigadier files the op runs: the dispatcher (parse, execute, usage, suggestions,
+        # ambiguities), the command tree, the builders, the context chain, the built-in argument
+        # types, the string reader, the exceptions and the suggestion types the spec reaches.
+        # Not listed: the unit-test modules, the Dynamic3/Dynamic4/DynamicN exception types and the
+        # TagParse exception (the built-in types never raise them), and java_hash.rs (hash codes
+        # nothing in this op reads).
+        ["crates/rivet-brigadier/src/ambiguity_consumer.rs",
+         "crates/rivet-brigadier/src/arguments/bool_argument_type.rs",
+         "crates/rivet-brigadier/src/arguments/double_argument_type.rs",
+         "crates/rivet-brigadier/src/arguments/float_argument_type.rs",
+         "crates/rivet-brigadier/src/arguments/integer_argument_type.rs",
+         "crates/rivet-brigadier/src/arguments/long_argument_type.rs",
+         "crates/rivet-brigadier/src/arguments/mod.rs",
+         "crates/rivet-brigadier/src/arguments/string_argument_type.rs",
+         "crates/rivet-brigadier/src/builder/argument_builder.rs",
+         "crates/rivet-brigadier/src/builder/literal_argument_builder.rs",
+         "crates/rivet-brigadier/src/builder/required_argument_builder.rs",
+         "crates/rivet-brigadier/src/command.rs",
+         "crates/rivet-brigadier/src/command_dispatcher.rs",
+         "crates/rivet-brigadier/src/context/command_context.rs",
+         "crates/rivet-brigadier/src/context/command_context_builder.rs",
+         "crates/rivet-brigadier/src/context/context_chain.rs",
+         "crates/rivet-brigadier/src/context/parsed_argument.rs",
+         "crates/rivet-brigadier/src/context/parsed_command_node.rs",
+         "crates/rivet-brigadier/src/context/string_range.rs",
+         "crates/rivet-brigadier/src/context/suggestion_context.rs",
+         "crates/rivet-brigadier/src/exceptions/built_in_exceptions.rs",
+         "crates/rivet-brigadier/src/exceptions/command_syntax_exception.rs",
+         "crates/rivet-brigadier/src/exceptions/dynamic2_command_exception_type.rs",
+         "crates/rivet-brigadier/src/exceptions/dynamic_command_exception_type.rs",
+         "crates/rivet-brigadier/src/exceptions/simple_command_exception_type.rs",
+         "crates/rivet-brigadier/src/immutable_string_reader.rs",
+         "crates/rivet-brigadier/src/literal_message.rs",
+         "crates/rivet-brigadier/src/message.rs",
+         "crates/rivet-brigadier/src/parse_results.rs",
+         "crates/rivet-brigadier/src/redirect_modifier.rs",
+         "crates/rivet-brigadier/src/result_consumer.rs",
+         "crates/rivet-brigadier/src/single_redirect_modifier.rs",
+         "crates/rivet-brigadier/src/string_reader.rs",
+         "crates/rivet-brigadier/src/suggestion/suggestion.rs",
+         "crates/rivet-brigadier/src/suggestion/suggestion_provider.rs",
+         "crates/rivet-brigadier/src/suggestion/suggestions.rs",
+         "crates/rivet-brigadier/src/suggestion/suggestions_builder.rs",
+         "crates/rivet-brigadier/src/tree/mod.rs"],
+        ["com.mojang.brigadier.CommandDispatcher", "com.mojang.brigadier.builder.ArgumentBuilder",
+         "com.mojang.brigadier.exceptions.CommandSyntaxException", "com.mojang.brigadier.suggestion.IntegerSuggestion",
+         "com.mojang.brigadier.suggestion.Suggestion", "com.mojang.brigadier.tree.CommandNode",
+         "com.mojang.brigadier.tree.LiteralCommandNode"]),
     "codec.reencode": (
         # Files holding the ported codecs in rivet-parity's table (ops/codec.rs), plus the variant
         # files of the polymorphic roots whose variants the corpus reaches through the root codec
@@ -619,6 +668,73 @@ OP_SURFACES = {
          "net.minecraft.world.level.levelgen.structure.structures.MineshaftStructure",
          "net.minecraft.world.level.levelgen.structure.structures.BuriedTreasureStructure",
          "net.minecraft.world.level.levelgen.structure.placement.RandomSpreadStructurePlacement"]),
+    # Gameplay-data ops (VERIFICATION item 8). The globs name the files the handler's answers
+    # depend on: the recipe loader/matchers, the enchantment registry and selection helper, the
+    # mob-effect table, the scoreboard codec and load/pack paths. loot.roll answers the blocks/*
+    # tables through block/drops.rs only; trade.offers has no Rust handler yet (every input is
+    # unavailable, unavailable.tsv), so it claims no file.
+    "recipe.match": (
+        ["crates/rivet-world/src/crafting/ingredient.rs", "crates/rivet-world/src/crafting/input.rs",
+         "crates/rivet-world/src/crafting/item.rs", "crates/rivet-world/src/crafting/json.rs",
+         "crates/rivet-world/src/crafting/pattern.rs", "crates/rivet-world/src/crafting/recipe_type.rs",
+         "crates/rivet-world/src/crafting/recipes.rs", "crates/rivet-world/src/crafting/stacked_contents.rs"],
+        ["net.minecraft.world.item.crafting.Recipe", "net.minecraft.world.item.crafting.ShapedRecipe",
+         "net.minecraft.world.item.crafting.ShapelessRecipe", "net.minecraft.world.item.crafting.CookingRecipe",
+         "net.minecraft.world.item.crafting.StonecutterRecipe", "net.minecraft.world.item.crafting.SmithingRecipe",
+         "net.minecraft.world.item.crafting.TransmuteRecipe", "net.minecraft.world.item.crafting.DyeRecipe",
+         "net.minecraft.world.item.crafting.ImbueRecipe", "net.minecraft.world.item.crafting.CraftingInput",
+         "net.minecraft.world.item.crafting.Ingredient", "net.minecraft.world.item.crafting.RecipeManager"]),
+    "loot.roll": (
+        ["crates/rivet-world/src/block/drops.rs"],
+        ["net.minecraft.world.level.storage.loot.LootTable", "net.minecraft.world.level.storage.loot.LootParams",
+         "net.minecraft.world.level.storage.loot.LootContext", "net.minecraft.world.level.storage.loot.LootPool"]),
+    "enchant.select": (
+        ["crates/rivet-world/src/enchantment/definition.rs", "crates/rivet-world/src/enchantment/helper.rs",
+         "crates/rivet-world/src/enchantment/item_enchantments.rs", "crates/rivet-world/src/enchantment/registry.rs"],
+        ["net.minecraft.world.item.enchantment.EnchantmentHelper", "net.minecraft.world.item.enchantment.Enchantment",
+         "net.minecraft.world.item.enchantment.EnchantmentInstance", "net.minecraft.world.item.enchantment.Enchantable"]),
+    "effect": (
+        ["crates/rivet-world/src/effect/mob_effect.rs", "crates/rivet-world/src/effect/mod.rs"],
+        ["net.minecraft.world.effect.MobEffect", "net.minecraft.world.effect.MobEffects",
+         "net.minecraft.world.effect.MobEffectCategory"]),
+    "trade.offers": (
+        [],
+        ["net.minecraft.world.item.trading.TradeSet", "net.minecraft.world.item.trading.VillagerTrade",
+         "net.minecraft.world.item.trading.MerchantOffer", "net.minecraft.world.entity.npc.villager.AbstractVillager"]),
+    "scoreboard.saved_data": (
+        ["crates/rivet-world/src/scores/criteria.rs", "crates/rivet-world/src/scores/display_slot.rs",
+         "crates/rivet-world/src/scores/number_format.rs", "crates/rivet-world/src/scores/objective.rs",
+         "crates/rivet-world/src/scores/save_data.rs", "crates/rivet-world/src/scores/score.rs",
+         "crates/rivet-world/src/scores/scoreboard.rs", "crates/rivet-world/src/scores/server_scoreboard.rs",
+         "crates/rivet-world/src/scores/team.rs", "crates/rivet-world/src/scores/team_color.rs"],
+        ["net.minecraft.world.scores.ScoreboardSaveData", "net.minecraft.world.scores.Scoreboard",
+         "net.minecraft.world.scores.Objective", "net.minecraft.world.scores.PlayerTeam",
+         "net.minecraft.world.scores.Score"]),
+    # Pure entity ops (VERIFICATION item 9): handlers in tools/rivet-parity/src/ops/entity.rs.
+    "damage.calc": (
+        ["crates/rivet-server/src/world/damagesource/combat_rules.rs",
+         "crates/rivet-server/src/world/damagesource/damage_type.rs"],
+        ["net.minecraft.world.damagesource.CombatRules", "net.minecraft.world.damagesource.DamageType",
+         "net.minecraft.world.damagesource.DamageTypes", "net.minecraft.tags.DamageTypeTags"]),
+    "damage_source.scaling": (
+        ["crates/rivet-server/src/world/damagesource/combat_rules.rs",
+         "crates/rivet-server/src/world/damagesource/damage_source.rs",
+         "crates/rivet-server/src/world/damagesource/damage_type.rs"],
+        ["net.minecraft.world.damagesource.DamageSource", "net.minecraft.world.damagesource.DamageScaling",
+         "net.minecraft.world.entity.player.Player"]),
+    "food.exhaustion": (
+        ["crates/rivet-server/src/world/food/food_constants.rs",
+         "crates/rivet-server/src/world/food/food_data.rs",
+         "crates/rivet-server/src/world/food/food_properties.rs",
+         "crates/rivet-server/src/world/entity/player/survival/mod.rs",
+         "crates/rivet-util/src/mth.rs"],
+        ["net.minecraft.world.food.FoodData", "net.minecraft.world.food.FoodConstants",
+         "net.minecraft.world.food.FoodProperties", "net.minecraft.world.entity.player.Player"]),
+    "xp.curves": (
+        ["crates/rivet-server/src/world/entity/player/survival/experience.rs",
+         "crates/rivet-server/src/world/entity/player/survival/mod.rs",
+         "crates/rivet-util/src/mth.rs"],
+        ["net.minecraft.world.entity.player.Player", "net.minecraft.server.level.ServerPlayer"]),
 }
 
 # The worldgen sweep ops (VERIFICATION item 5): `ops live` runs their Rust handlers for these seeds
@@ -655,6 +771,8 @@ def op_rows(tracked: list[str]) -> list[dict]:
             if not is_tracked(path, tracked):
                 raise SystemExit(f"op.{op}: {path} is not tracked")
         n = count_corpus([corpus], tracked)
+        # A row whose every input is unavailable (unavailable.tsv) has nothing to tamper with.
+        negative = "n" if str(n).isdigit() and op_unavailable_counts().get(op, 0) >= int(n) else "y"
         live_n, live_fixtures = n, fixtures
         if op in WORLDGEN_OPS:
             live_n = str(len(live_corpus_ids(REPO / corpus)))
@@ -662,14 +780,14 @@ def op_rows(tracked: list[str]) -> list[dict]:
             if not is_tracked(WORLDGEN_LIVE_SEEDS, tracked):
                 raise SystemExit(f"op.{op}: {WORLDGEN_LIVE_SEEDS} is not tracked")
         rows.append({
-            "id": f"op.{op}.recorded", "layer": "L1", "tier": "T0", "negative": "y",
+            "id": f"op.{op}.recorded", "layer": "L1", "tier": "T0", "negative": negative,
             "mechanism": f"test:rivet-parity ops::tests (recorded Paper {op} vs the Rust handler, "
                          "offline; + tamper and broken-handler negatives)",
             "fixtures": fixtures, "corpus_n": n, "rust_globs": globs, "java_classes": java,
             "consumers": [], "seed_status": "UNVERIFIED",
             "note": "byte-equal canonical lines; exclusions in fixtures/ops/exclusions.tsv"})
         rows.append({
-            "id": f"op.{op}.live", "layer": "L2", "tier": "T1", "negative": "y",
+            "id": f"op.{op}.live", "layer": "L2", "tier": "T1", "negative": negative,
             "mechanism": f"op:rivet-parity ops live {op} (recorded vs live Paper, Rust vs live Paper, "
                          "+ live tamper negative; gate.sh run_oracle_ops_live)",
             "fixtures": live_fixtures, "corpus_n": live_n, "rust_globs": globs, "java_classes": java,
@@ -1356,6 +1474,19 @@ def op_excluded_ids() -> dict[str, list[str]]:
     return ids
 
 
+def op_unavailable_counts() -> dict[str, int]:
+    """Inputs the Rust handlers answer `Unported` per recorded op (unavailable.tsv; a
+    rivet-parity test pins the table to what the handlers report)."""
+    path = REPO / OPS_DIR / "unavailable.tsv"
+    counts: dict[str, int] = {}
+    if path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines()[1:]:
+            cells = line.split("\t")
+            if len(cells) == 3 and cells[1].isdigit():
+                counts[cells[0]] = counts.get(cells[0], 0) + int(cells[1])
+    return counts
+
+
 OP_ROW_RE = re.compile(r"^op\.(.+)\.(recorded|live)$")
 
 
@@ -1363,6 +1494,7 @@ def validate(text: str) -> list[str]:
     """Malformed-ledger findings for a rendered VERIFY.tsv."""
     errors = []
     excluded = op_excluded_ids()
+    unavailable_table = op_unavailable_counts()
     lines = text.splitlines()
     if not lines or lines[0].split("\t") != COLUMNS:
         return ["header does not match the VERIFY.tsv columns"]
@@ -1406,6 +1538,11 @@ def validate(text: str) -> list[str]:
                 live = set(live_corpus_ids(REPO / OPS_DIR / "corpus" / f"{op}.jsonl"))
                 ids = [i for i in ids if i in live]
             unavailable = int(r["unavailable"]) if r["unavailable"].isdigit() else 0
+            # The recorded row runs every input, so its count is exactly what unavailable.tsv
+            # (pinned to the handlers by a rivet-parity test) lists for the op.
+            if kind == "recorded" and unavailable != unavailable_table.get(op, 0):
+                errors.append(f"{r['id']}: unavailable={r['unavailable']} but unavailable.tsv lists "
+                              f"{unavailable_table.get(op, 0)} for {op}: re-record the row")
             expected = int(r["corpus_n"]) - len(ids) - unavailable
             if int(r["matched"]) != expected:
                 errors.append(f"{r['id']}: matched={r['matched']} but corpus_n={r['corpus_n']} minus "

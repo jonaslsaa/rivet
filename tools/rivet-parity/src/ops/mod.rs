@@ -28,9 +28,14 @@
 //! deliberately broken Rust handler and passes only when the comparator
 //! detects and names it.
 
+pub mod brigadier;
+pub mod brigadier_corpus;
 pub mod codec;
 pub mod codec_corpus;
 pub mod compare;
+pub mod entity;
+pub mod entity_corpus;
+pub mod gameplay;
 pub mod handlers;
 pub mod packet;
 pub mod packet_corpus;
@@ -55,10 +60,30 @@ pub fn ops_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../rivet-reference-oracle/fixtures/ops")
 }
 
-/// The Java file holding every op's source (its SHA-256 is pinned per recording).
+/// The directory holding the oracle's Java sources (its digest is pinned per recording).
 pub fn op_source() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../rivet-reference-oracle/src/RivetReferenceOracle.java")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../rivet-reference-oracle/src")
+}
+
+/// The op source digest `RivetReferenceOracle.sourceDigest` pins: the SHA-256
+/// of the `<sha256>  <file name>\n` listing of the directory's `*.java` files in
+/// name order (what `sha256sum src/*.java | sha256sum` prints).
+fn source_digest(dir: &Path) -> Result<String, String> {
+    let mut names = Vec::new();
+    for entry in fs::read_dir(dir).map_err(|e| format!("cannot list {}: {e}", dir.display()))? {
+        let name = entry.map_err(|e| e.to_string())?.file_name();
+        if name.to_string_lossy().ends_with(".java") {
+            names.push(name);
+        }
+    }
+    names.sort();
+    let mut listing = String::new();
+    for name in names {
+        let path = dir.join(&name);
+        let bytes = fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        listing += &format!("{}  {}\n", sha256_hex(&bytes), name.to_string_lossy());
+    }
+    Ok(sha256_hex(listing.as_bytes()))
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -223,14 +248,14 @@ pub fn load_fixtures(dir: &Path, op_source: &Path) -> Result<Vec<OpFixture>, Loa
             "ops manifest is not format-1 `oracle-ops`".into(),
         ));
     }
-    let source = fs::read(op_source).map_err(|e| {
+    let source = source_digest(op_source).map_err(|e| {
         LoadError::Invalid(format!(
             "cannot read op source {}: {e}",
             op_source.display()
         ))
     })?;
     let pinned_source = manifest_str(&manifest, "op_source_sha256")?;
-    if sha256_hex(&source) != pinned_source {
+    if source != pinned_source {
         return Err(LoadError::Invalid(format!(
             "op source {} changed since the ops were recorded (manifest pins {pinned_source}); re-record with `tools/rivet-reference-oracle/run.sh --record`",
             op_source.display()
@@ -384,8 +409,6 @@ pub struct OpRow {
     pub subjects: Vec<SubjectTally>,
     /// Why inputs are unavailable (the Rust side has no implementation), by reason.
     pub unavailable_reasons: std::collections::BTreeMap<String, usize>,
-    /// The unavailable inputs themselves, so the executed set can be derived.
-    pub unavailable_ids: Vec<String>,
 }
 
 /// One scoreboard subject's tally within an op row.
@@ -447,7 +470,6 @@ impl OpRow {
             "excluded": self.closure.excluded,
             "unavailable": self.closure.unavailable,
             "unavailable_reasons": self.unavailable_reasons,
-            "unavailable_ids": self.unavailable_ids,
             "negative": self.negative.as_ref().map(|v| v.to_string()),
             "negative_detected": self.negative.as_ref().is_some_and(Verdict::passed),
             "first_divergence": self.first.as_ref().map(|d| json!({
@@ -480,13 +502,6 @@ fn evaluate(
 ) -> OpRow {
     let comparison = compare::compare(&fixture.op, expected, actual, exclusions);
     let subjects = tally_subjects(&fixture.op, &fixture.corpus, &comparison);
-    let unavailable_ids = fixture
-        .corpus
-        .iter()
-        .zip(&comparison.per_input)
-        .filter(|(_, (_, verdict))| matches!(verdict, compare::InputVerdict::Unavailable))
-        .map(|(entry, _)| entry.id.clone())
-        .collect();
     let closure = Closure {
         declared: fixture.declared,
         executed: comparison.executed,
@@ -525,7 +540,6 @@ fn evaluate(
         note,
         subjects,
         unavailable_reasons: comparison.unavailable_reasons,
-        unavailable_ids,
     }
 }
 
@@ -545,8 +559,16 @@ fn no_handler_row(mode: &'static str, fixture: &OpFixture) -> OpRow {
         note: Some("no Rust handler for this op yet (recorded golden only)".into()),
         subjects: Vec::new(),
         unavailable_reasons: Default::default(),
-        unavailable_ids: Vec::new(),
     }
+}
+
+/// A Rust-vs-Paper row whose every declared input is unavailable: the surface
+/// it sweeps is not ported, so nothing was compared.
+fn fully_unported(row: &OpRow) -> bool {
+    matches!(row.mode, "check" | "live")
+        && row.closure.declared > 0
+        && row.closure.executed == 0
+        && row.closure.unavailable == row.closure.declared
 }
 
 /// Offline mode: recorded Paper answers vs the Rust handlers, no JVM.
@@ -762,7 +784,8 @@ pub fn emit_corpus() -> Result<Vec<(&'static str, String)>, String> {
         );
     }
 
-    Ok(vec![
+    let mut corpora = vec![
+        ("brigadier.dispatch", brigadier_corpus::emit()?),
         ("carver.carve", worldgen::emit_carver_corpus()),
         ("codec.reencode", codec_corpus::emit()?),
         ("component.json", component),
@@ -771,7 +794,11 @@ pub fn emit_corpus() -> Result<Vec<(&'static str, String)>, String> {
         ("packet.reencode", packet_corpus::emit()?),
         ("snbt.parse", snbt),
         ("structure.start", worldgen::emit_structure_corpus()),
-    ])
+    ];
+    corpora.extend(entity_corpus::emit());
+    corpora.extend(gameplay::emit());
+    corpora.sort_by_key(|(op, _)| *op);
+    Ok(corpora)
 }
 
 fn print_rows(rows: &[OpRow]) {
@@ -982,7 +1009,20 @@ pub fn run_cli(args: &[String]) -> i32 {
     if let Some(op) = broken {
         return broken_handler_verdict(&rows, op);
     }
-    let status = Status::combine(rows.iter().map(|row| row.status));
+    // A row whose every input is unported has nothing for the Rust side to be
+    // compared on: it stays UNVERIFIED in the ledger and in its printed row, but
+    // the missing port is not the oracle failing to run.
+    for row in rows.iter().filter(|row| fully_unported(row)) {
+        eprintln!(
+            "  UNPORTED {} ({}): all {} inputs unavailable, row stays UNVERIFIED",
+            row.op, row.mode, row.closure.declared
+        );
+    }
+    let status = Status::combine(
+        rows.iter()
+            .filter(|row| !fully_unported(row))
+            .map(|row| row.status),
+    );
     eprintln!("  STATUS: {status}");
     status.exit_code().into()
 }
@@ -1031,6 +1071,12 @@ mod tests {
         let rows = check(&light_fixtures(), &exclusions, None);
         assert!(!rows.is_empty());
         for row in &rows {
+            if fully_unported(row) {
+                // Nothing ported to compare: UNVERIFIED, with named reasons, never silent.
+                assert_eq!(row.status, Status::Unverified, "{}", row.op);
+                assert!(!row.unavailable_reasons.is_empty(), "{}", row.op);
+                continue;
+            }
             assert_row_passes(row);
         }
     }
@@ -1047,22 +1093,55 @@ mod tests {
         assert_row_passes(&rows[0]);
     }
 
+    /// A cheap sample of one worldgen op: every `stride`-th input, plus the inputs
+    /// whose id satisfies `always`. The whole-corpus replays below are the heavy
+    /// tests (the gate's release replay step); this keeps the default run honest.
+    fn replay_sample(op: &str, stride: usize, always: impl Fn(&str) -> bool) {
+        let exclusions = compare::load_exclusions(&ops_dir().join("exclusions.tsv")).unwrap();
+        let all = fixtures();
+        let fixture = all.iter().find(|f| f.op == op).unwrap();
+        let mut index = 0;
+        let sample = fixture.subset(|e| {
+            index += 1;
+            (index - 1) % stride == 0 || always(&e.id)
+        });
+        let rows = check(&[sample], &exclusions, None);
+        assert_row_passes(&rows[0]);
+    }
+
     #[test]
+    fn worldgen_ops_replay_a_sample_offline() {
+        replay_sample("feature.place", 16, |_| false);
+        replay_sample("carver.carve", 4, |_| false);
+        // The two sets with ported piece builders, for one seed (the rest answer
+        // `unported` without generating anything).
+        replay_sample("structure.start", 40, |id| {
+            id.ends_with("#42")
+                && ["buried_treasures", "mineshafts"]
+                    .iter()
+                    .any(|set| id.contains(set))
+        });
+    }
+
+    #[test]
+    #[ignore = "heavy: run via scripts/gate.sh release replay step"]
     fn feature_place_replays_offline() {
         replay_worldgen("feature.place", None);
     }
 
     #[test]
+    #[ignore = "heavy: run via scripts/gate.sh release replay step"]
     fn carver_carve_replays_offline() {
         replay_worldgen("carver.carve", None);
     }
 
-    /// One test per recorded seed, so the debug-profile replay of the heavy
-    /// op runs in parallel under nextest.
+    /// One test per recorded seed, so the replay of the heavy op runs in
+    /// parallel (heavy: ignored by default, run by the gate's release replay step).
     macro_rules! structure_start_seed_tests {
         ($($name:ident: $seed:expr,)*) => {
             $(
                 #[test]
+                #[ignore = "heavy: run via scripts/gate.sh release replay step"]
                 fn $name() {
                     replay_worldgen("structure.start", Some($seed));
                 }
@@ -1195,7 +1274,10 @@ mod tests {
             assert_eq!(first.id, fixture.corpus[0].id, "names the first input");
             assert!(!first.fields.is_empty(), "names the diverging field");
             // Only the broken op fails.
-            for other in rows.iter().filter(|r| r.op != fixture.op) {
+            for other in rows
+                .iter()
+                .filter(|r| r.op != fixture.op && !fully_unported(r))
+            {
                 assert_eq!(other.status, Status::Pass, "{}", other.op);
             }
         }
@@ -1318,7 +1400,7 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let source = scratch.path().join("RivetReferenceOracle.java");
         fs::write(&source, "// edited without re-recording\n").unwrap();
-        match load_fixtures(&ops_dir(), &source) {
+        match load_fixtures(&ops_dir(), scratch.path()) {
             Err(LoadError::Invalid(m)) => {
                 assert!(m.contains("changed since the ops were recorded"), "{m}")
             }

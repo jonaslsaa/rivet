@@ -121,7 +121,7 @@ class ValidateTest(unittest.TestCase):
     def test_unavailable_inputs_are_subtracted_like_exclusions(self):
         """An input the Rust side declined as not ported is neither matched nor mismatched."""
         excluded = len(vl.op_excluded_ids().get("codec.reencode", []))
-        ok = row(id="op.codec.reencode.recorded", corpus_n=str(1000 + excluded + 30), status="PASS",
+        ok = row(id="op.codec.reencode.live", corpus_n=str(1000 + excluded + 30), status="PASS",
                  matched="1000", mismatched="0", unavailable="30", last_verified_commit="abc")
         self.assertEqual(vl.validate(render(ok)), [])
         # The same counts without the declared unavailable inputs do not add up.
@@ -142,6 +142,39 @@ class ValidateTest(unittest.TestCase):
             self.assertIn(vl.WORLDGEN_LIVE_SEEDS, live["fixtures"])
         other = rows["op.snbt.parse.live"]
         self.assertEqual(other["corpus_n"], rows["op.snbt.parse.recorded"]["corpus_n"])
+
+
+    def test_op_row_counts_also_subtract_the_unavailable_inputs(self):
+        unavailable = vl.op_unavailable_counts().get("recipe.match", 0)
+        self.assertGreater(unavailable, 0)
+        excluded = len(vl.op_excluded_ids().get("recipe.match", []))
+        ok = row(id="op.recipe.match.recorded", corpus_n=str(1000 + unavailable + excluded), status="PASS",
+                 matched="1000", mismatched="0", unavailable=str(unavailable), last_verified_commit="abc")
+        self.assertEqual(vl.validate(render(ok)), [])
+        # Counting an unavailable input as matched is a stale row.
+        stale = dict(ok, matched=str(1000 + unavailable))
+        errs = vl.validate(render(stale))
+        self.assertTrue(any("unavailable inputs" in e and "re-record the row" in e for e in errs), errs)
+        # A recorded row's unavailable count is the table's, whatever the row claims.
+        errs = vl.validate(render(dict(ok, unavailable="1", corpus_n=str(1000 + excluded + 1))))
+        self.assertTrue(any("unavailable.tsv lists" in e for e in errs), errs)
+
+    def test_unavailable_counts_sum_the_table_per_op(self):
+        counts = vl.op_unavailable_counts()
+        rows = [ln.split("\t") for ln in
+                (vl.REPO / vl.OPS_DIR / "unavailable.tsv").read_text(encoding="utf-8").splitlines()[1:]]
+        self.assertEqual(counts["loot.roll"], sum(int(c[1]) for c in rows if c[0] == "loot.roll"))
+        self.assertEqual(counts["recipe.match"], sum(int(c[1]) for c in rows if c[0] == "recipe.match"))
+        self.assertNotIn("effect", counts)
+
+    def test_a_fully_unported_op_row_has_no_negative_control(self):
+        by_id = {r["id"]: r for r in vl.op_rows(vl.git_files())}
+        # trade.offers has no Rust handler: every input is unavailable, so there is nothing to tamper with.
+        self.assertEqual(by_id["op.trade.offers.recorded"]["negative"], "n")
+        self.assertEqual(by_id["op.trade.offers.live"]["negative"], "n")
+        # A partly answered op keeps its negative control.
+        self.assertEqual(by_id["op.loot.roll.recorded"]["negative"], "y")
+        self.assertEqual(by_id["op.effect.live"]["negative"], "y")
 
 
 class CorpusTest(unittest.TestCase):

@@ -9,7 +9,8 @@
 //! ops refuse to record a corpus that omits an entry (`corpusCheck`).
 //!
 //! The Rust handlers run only what Rivet has ported. An input whose feature,
-//! carver or structure has no Rust implementation answers
+//! carver or structure has no Rust implementation, or whose configured feature
+//! is outside the generated closure (a data-scope gap), answers
 //! [`Outcome::Unported`] with the reason (counted as `unavailable`, never as
 //! matched or silently dropped); every other divergence is a hard mismatch.
 //! The region and chunk-grid contracts are documented on the Java ops and on

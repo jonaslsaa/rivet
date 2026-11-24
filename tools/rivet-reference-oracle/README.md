@@ -32,6 +32,79 @@ The tool currently supports:
   `ProtocolInfo`, decode the hex body, re-encode and answer `{name, body}`; an
   unregistered id, a decode failure or a `DecoderException` is an input
   rejection. Paper's `GlobalConfiguration` is initialised with defaults first.
+- `brigadier.dispatch` (`BrigadierDispatchOp.java`) — `{spec, input, cursor, want}`:
+  build a `CommandDispatcher<String>` from a declarative JSON spec (literals,
+  arguments with Brigadier's built-in types and bounds, `requires` as a fixed
+  boolean, `executes` result codes, redirect/fork/forward with fixed modifiers,
+  fixed suggestion providers), then answer the requested facets for `input`:
+  `run` (parse result, execute result or exception, result-consumer calls),
+  `suggestions` (at `cursor`), `usage` (`getAllUsage`/`getSmartUsage` of the node
+  at `usage_path`) and `ambiguities` (`findAmbiguities`). Brigadier's own
+  `CommandSyntaxException`s are data in the result, so the op never rejects; the
+  message text is Paper's runtime one (`SharedConstants` installs
+  `net.minecraft.commands.BrigadierExceptions`).
+
+- `damage.calc`, `damage_source.scaling`, `food.exhaustion`, `xp.curves` — the pure
+  entity ops (VERIFICATION item 9), implemented in `src/EntityOps.java` (every `src/*.java`
+  is compiled and enters the one op source SHA-256 the manifest pins). Floats travel as
+  `0x`+8 hex digits in requests and results. `damage.calc`: `{fn:"after_absorb", damage,
+  armor, toughness}` and `{fn:"after_magic_absorb", damage, protection}` run
+  `CombatRules` (no weapon, so no victim is read), `{fn:"type", damage_type}` answers the
+  vanilla damage type definition and its tags. The other three run the real Paper
+  methods (`Player.hurtServer` scaling, `FoodData.tick/eat/addExhaustion`,
+  `ServerPlayer.giveExperiencePoints/Levels`) on entities allocated without their
+  constructor; the exact harness contract (what the level, health, events and sounds
+  answer) is the class comment of `EntityOps.java`, and the Rust twin in
+  `tools/rivet-parity/src/ops/entity.rs` reproduces it.
+
+- The gameplay-data ops (`GameplayOps.java`, `GameplayData.java`; VERIFICATION
+  section 5 item 8), each swept over the whole vanilla registry it names:
+  - `recipe.match {recipe, kind, ...}` — `Recipe.matches(input, level)` and the
+    assembled stack for one recipe of the data pack and one input (`crafting
+    {width,height,grid}`, `single {input}`, `smithing {template,base,addition}`;
+    a cell is `""` or `<item id>[#<count>]`). Answers `{match, result?, threw?}`
+    with `result = {item, count, components}` (component-patch id to its value, encoded by the component's codec under `JsonOps`, in canonical JSON).
+  - `loot.roll {table, seed, luck, entity, block}` — `LootTable.getRandomItems(params, seed)`
+    over fixed `LootParams` built from the table's own context-key set (below).
+    Answers the ordered stacks as SNBT (`items`), or `threw`.
+  - `enchant.select {kind, ...}` — `cost {enchantment, level}` (min/max cost),
+    `slot_cost {item, enchantable, slot, bookcases, seed}`
+    (`EnchantmentHelper.getEnchantmentCost`) and `select {item, enchantable, power,
+    seed}` (`selectEnchantment` over `#in_enchanting_table`). `enchantable` is the
+    stack's enchantability, an input.
+  - `effect {effect, amplifier}` — `MobEffect.createModifiers`, category and colour.
+  - `trade.offers {trade_set, merchant, variant, seed}` — the offers of a trade set
+    for a fresh merchant (the selection loops of `AbstractVillager.addOffersFrom*`
+    over `VillagerTrade.getOffer(LootContext)`), as `MerchantOffer.CODEC` SNBT.
+  - `scoreboard.saved_data {input}` — `ScoreboardSaveData.TYPE.codec()` round trip
+    and the encoding after loading into a scoreboard; compound keys sorted in the
+    canonical SNBT (D12), and one holder's `PlayerScores` entries sorted by objective
+    (Paper iterates them by `Objective` identity hash, a different order on every JVM start).
+
+  **The live-server context.** There is no running `MinecraftServer`. The reloadable
+  data (loot tables, recipes) loads the way `ReloadableServerResources` loads it
+  (`ReloadableServerRegistries.reload`, `RecipeManager.prepare`) over the vanilla
+  trusted pack repository, and the `ServerLevel` an op needs is `GameplayData.LevelShell`:
+  an unconstructed level (allocated with `Unsafe`, no constructor run) over the frozen
+  registries, with game time 0, NORMAL difficulty, Paper's world configuration populated
+  with its defaults, an empty `EnvironmentAttributeSystem` (every attribute answers its
+  default) and a server shell whose only live part is the reloadable registries. Entities
+  (`THIS_ENTITY`, the villager of a trade) are real `EntityType.create` instances in that
+  level. `loot.roll` parameters: ORIGIN (0.5, 64, 0.5); luck from the request (1.0); TOOL
+  a diamond pickaxe (`fishing`: fishing rod, `shearing`: shears, `archaeology`: brush);
+  BLOCK_STATE the default state of the request's `block`; THIS_ENTITY/TARGET_ENTITY, only
+  where the set requires them, a fresh `entity`; DAMAGE_SOURCE `generic` with no attacker.
+  No killer player, block entity or explosion radius is supplied, so `killed_by_player`
+  and the survives-explosion radius take their absent-parameter branch. The recorded
+  gaps of that shell (a roll that throws inside Paper because the level has no chunk
+  source, structure search, Bukkit server, raids or scoreboard, or an entity it cannot
+  create) are `threw` answers, listed in `rivet-parity`'s tests.
+
+  `harvest_gameplay.py` extracts the recipe documents, resolved item tags, loot table
+  ids and trade set ids from the Paper jar into `fixtures/ops/corpus-src/gameplay-data.json`
+  and the `blocks/*` loot table documents into `corpus-src/block-loot-tables.json`
+  (the Rust `loot.roll` handler evaluates those; every other table is `unavailable`);
+  the corpus generators are `rivet-parity`'s `ops/gameplay/`.
 
 - `feature.place` — `{feature, seed, region}`: place one configured feature of the
   vanilla registry into a fixed synthetic region (a 3 x 3 window of proto chunks
@@ -57,8 +130,8 @@ from the vanilla data pack in the Paper jar into `fixtures/ops/corpus-src/`; the
 script writes `worldgen-registries.json`, the key list of the configured features,
 configured carvers and structure sets the worldgen sweep covers.
 
-All ten operations live in one op registry (`OPS` in
-`RivetReferenceOracle.java`). Each op declares its result-key order (the
+All nineteen operations live in one op registry (`OPS` in
+`RivetReferenceOracle.java`; an op family may keep its handlers in its own file next to it: `EntityOps.java`, `GameplayOps.java` and `BrigadierDispatchOp.java`). Each op declares its result-key order (the
 canonical-JSON contract: results are re-emitted in exactly that order, an
 undeclared key or a raw floating-point number is an `unavailable` fault — floats
 travel as IEEE-754 bit hex via `f32Bits`/`f64Bits`, with human decimals only in
@@ -87,14 +160,15 @@ tools/rivet-reference-oracle/run.sh --record tools/rivet-reference-oracle/fixtur
 ```
 
 `cargo run -p rivet-parity -- ops check` (offline, also a cargo test) compares
-the Rust handlers with the recordings (the worldgen sweeps take about 11 minutes in
-the debug profile; the cargo tests replay them in parallel); `ops live` streams the
+the Rust handlers with the recordings (the worldgen sweeps are heavy: the default cargo tests replay a sample of each, and the
+whole-corpus replays are `#[ignore]`d tests that `scripts/gate.sh` runs in release mode with
+`--ignored --test-threads=1`); `ops live` streams the
 corpora through a live oracle and also requires Paper to still reproduce the
 recordings (the worldgen sweep ops compare Rust for the two seeds of
 `corpus-src/worldgen-live-seeds.json` only);
 `rivet-oracle regen --check --only rivet-reference-oracle` re-records into scratch twice and
-byte-diffs (see `tools/rivet-oracle/README.md`). Editing this Java file changes
-the op source SHA-256 the manifest pins, so the offline check fails until the
+byte-diffs (see `tools/rivet-oracle/README.md`). Editing any `src/*.java` file changes
+the op source SHA-256 the manifest pins (the hash covers every file of `src/` in file-name order), so the offline check fails until the
 ops are re-recorded.
 
 It compiles against `working/Paper/paper-server/build/libs/paper-server-*.jar`

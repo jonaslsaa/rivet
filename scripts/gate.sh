@@ -1252,6 +1252,23 @@ main() {
     cargo test --workspace --locked
   fi
 
+  # --- rivet-parity heavy replays (release) --------------------------------------
+  # The whole-corpus offline replays of the worldgen sweep ops (feature.place,
+  # carver.carve, structure.start per seed) and the unavailable.tsv pin run every
+  # recorded input through the Rust handlers: far too slow and memory-hungry in
+  # the debug profile, so they are `#[ignore = "heavy: ..."]` in the default test
+  # run above (which replays a sample of each op). This step runs exactly those
+  # ignored tests in release mode, on every workspace gate and every gate scoped
+  # to rivet-parity; never skipped. One test thread: peak memory is one replay's worth.
+  local GATE_PARITY=false
+  for p in ${PKGS[@]+"${PKGS[@]}"}; do
+    [ "$p" = "rivet-parity" ] && GATE_PARITY=true
+  done
+  if [ "$WORKSPACE" = true ] || [ "$GATE_PARITY" = true ]; then
+    step "rivet-parity heavy replay (release, --ignored)"
+    cargo test --release -p rivet-parity --locked -- --ignored --test-threads=1
+  fi
+
   # --- feature-gated generated registry tables (rivet-registry `blocks`) ----------
   # rivet-registry's compile-time block + static-builtin tables (src/generated)
   # and their semantic tests (block_id_tests, static_builtin_tests) live behind

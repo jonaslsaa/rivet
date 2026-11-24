@@ -211,7 +211,7 @@ One comparator, used everywhere:
 4. **Every comparator has a tamper negative** (the existing convention: `--expect-fail`, `--mutate`,
    `--tamper`). A row without a detected negative is UNVERIFIED, not PASS.
 5. **Closure is checked**: declared corpus count == executed count (+ excluded + unavailable, the inputs a
-   Rust handler declined because the thing they exercise is not ported); zero executed is UNVERIFIED. This
+   Rust handler declined because Rust has no implementation or no data for what they exercise); zero executed is UNVERIFIED. This
    is already how `rivet-parity` behaves; make it the shared library behavior in `rivet-harness-common`.
 
 ### 2.5 Nondeterminism
@@ -586,16 +586,20 @@ L = several days / multiple rounds. Ordered by risk x already-ported-unverified 
   `Structure.generate` until one is valid; `starts` lists chunk, structure and pieces (`type`, `box`, `rotation`
   and `mirror` where the piece has an orientation, `depth`), in order, without placing a block.
 - *Closure.* `declared == executed + excluded + unavailable`. The framework has a new verdict: a Rust handler
-  answers `unported` (with the reason) for an input whose feature, carver or structure Rivet has not ported; it
-  is counted `unavailable`, apart from matched and mismatched, printed by `rivet-parity ops check|live` with its
-  reasons, and `VERIFY.tsv` has a result column `unavailable` (`verify_ledger.py --check` rejects an op row whose
-  matched count is not `corpus_n` minus excluded minus unavailable). The Rust handlers only call what is already
+  answers `unported` (with the reason) for an input whose feature, carver or structure Rivet has not ported, or
+  whose registry entry is outside Rivet's generated data; it is counted `unavailable`, apart from matched and
+  mismatched, printed by `rivet-parity ops check|live` with its reasons, listed per op and reason in
+  `fixtures/ops/unavailable.tsv` (one table for every op, pinned to the handlers by a rivet-parity test), and
+  `VERIFY.tsv` has a result column `unavailable` (`verify_ledger.py --check` rejects an op row whose matched count
+  is not `corpus_n` minus excluded minus unavailable, and a recorded row whose count differs from the table). The Rust handlers only call what is already
   ported (`rivet-server`'s configured-feature registry and `WorldGenRegion`, the carvers, the structure state and
   `generate_start`); a capability the ported code refuses loudly (`not implemented`, `RivetTodo`) is `unported`,
   any other panic is a hard mismatch.
 - *Scoreboard (2026-11-24).* `feature.place`: 1,037 executed and matched, 14 excluded, 0 mismatched,
-  757 unavailable of 1,808. The unavailable inputs: 448 name one of the 56 configured features outside Rivet's
-  generated 170-entry closure, 223 reach the
+  757 unavailable of 1,808. The unavailable inputs: 448 (56 configured features) are a data-scope gap, not
+  unported feature types: those configured features are outside Rivet's codegen'd 170-entry
+  configured-feature closure (`CONFIGURED_FEATURE_BY_NAME`), although their feature types are partly ported
+  (nether ores, `spring_nether_*`, several trees); 223 reach the
   `WorldGenRegion.canSurvive` of a block state that is not ported, 70 a generated feature body that is not
   ported (`desert_well`, `fossil_*`, `large_dripstone`, `dripstone_cluster`, `rooted_azalea_tree`, the sulfur
   features), 16 the sculk spreader. 133 of the 226 features have at least one input that ran (excluded ones included). The 14 excluded
@@ -612,10 +616,11 @@ L = several days / multiple rounds. Ordered by risk x already-ported-unverified 
   profile. The live rows therefore declare 452, 8 and 40 inputs: `feature.place` 260 matched, 2 excluded,
   190 unavailable; `carver.carve` 6 matched, 2 unavailable; `structure.start` 4 matched, 36 unavailable, all with
   0 mismatched and the tamper negative detected (`VERIFY.tsv` carries the same counts and
-  `verify_ledger.py` reads the same seed file). `ops check` and the cargo tests replay all eight offline
-  (`structure.start` as eight parallel per-seed tests; the offline replay of the three ops takes about 11
-  minutes of CPU in the debug profile).
-- *Gaps.* Not ported, so unavailable: see the counts above. The region is a 3 x 3 window, not Paper's 17 x 17
+  `verify_ledger.py` reads the same seed file). `ops check` replays all eight offline; the cargo tests replay a sample of each
+  op by default, and the whole-corpus replays (`structure.start` as eight per-seed tests, `feature.place`,
+  `carver.carve`, the `unavailable.tsv` pin) are `#[ignore = "heavy: ..."]` tests that the gate's
+  `rivet-parity heavy replay (release, --ignored)` step runs with `--test-threads=1`.
+- *Gaps.* Unavailable (not ported, or outside the generated feature closure): see the counts above. The region is a 3 x 3 window, not Paper's 17 x 17
   (above). Block entities, entities and light are outside the answer. The stronghold sweep is vacuous in the
   grid. A set with any unported structure verifies none of its placement. The Rust handler generates starts in the
   overworld only (`OverworldGenerator`), so the nether and end sets are unavailable whatever their structures. Re-recording gives
@@ -626,6 +631,105 @@ L = several days / multiple rounds. Ordered by risk x already-ported-unverified 
 - Result (VERIFY.tsv `arena.*` rows): 6 PASS, 10 FAIL; the harness row PASSes (twin admission, closure, tamper negative on every trace). PASS: `lava_source_spread`, `water_decay`, `water_falling_column`, `water_infinite_source`, `water_lava_mix`, `water_source_spread`. Named first divergences: `brewing_stand_awkward`, `furnace_smelt`, `hopper_transfer` and `spawner_idle_seeded` at t=0 (block-entity capability unavailable); `fire_tick_delay_seeded` at t=0 (FireBlock.onPlace); `piston_push` at t=0 (PistonBaseBlock.neighborChanged); `water_flow_obstacles` at t=5 (TrapDoorBlock.neighborChanged); `sand_fall` at t=2 (no Rust scheduled-tick body for sand); `bubble_column_up`/`bubble_column_down` at t=20 (Block.updateShape not implemented for bubble_column).
 - Run: `cargo run -p rivet-oracle --bin rivet-arena-trace -- check [--ledger]` (offline, Rivet vs committed Paper traces) or `-- live` (two fresh Paper boots, then Rivet; needs the Paper runtime and Temurin 25, else exit 2 UNVERIFIED); `record` regenerates the traces. Both exit 0 unless the harness breaks or a ledger-PASS arena regresses. The gate step is opt-in: `RIVET_ARENA_TRACE=1 scripts/gate.sh`.
 - Still open: spawner with seeded RNG that actually spawns (needs an arena player); only site 1 (`fire_tick_delay_seeded`) and site 3 (`sand_fall`) are exercised.
+
+**Status of item 8 (items and gameplay data ops).**
+- Six ops on the item-3 framework, Java in `tools/rivet-reference-oracle/src/GameplayOps.java` and
+  `GameplayData.java`, Rust in `tools/rivet-parity/src/ops/gameplay/` (one file per op). The corpora are
+  generated from the vanilla data pack by `tools/rivet-reference-oracle/harvest_gameplay.py` into
+  `fixtures/ops/corpus-src/gameplay-data.json` (1,585 recipes, 40 item tags, 1,355 loot tables, 68 trade sets)
+  and `corpus-src/block-loot-tables.json` (the 1,113 `blocks/*` loot table documents)
+  and recorded with `run.sh --record`. Rust handlers exist only for what rivet-world already ports; nothing
+  new was ported. Inputs Rust cannot answer are `unavailable` (declared == executed + excluded +
+  unavailable, reasons in `fixtures/ops/unavailable.tsv`), never silently dropped.
+- Counts (declared / matched / excluded / unavailable):
+
+  | op | declared | matched | excluded | unavailable |
+  |---|---|---|---|---|
+  | `recipe.match` | 9,965 | 9,871 | 0 | 94 |
+  | `enchant.select` | 3,252 | 3,252 | 0 | 0 |
+  | `effect` | 520 | 472 | 48 (#817) | 0 |
+  | `scoreboard.saved_data` | 82 | 77 | 5 (#818, #819) | 0 |
+  | `loot.roll` | 21,680 | 17,502 | 306 (#825-#829) | 3,872 |
+  | `trade.offers` | 1,088 | 0 | 0 | 1,088 |
+
+- `recipe.match`: all 1,585 recipes (7,928 crafting, 1,749 single-input cooking/stonecutting and 288 smithing
+  cases) against exact, near-miss, shuffled-shapeless and mirrored-shaped grids; the result is the item, the count and
+  every component-patch entry with its value (Paper encodes it with the component's codec under `JsonOps`; both
+  sides print canonical JSON with sorted keys; Rust's component values are the JSON text of the recipe document or of
+  the assembler, e.g. the mixed `dyed_color` RGB, the `trim` material and pattern, the `suspicious_stew_effects` list).
+  All 30 `dyed_color`, 36 `trim` and 68 `suspicious_stew_effects` results match in value, not only in name. The 94 unavailable inputs are the special recipes Rust has no matcher for
+  (banner duplicate 64, firework star 5, decorated pot / book cloning / firework rocket / repair item 4 each,
+  firework star fade / map extending / shield decoration 3 each).
+- `enchant.select`: 516 enchantment cost cells (43 enchantments x levels), 864 `slot_cost` cells and 1,872
+  `select` cells (selection over levels x powers x bookcases x items x 16 seeds). Enchantability is supplied
+  as a request field because Rust has no item component table. Matches completely.
+- `effect`: 40 mob effects x 13 amplifiers. The 48 mismatches are one root cause (#817): Paper widens
+  `float`-literal modifier amounts (`0.2F`), Rivet stores the `f64` literal.
+- `scoreboard.saved_data`: `ScoreboardSaveData` codec round trip, compared in canonical SNBT with compound
+  keys sorted (D12: Java fastutil hash order vs Rivet insertion order) and, in the stored form, one holder's
+  `PlayerScores` entries sorted by objective (Paper keys a holder's scores by `Objective` identity hash, so their order
+  changes with every JVM start and cannot be recorded; the order of the holders, a function of `String.hashCode`,
+  is compared). Five documents are excluded:
+  four on packed hash order (#818) and one on a duplicate team name, which Paper merges and Rivet rejects (#819).
+- `loot.roll`: 1,355 tables x 16 seeds. Rust answers the 1,113 `blocks/*` tables (17,808 inputs) with
+  `rivet_world::block::drops::BlockLootTable` over `LegacyRandomSource(seed)`; a stack is compared as
+  `{count:N,id:"ID"}` (component values are not compared: none of the block cells carries a component in
+  Paper). 17,502 match and 306 are excluded as five root causes: #825 (`binomial` with a float `n`, the four
+  stem tables, 64 inputs), #826 (`entity_properties` condition, chorus_flower and snow, 32), #827
+  (`location_check` condition, tall_grass and large_fern, 32), #828 (Rust drops the zero-count stacks
+  `LootTable.getRandomItems` returns, brown/red mushroom block, chorus_plant, dead_bush and resin_clump, 50)
+  and #829 (`copy_state` on the eight copper golem statue tables: Rust emits the `block_state` component that
+  the item prototype already carries, 128). The other 242 tables (chests, entities, gameplay, fishing,
+  archaeology, shearing: 3,872 inputs) need loot functions, conditions and entity/level context that are not
+  ported: `unavailable`.
+- `trade.offers` is recorded from Paper but has no Rust side: `rivet_world::trading` has the trade value types
+  and the selection loop but no loader for the `villager_trade` and `trade_set` documents (nor the loot
+  context their providers read). Its ledger rows stay `UNVERIFIED` and `rivet-parity ops` prints the op as
+  UNPORTED without failing the status. The golden is there for the day that loader lands. It is the
+  vanilla `VillagerTrade.getOffer` result of Paper's selection loops, not Paper's full acquire path (that
+  also round-trips each offer through `CraftMerchantRecipe` and fires a Bukkit event, which need a running
+  server).
+- Oracle live context (no server boots): `GameplayData` loads the vanilla data pack through
+  `ReloadableServerRegistries.reload` and the recipe manager's own `prepare`, and `LevelShell` is a
+  `ServerLevel` allocated without its constructor over a proxy `ServerLevelData` (game time 0, NORMAL
+  difficulty), Paper's default `WorldConfiguration` and an empty environment-attribute system. Entities come from
+  `EntityType.create`. Loot params are fixed: origin (0.5, 64, 0.5), luck 1.0, tool diamond pickaxe (fishing rod,
+  shears or brush for the fishing, shearing and archaeology tables), the request's block default state,
+  a fresh entity only where a table requires one, generic damage source; no killer player, block entity or
+  explosion radius. Seeds are 16 fixed non-zero values. Trade offers use the plains villager variant only,
+  with the loops of `AbstractVillager.addOffersFromItemListings` (Bukkit acquire event omitted). The gameplay ops
+  run on the process's bare Bukkit state: the entity ops install a process-wide proxy `Bukkit.server`, which makes
+  `EntityType.create` throw a `ClassCastException` (proxy to `CraftServer`), so each gameplay request hides it for
+  the call and restores it, and a golden does not depend on which op family ran first. Op sources are pinned by
+  the manifest's single digest over every `src/*.java` (including `GameplayOps.java`, `GameplayData.java`).
+- Named gaps: 107 `loot.roll` cells and 48 `trade.offers` cells are recorded as `threw` because the level
+  shell lacks the surface they need (loot: `chests/shipwreck_map`, `entities/drowned`, `entities/ender_dragon`,
+  `entities/pillager`, `entities/player` and `entities/wither` for all 16 seeds, `chests/underwater_ruin_big`
+  for 7 and `chests/underwater_ruin_small` for 4; trades: `cartographer/level_2`, `level_3` and `level_5`
+  for all 16 seeds). They are answers of the oracle's level shell (no chunk source, structure search, Bukkit
+  server, raids or player entity), not Paper answers: a Rust handler for those tables needs the goldens
+  re-recorded over a fuller context first. The loot cells sit in unported tables, the trade cells in an unported op.
+- Ledger and live run (2026-11-24): `op.recipe.match`, `op.enchant.select`, `op.effect` and
+  `op.scoreboard.saved_data` and `op.loot.roll` are PASS on both the `.recorded` and `.live` rows, with the
+  matched counts of the table above; `op.trade.offers` stays `UNVERIFIED` on both. One `ops live` run against
+  Paper reproduced every recorded golden of all six ops (recorded-vs-live PASS, including the 1,088 trade
+  inputs Rust cannot answer yet).
+  `scripts/ledger_check.sh` is green.
+- Run: `cargo run -p rivet-parity -- ops check` (offline) or `-- ops live` (needs the Paper runtime);
+  `python3 tools/rivet-reference-oracle/harvest_gameplay.py` regenerates the corpus source.
+
+**Status of item 9 (entity verification, pure-op half).**
+- *Ops* (`tools/rivet-reference-oracle/src/EntityOps.java`, Rust twins in `tools/rivet-parity/src/ops/entity.rs`, corpora from `entity_corpus.rs`): `damage.calc` (`CombatRules.getDamageAfterAbsorb` over a damage x armor x toughness grid with edge floats plus 1,500 seeded fractional inputs, `getDamageAfterMagicAbsorb` over damage x protection, and the data-driven definition and tag membership of all 51 vanilla damage types), `damage_source.scaling` (`DamageSource.scalesWithDifficulty` and the real `Player.hurtServer` difficulty scaling: 51 types x 7 attacker shapes x 4 difficulties, plus damage sweeps), `food.exhaustion` (real `FoodData.tick/eat/addExhaustion` scripts over difficulty x `natural_health_regeneration` x 18 start states, edge steps and 320 seeded scripts), `xp.curves` (real `ServerPlayer` experience methods: `getXpNeededForNextLevel` over the level-overflow edges, level/point arithmetic, the level-up sound cool-down, setters, enchanting). The live-entity surfaces use entities allocated without their constructor; the exact harness contract is the class comment of `EntityOps.java` (the Rust side reproduces it).
+- *Scoreboard (2026-11-24).* `damage.calc` 10,233 declared, 10,023 executed and matched, 210 excluded; `damage_source.scaling` 1,764 of 1,764; `food.exhaustion` 518 of 518; `xp.curves` 955 of 955; 0 mismatched; recorded-vs-live and Rust-vs-live both pass on a live Paper boot. The one divergence is #816: `get_damage_after_absorb` clamps the armor fraction to [0,1] without a weapon item, Paper only clamps on the weapon path, so a negative armor total (the 210 of the 308 armor -3.0 inputs whose damage makes the fraction negative) answers more damage in Paper. Filed, not fixed; `input:` rows in `exclusions.tsv`.
+- *Unavailable (not ops, with the reason).* The Breach path of `getDamageAfterAbsorb` (a weapon item makes Paper run `EnchantmentHelper.modifyArmorEffectiveness` through a loot context built from the live victim and `ServerLevel`); `LivingEntity.getDamageAfterArmorAbsorb` and the `BYPASSES_ARMOR`/`BYPASSES_ENCHANTMENTS` branches around it (victim armor attributes and inventory); the resistance and absorption stages of `handleEntityDamage` (`apply_resistance`: active effects); negative and non-finite damage through `Player.hurtServer` (`LivingEntity.hurtServer` clamps it after the scaling; Rivet's composed `DamagePipelineState::hurt_server` clamps first and rejects zero damage, found by reading and filed as #824, so the composed path belongs to the arena half); the Bukkit event pipeline (events are never cancelled or modified in the harness).
+- *Still open (arena half).* Projectile flight, fall damage, fluid contact, knockback and the seed-injection site table need item 7 arenas and a seed contract; AI waits for movement/physics rows. The exit criterion (a V2 row per `damage`, `projectile`, `survival`, `storage`, `ai` module) is therefore met only for the damage (`combat_rules`, `damage_source`, `damage_type`) and survival (`food`, `experience`) files; `projectile`, `storage` and `ai` remain open. The four ops are in `rivet-parity ops live`.
+**Status of item 10 (`brigadier.dispatch`).**
+- *Op.* `brigadier.dispatch {spec, input, cursor, want[, usage_path]}` builds a `CommandDispatcher<String>` from a declarative JSON spec, identically in Java (`tools/rivet-reference-oracle/src/BrigadierDispatchOp.java`, Mojang Brigadier 1.3.10 plus Paper's seven patched files, as bundled with Paper 26.2) and in Rust (`tools/rivet-parity/src/ops/brigadier.rs`, over `rivet-brigadier`). Spec nodes: literals and arguments (Brigadier's built-in types only: bool, integer, long, float and double with bounds, string word / quotable / greedy), `requires` as a fixed boolean, `executes` as a fixed result code or a thrown exception, `redirect` as plain / single / fork / forward with a fixed modifier (n copies of the source, or a throwing one), and on arguments a fixed `suggests` provider (strings, integers, tooltips). Facets, one per input: `run` (reader cursor and remaining input, context node paths and ranges, parsed arguments with ranges and typed values, the per-node parse errors and the execute exception as type, cursor and input, the execute result, the result-consumer calls), `messages` (the message and raw message of every per-node parse error and of the execute exception: the wording a Minecraft-installed `BuiltInExceptionProvider` decides, kept in its own facet so a divergence in wording excludes only these inputs and never the structure in `run`), `suggestions` (`getCompletionSuggestions` at a cursor: text, range, tooltip), `usage` (`getAllUsage` unrestricted and restricted plus `getSmartUsage` for a node) and `ambiguities` (`findAmbiguities`). A `CommandSyntaxException` is data in the result (type by `BuiltInExceptionProvider` method name, cursor, input; message and raw message in `messages`), so the op never answers "rejected"; a spec the op cannot build is `unavailable`. The op source digest is now the SHA-256 of the listing of every `tools/rivet-reference-oracle/src/*.java` (so an op can live in its own file); `run.sh` compiles the directory.
+- *Corpus* (`fixtures/ops/corpus/brigadier.dispatch.jsonl`, `rivet-parity ops emit-corpus`, pinned by a test; sources in `tools/rivet-parity/brigadier-specs/`): 3,539 inputs over seven specs (`basic` 890, `vanilla` 742, `suggest` 538, `forks` 495, `ambiguous` 397, `usage` 365, `dedup` 112). `vanilla` mirrors the structure of real vanilla commands: `execute`'s redirect/fork graph (`run` redirecting to the root, `as` / `at` forking with two sources, `positioned` / `rotated` and `store result|success score` redirecting with a single-source modifier, `if` / `unless entity` and `if` / `unless score <target> <objective> (<|<=|=|>|>=) <source> <objective>` or `matches <range>` as `fork(execute, ..)` with `executes`, as vanilla's `addConditional` builds them; `if` forks to one source, `unless` to none), `tell` redirecting to `msg`, `experience` to `xp`, `teleport` to `tp`, `time`, `weather`, `xp`, `effect`, `give`, `setblock`, `scoreboard players`, `title`, `worldborder`, `tick`, `return run`, `playsound` with vanilla float bounds, op-only `stop` / `op` behind `requires: false`. `dedup` has providers that suggest one text in several letter cases (`dupes`: `x X x Ab aB ab` from one provider; `sib`: `b B` and `B b` from two sibling arguments; `mixed`: `q Q q` next to a literal `qq`). By facet: 1,192 `run`, 1,192 `messages` (the same commands as `run`), 944 `suggestions`, 204 `usage` (every node of the small specs, every root command and a few deeper nodes of `vanilla`), 7 `ambiguities` (one per spec). 1,192 distinct commands: 982 hand-written (empty and whitespace-only input, unknown literals and commands, trailing and doubled whitespace, out-of-range, boundary and malformed numbers for every number type, unclosed quotes, escapes, invalid escapes, unicode, partial input, missing and extra arguments, hidden nodes) and 210 seeded (a walk of the spec with boundary-biased values, then damaged by truncation, inserted quotes and escapes, whitespace and swaps). Suggestions are asked at the end of every hand case (every case in `ambiguous`, `suggest`, `dedup`; every second in `basic`, `forks`, `usage`; every fourth in `vanilla`), at every cursor of 17 short commands, and at the end or a random cursor of the seeded ones; the `suggest` spec's providers carry text, integer and tooltip entries (Paper-patched `IntegerSuggestion` included).
+- *Result (2026-11-24).* 3,539 declared; 3,115 executed and matched; 424 excluded; 0 mismatched; live Paper reproduces all 3,539 recorded answers, and a second record is byte-identical. Every excluded input is a filed, unfixed divergence: 418 `messages` inputs (#822: `SharedConstants` installs Minecraft's `BrigadierExceptions` in Paper, whose messages are the `en_us` lang texts; `rivet-brigadier` has upstream's: `Unknown or incomplete command. See below for error` vs `Unknown command`, `Integer must not be less than -5: found -6` vs `..., found -6`, `Expected boolean` vs `Expected bool`, `Invalid boolean: ...` and the escape text), 3 `ambiguities` inputs (`ambiguous`, `vanilla`, `dedup`) that differ in the order of the overlapping example inputs (#823: Java `HashSet` order vs example order) and 3 `suggestions` inputs of `dedup` (#831: Paper's `Suggestions.create` dedups through a `HashSet`, the port removes adjacent duplicates only, so `x X x`, `b B b` and `q Q q` keep a duplicate). Because the wording is its own facet, the parse result, argument values and ranges, reader cursor, per-node errors (type, cursor, input), execute result and exception type and cursor, consumer calls and fork counts of every one of the 1,192 commands are enforced, including every empty-input and unknown-command case; the suggestions, `getAllUsage` / `getSmartUsage` and ambiguous pairs matched on every other input (a field-level diff of all 424 showed only the wording, the order and the duplicate). The gate does not enforce the excluded facets, since an exclusion is whole-input and only requires the input to keep differing, so fixing #822, #823 and #831 is what restores them. `VERIFY.tsv`: `op.brigadier.dispatch.recorded` and `.live` (L1/L2, corpus 3,539), `rust_globs` the 38 `rivet-brigadier` files the op runs (no test modules, no directory globs).
+- *Tests.* The offline replay is `ops::tests::recorded_ops_match_rust_handlers_offline` (every op), the generic broken-handler negative covers the op, and `ops::brigadier::tests` check the corpus size and classes, tamper one leaf per facet (exact field path named: `result.run.execute.result`, `...run.execute.exception.cursor`, `result.messages.execute.message`, `...parse.cursor`, `...suggestions.list[0].text`, `...usage.all[0]`, `...ambiguities[0].inputs[0]`) and that unusable requests are `unavailable`. `rivet-parity ops live` runs the op with the others (gate.sh `run_oracle_ops_live`), including its live tamper negative.
+- *Gaps.* (1) The #822 inputs are only the `messages` facet, so the wording of the 418 divergent exceptions is not enforced until #822 is fixed; everything else about those commands is. (2) The three ambiguity inputs with non-trivial overlaps (`ambiguous`, `vanilla`, `dedup`) are excluded for #823; the compared ambiguity inputs (`usage`, `suggest`, `basic`, `forks`) find only single-example overlaps or none, so pair detection with several overlapping examples on a non-trivial tree is enforced only for the pair set (the pairs and their parents match; the order of the examples does not). (3) The `vanilla` spec uses Brigadier's built-in types only, so `execute if score ... matches <range>`, selectors, positions and the like are words, not the vanilla argument types; the tree shape is vanilla's, the argument parsers are not.
+- *Findings worth knowing.* Paper's `Suggestions.create` keeps suggestions with equal text and different tooltips in `HashSet` order, and `LiteralMessage` hashes by identity, so their order differs between JVM runs: the corpus does not contain such pairs (a spec that gives an integer or text suggestion twice with different tooltips). Which exception messages Paper shows depends on `SharedConstants` having been initialised (the oracle JVM does); a bare Brigadier on the classpath gives the upstream texts.
 
 Deferred, deliberately: GameTest runner parity (L6) rides on item 7 and issues #474/#475; Paper JUnit
 and the plugin corpus (L8) start with the adapter (#494, #504). Their ledger rows should be created now
