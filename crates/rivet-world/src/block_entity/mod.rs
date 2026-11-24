@@ -3,6 +3,7 @@
 //! identity/state transitions, not server ticking, inventories or entity AI.
 pub mod beehive_data;
 pub mod creaking_heart_data;
+pub mod processing;
 pub mod spawner_data;
 
 use beehive_data::BeehiveData;
