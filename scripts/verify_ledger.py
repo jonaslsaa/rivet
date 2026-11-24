@@ -182,6 +182,7 @@ PROBE_OUTPUTS = {
     "run_holder_readiness_probe.sh": ["holder-readiness.jsonl"],
     "run_incremental_light_probe.sh": ["incremental-light.jsonl"],
     "run_initial_spawn_probe.sh": ["initial-spawn.jsonl"],
+    "run_interaction_packets_probe.sh": ["interaction-packets.jsonl"],
     "run_lazy_block_entity_probe.sh": ["lazy-block-entity.jsonl"],
     "run_lazy_structure_point_probe.sh": ["lazy-structure-point.jsonl"],
     "run_level_ticks_probe.sh": ["level-ticks.jsonl"],
