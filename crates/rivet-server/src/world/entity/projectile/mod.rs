@@ -16,7 +16,7 @@ pub mod world_view;
 pub use arrow::{
     AbstractArrow, Arrow, Pickup, PotionContents, PotionEffect, SpectralArrow, ThrownTrident,
 };
-pub use phys::{ClipBlock, EntityUuid, HitResult};
+pub use phys::{ClipBlock, EntityUuid};
 pub use projectile::{EntityReference, ProjectileState};
 pub use projectile_deflection::ProjectileDeflection;
 pub use world_view::{

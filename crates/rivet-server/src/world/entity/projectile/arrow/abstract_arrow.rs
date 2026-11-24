@@ -21,7 +21,7 @@ use rivet_util::mth;
 use rivet_util::random::RandomSource;
 
 use crate::world::entity::entity_id::EntityId;
-use crate::world::entity::projectile::phys::{ClipBlock, HitResult, java_signum};
+use crate::world::entity::projectile::phys::{ClipBlock, java_signum};
 use crate::world::entity::projectile::projectile::ProjectileState;
 use crate::world::entity::projectile::projectile_deflection::ProjectileDeflection;
 use crate::world::entity::projectile::projectile_util;
@@ -359,10 +359,12 @@ impl AbstractArrow {
             if !self.projectile.alive {
                 break;
             }
-            let hit = HitResult::Entity(entity_hit);
-            let deflection = self
-                .projectile
-                .evaluate_deflection_or_world_border(world, &hit, true, random);
+            let deflection = self.projectile.evaluate_deflection_or_world_border(
+                world,
+                &entity_hit,
+                true,
+                random,
+            );
             if deflection != ProjectileDeflection::None {
                 deflected = true;
                 break;
@@ -370,7 +372,7 @@ impl AbstractArrow {
 
             self.projectile.set_pos(entity_hit.get_location());
             self.on_hit_entity(world, random, hooks, entity_hit);
-            self.projectile.on_hit_common(world, &hit);
+            self.projectile.on_hit_common(world, &entity_hit);
 
             if !self.projectile.alive || self.pierce_level == 0 {
                 hit_entity_stopped = true;
@@ -383,15 +385,14 @@ impl AbstractArrow {
         }
 
         if !(block_hit.get_type() == HitResultType::Miss) {
-            let hit = HitResult::Block(block_hit);
             let deflection = self
                 .projectile
-                .evaluate_deflection_or_world_border(world, &hit, true, random);
+                .evaluate_deflection_or_world_border(world, &block_hit, true, random);
             if deflection != ProjectileDeflection::None {
                 return;
             }
             self.on_hit_block(world, block_hit);
-            self.projectile.on_hit_common(world, &hit);
+            self.projectile.on_hit_common(world, &block_hit);
         } else {
             self.projectile.set_pos(target_pos);
         }

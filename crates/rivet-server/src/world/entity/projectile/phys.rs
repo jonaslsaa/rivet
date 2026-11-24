@@ -1,14 +1,11 @@
 //! No Java counterpart of its own: the projectile seam over the canonical
 //! `net.minecraft.world.phys` types (`rivet_registry::world::phys`).
 //!
-//! `Vec3`, `AABB`, `BlockHitResult`, `BlockPos` and `Direction` are the
-//! canonical definitions; what stays here is the sum type over `HitResult`'s
-//! two subclasses that the projectile code matches on, the clip-mode enum and
-//! the `UUID` int-array form.
+//! `Vec3`, `AABB`, `BlockHitResult`, `HitResultBehavior`, `BlockPos` and
+//! `Direction` are the canonical definitions; what stays here is the clip-mode
+//! enum and the `UUID` int-array form.
 
-use rivet_registry::world::phys::{AABB, BlockHitResult, HitResultBehavior, Vec3};
-
-use crate::world::phys::entity_hit_result::EntityHitResult;
+use rivet_registry::world::phys::{AABB, Vec3};
 
 /// 128-bit entity UUID stored in Minecraft's four-`i32` big-endian NBT order (`[I; a, b, c, d]`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -64,27 +61,4 @@ pub fn bounding_box_at(pos: Vec3, width: f64, height: f64) -> AABB {
         pos.y + height,
         pos.z + half,
     )
-}
-
-/// `net.minecraft.world.phys.HitResult` — the sum over its subclasses:
-/// `BlockHitResult` (`Type.MISS` or `Type.BLOCK`) and `EntityHitResult`.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum HitResult {
-    Miss(BlockHitResult),
-    Block(BlockHitResult),
-    Entity(EntityHitResult),
-}
-
-impl HitResult {
-    /// `HitResult.getLocation()`.
-    pub fn location(&self) -> Vec3 {
-        match self {
-            Self::Miss(b) | Self::Block(b) => b.get_location(),
-            Self::Entity(e) => e.get_location(),
-        }
-    }
-
-    pub fn is_miss(&self) -> bool {
-        matches!(self, Self::Miss(_))
-    }
 }

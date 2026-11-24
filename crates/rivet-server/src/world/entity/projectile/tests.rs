@@ -28,7 +28,9 @@ use super::{
     AbstractArrow, Arrow, Pickup, PotionContents, PotionEffect, SpectralArrow, ThrownTrident,
 };
 use crate::world::entity::entity_id::EntityId;
+use crate::world::phys::entity_hit_result::EntityHitResult;
 use rivet_registry::core::{BlockPos, Direction};
+use rivet_registry::world::phys::hit_result::Type as HitResultType;
 use rivet_registry::world::phys::{AABB, BlockHitResult, Vec3};
 
 /// Deterministic in-memory test world implementing `ProjectileWorld`.
@@ -326,10 +328,12 @@ fn collision_ordering_exact_tie_preserves_first_entity_in_iteration_order() {
     source.delta_movement = Vec3::new(5.0, 0.0, 0.0);
 
     let hit = projectile_util::get_hit_result_on_move_vector(&world, &source, |_| true);
-    match hit {
-        super::HitResult::Entity(e) => assert_eq!(e.get_entity(), EntityId(101)),
-        other => panic!("expected EntityHitResult for first entity, got {other:?}"),
-    }
+    assert_eq!(hit.get_type(), HitResultType::Entity);
+    let e = hit
+        .as_any()
+        .downcast_ref::<EntityHitResult>()
+        .expect("expected EntityHitResult for first entity");
+    assert_eq!(e.get_entity(), EntityId(101));
 }
 
 #[test]

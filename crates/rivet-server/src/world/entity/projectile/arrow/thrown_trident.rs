@@ -19,7 +19,7 @@ use rivet_util::random::RandomSource;
 
 use crate::world::entity::entity_id::EntityId;
 use crate::world::entity::projectile::arrow::abstract_arrow::{AbstractArrow, ArrowHooks, Pickup};
-use crate::world::entity::projectile::phys::{ClipBlock, HitResult};
+use crate::world::entity::projectile::phys::ClipBlock;
 use crate::world::entity::projectile::projectile_deflection::ProjectileDeflection;
 use crate::world::entity::projectile::projectile_util;
 use crate::world::entity::projectile::world_view::{
@@ -220,25 +220,25 @@ impl ThrownTrident {
         };
 
         if let Some(eh) = entity_hit {
-            let hit = HitResult::Entity(eh);
             let deflection = self
                 .abstract_arrow
                 .projectile
-                .evaluate_deflection_or_world_border(world, &hit, true, random);
+                .evaluate_deflection_or_world_border(world, &eh, true, random);
             if deflection == ProjectileDeflection::None {
                 self.abstract_arrow.projectile.set_pos(eh.get_location());
                 self.on_hit_entity(world, random, eh);
-                self.abstract_arrow.projectile.on_hit_common(world, &hit);
+                self.abstract_arrow.projectile.on_hit_common(world, &eh);
             }
         } else if !(block_hit.get_type() == HitResultType::Miss) {
-            let hit = HitResult::Block(block_hit);
             let deflection = self
                 .abstract_arrow
                 .projectile
-                .evaluate_deflection_or_world_border(world, &hit, true, random);
+                .evaluate_deflection_or_world_border(world, &block_hit, true, random);
             if deflection == ProjectileDeflection::None {
                 self.abstract_arrow.on_hit_block(world, block_hit);
-                self.abstract_arrow.projectile.on_hit_common(world, &hit);
+                self.abstract_arrow
+                    .projectile
+                    .on_hit_common(world, &block_hit);
             }
         } else {
             self.abstract_arrow.projectile.set_pos(target_pos);

@@ -12,7 +12,7 @@ use rivet_registry::world::phys::HitResultBehavior;
 use rivet_registry::world::phys::hit_result::Type as HitResultType;
 use rivet_util::mth;
 
-use crate::world::entity::projectile::phys::{ClipBlock, HitResult};
+use crate::world::entity::projectile::phys::ClipBlock;
 use crate::world::entity::projectile::projectile::ProjectileState;
 use crate::world::entity::projectile::world_view::{EntitySnapshot, ProjectileWorld};
 use crate::world::phys::entity_hit_result::EntityHitResult;
@@ -31,7 +31,7 @@ pub fn get_hit_result_on_move_vector<W, F>(
     world: &W,
     source: &ProjectileState,
     matching: F,
-) -> HitResult
+) -> Box<dyn HitResultBehavior>
 where
     W: ProjectileWorld,
     F: Fn(&EntitySnapshot) -> bool,
@@ -56,19 +56,17 @@ pub fn get_hit_result<W, F>(
     world: &W,
     entity_margin: f32,
     clip_block: ClipBlock,
-) -> HitResult
+) -> Box<dyn HitResultBehavior>
 where
     W: ProjectileWorld,
     F: Fn(&EntitySnapshot) -> bool,
 {
     let mut to = from.add(&delta);
     let block_hit = world.clip_including_border(from, to, clip_block, source.id);
-    let mut hit_result = if block_hit.get_type() == HitResultType::Miss {
-        HitResult::Miss(block_hit)
-    } else {
+    if block_hit.get_type() != HitResultType::Miss {
         to = block_hit.get_location();
-        HitResult::Block(block_hit)
-    };
+    }
+    let mut hit_result: Box<dyn HitResultBehavior> = Box::new(block_hit);
 
     let search_area = source.bounding_box.expand_towards(&delta).inflate(1.0);
     if let Some(entity_hit) = get_entity_hit_result(
@@ -80,7 +78,7 @@ where
         matching,
         entity_margin,
     ) {
-        hit_result = HitResult::Entity(entity_hit);
+        hit_result = Box::new(entity_hit);
     }
 
     hit_result

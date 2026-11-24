@@ -10,11 +10,12 @@ use rivet_util::mth;
 use rivet_util::random::RandomSource;
 
 use crate::world::entity::entity_id::EntityId;
-use crate::world::entity::projectile::phys::{EntityUuid, HitResult};
+use crate::world::entity::projectile::phys::EntityUuid;
 use crate::world::entity::projectile::projectile_deflection::ProjectileDeflection;
 use crate::world::entity::projectile::world_view::{
     EntitySnapshot, ProjectileGameEvent, ProjectileWorld,
 };
+use crate::world::phys::entity_hit_result::EntityHitResult;
 use rivet_registry::world::phys::AABB;
 use rivet_registry::world::phys::BlockHitResult;
 use rivet_registry::world::phys::Vec3;
@@ -317,12 +318,16 @@ impl ProjectileState {
     pub fn evaluate_deflection_or_world_border<W: ProjectileWorld, R: RandomSource>(
         &mut self,
         world: &mut W,
-        hit_result: &HitResult,
+        hit_result: &dyn HitResultBehavior,
         should_bounce_on_world_border: bool,
         random: &mut R,
     ) -> ProjectileDeflection {
-        match hit_result {
-            HitResult::Entity(entity_hit) => {
+        match hit_result.get_type() {
+            HitResultType::Entity => {
+                let entity_hit = hit_result
+                    .as_any()
+                    .downcast_ref::<EntityHitResult>()
+                    .expect("HitResult.Type.ENTITY is an EntityHitResult");
                 if let Some(target) = world.get_entity(entity_hit.get_entity())
                     && target.deflection != ProjectileDeflection::None
                 {
@@ -333,7 +338,11 @@ impl ProjectileState {
                 }
                 ProjectileDeflection::None
             }
-            HitResult::Block(block_hit) => {
+            HitResultType::Block => {
+                let block_hit = hit_result
+                    .as_any()
+                    .downcast_ref::<BlockHitResult>()
+                    .expect("HitResult.Type.BLOCK is a BlockHitResult");
                 if should_bounce_on_world_border && block_hit.is_world_border_hit() {
                     let current_owner = self.owner;
                     if self.deflect(
@@ -349,15 +358,23 @@ impl ProjectileState {
                 }
                 ProjectileDeflection::None
             }
-            HitResult::Miss(_) => ProjectileDeflection::None,
+            HitResultType::Miss => ProjectileDeflection::None,
         }
     }
 
     /// `Projectile.onHit(HitResult)` base side effects: emits `PROJECTILE_LAND`
     /// and redirects redirectable projectiles when hitting one.
-    pub fn on_hit_common<W: ProjectileWorld>(&self, world: &mut W, hit_result: &HitResult) {
-        match hit_result {
-            HitResult::Entity(entity_hit) => {
+    pub fn on_hit_common<W: ProjectileWorld>(
+        &self,
+        world: &mut W,
+        hit_result: &dyn HitResultBehavior,
+    ) {
+        match hit_result.get_type() {
+            HitResultType::Entity => {
+                let entity_hit = hit_result
+                    .as_any()
+                    .downcast_ref::<EntityHitResult>()
+                    .expect("HitResult.Type.ENTITY is an EntityHitResult");
                 if let Some(target) = world.get_entity(entity_hit.get_entity())
                     && target.is_redirectable_projectile
                 {
@@ -369,7 +386,11 @@ impl ProjectileState {
                     location: entity_hit.get_location(),
                 });
             }
-            HitResult::Block(block_hit) => {
+            HitResultType::Block => {
+                let block_hit = hit_result
+                    .as_any()
+                    .downcast_ref::<BlockHitResult>()
+                    .expect("HitResult.Type.BLOCK is a BlockHitResult");
                 let state_id = world.get_block_state_id(block_hit.get_block_pos());
                 world.emit_game_event(ProjectileGameEvent::ProjectileLandBlock {
                     projectile_id: self.id,
@@ -377,7 +398,7 @@ impl ProjectileState {
                     block_state_id: state_id,
                 });
             }
-            HitResult::Miss(_) => {}
+            HitResultType::Miss => {}
         }
     }
 
@@ -434,13 +455,4 @@ fn java_round_f32(x: f32) -> i32 {
         return 0;
     }
     (x + 0.5_f32).floor() as i32
-}
-
-/// Helper to construct a block hit result in tests or callers.
-pub fn block_hit_to_result(hit: BlockHitResult) -> HitResult {
-    if hit.get_type() == HitResultType::Miss {
-        HitResult::Miss(hit)
-    } else {
-        HitResult::Block(hit)
-    }
 }
