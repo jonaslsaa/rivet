@@ -55,7 +55,7 @@ tools/rivet-reference-oracle/run.sh --record tools/rivet-reference-oracle/fixtur
 `cargo run -p rivet-parity -- ops check` (offline, also a cargo test) compares
 the Rust handlers with the recordings; `ops live` streams the corpora through a
 live oracle and also requires Paper to still reproduce the recordings;
-`rivet-oracle regen --check --only 'run'` re-records into scratch twice and
+`rivet-oracle regen --check --only rivet-reference-oracle` re-records into scratch twice and
 byte-diffs (see `tools/rivet-oracle/README.md`). Editing this Java file changes
 the op source SHA-256 the manifest pins, so the offline check fails until the
 ops are re-recorded.

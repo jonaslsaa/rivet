@@ -72,6 +72,15 @@ pub fn snbt_parse(request: &Map<String, Value>) -> Outcome {
     }
 }
 
+/// `Base64.getDecoder()`: RFC 4648 basic alphabet, padding optional but
+/// validated when present, no whitespace tolerance, trailing bits ignored.
+const JAVA_BASE64_DECODER: base64::engine::GeneralPurpose = base64::engine::GeneralPurpose::new(
+    &base64::alphabet::STANDARD,
+    base64::engine::GeneralPurposeConfig::new()
+        .with_decode_padding_mode(base64::engine::DecodePaddingMode::Indifferent)
+        .with_decode_allow_trailing_bits(true),
+);
+
 /// `nbt.decode`: base64 -> `NbtIo.read(DataInput, NbtAccounter.create(16 MiB))`
 /// with the op's size limits and trailing-byte rejection.
 pub fn nbt_decode(request: &Map<String, Value>) -> Outcome {
@@ -79,10 +88,11 @@ pub fn nbt_decode(request: &Map<String, Value>) -> Outcome {
         Ok(input) => input,
         Err(outcome) => return outcome,
     };
-    if input.len() > MAX_BASE64_CHARS {
+    // Java compares `String.length()`, the UTF-16 length.
+    if input.encode_utf16().count() > MAX_BASE64_CHARS {
         return Outcome::Rejected;
     }
-    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(input) else {
+    let Ok(bytes) = JAVA_BASE64_DECODER.decode(input) else {
         return Outcome::Rejected;
     };
     if bytes.len() > MAX_NBT_BYTES {
@@ -126,4 +136,28 @@ pub fn component_json(request: &Map<String, Value>) -> Outcome {
         }
     }
     Outcome::Accepted(result)
+}
+
+#[cfg(test)]
+mod nbt_decode_base64_tests {
+    use super::*;
+
+    fn decode(input: &str) -> Outcome {
+        let mut request = Map::new();
+        request.insert("input_base64".into(), json!(input));
+        nbt_decode(&request)
+    }
+
+    #[test]
+    fn unpadded_input_is_accepted_like_java() {
+        // Empty root compound: TAG_Compound, empty name, TAG_End.
+        assert!(matches!(decode("CgAAAA"), Outcome::Accepted(_)));
+        assert!(matches!(decode("CgAAAA=="), Outcome::Accepted(_)));
+    }
+
+    #[test]
+    fn whitespace_and_bad_alphabet_are_rejected() {
+        assert!(matches!(decode("CgAA AA"), Outcome::Rejected));
+        assert!(matches!(decode("CgAA*A"), Outcome::Rejected));
+    }
 }

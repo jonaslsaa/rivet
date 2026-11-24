@@ -225,6 +225,8 @@ class RealTreeTest(unittest.TestCase):
                 self.assertEqual(r["seed_status"], "UNVERIFIED")
         self.assertEqual(self.rows["op.snbt.parse.recorded"]["corpus_n"], "170")
         self.assertEqual(self.rows["regen.probes"]["tier"], "T3")
+        self.assertEqual(self.rows["regen.probes"]["layer"], "L1")
+        self.assertEqual(self.rows["regen.probes"]["negative"], "y")
 
     def test_inactive_and_boot_rows_are_never_pass(self):
         self.assertEqual(self.rows["hash.diff"]["seed_status"], "INACTIVE")

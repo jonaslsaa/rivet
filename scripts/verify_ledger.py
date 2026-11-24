@@ -331,12 +331,12 @@ CURATED: list[dict] = [
     {"id": "reference.selftest", "layer": "L3", "tier": "T2", "negative": "n",
      "mechanism": "harness:tools/rivet-reference-oracle self-test", "fixtures": [], "corpus": None,
      "rust_globs": [], "java_classes": [], "note": BOOT_NOTE},
-    {"id": "regen.probes", "layer": "L3", "tier": "T3", "negative": "n",
+    {"id": "regen.probes", "layer": "L1", "tier": "T3", "negative": "y",
      "mechanism": "harness:rivet-oracle regen --check (every probes.tsv row run twice, byte-diffed against "
                   "its committed output; gate.sh --nightly run_regen_check)",
      "fixtures": [PROBES_TSV], "corpus": ("probes", None), "rust_globs": [], "java_classes": [],
      "note": BOOT_NOTE + "; proves the committed probe goldens still come out of Paper, not Rivet parity; "
-             "its drift/nondeterminism/crash detection is covered by rivet-oracle unit tests, not a per-run negative"},
+             "its drift/nondeterminism/crash/timeout negatives are automated in the rivet-oracle regen unit tests"},
     {"id": "hash.selftest", "layer": "L3", "tier": "T2", "negative": "n",
      "mechanism": "harness:rivet-oracle hash-self-check (xxh3_64 known-answer vectors, gate.sh run_oracle_hash)",
      "fixtures": [], "corpus": None, "rust_globs": [], "java_classes": [],
