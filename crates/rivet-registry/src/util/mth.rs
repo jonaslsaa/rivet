@@ -5,6 +5,11 @@
 //! mirrored path here (D15's split rule): the rest of `Mth` is
 //! `rivet_util::mth`.
 //!
+//! The twelve `rayIntersectsAABB` golden vectors that `MthGen` once held, and
+//! seeded `rayIntersectsAABB`/`lerp(double, Vec3, Vec3)` cases, are `shapes.eval`
+//! oracle inputs (`aabb.mthRayIntersects.*`, `vec3.mthLerp.*`), recorded from
+//! Paper and replayed by `rivet-parity ops check`.
+//!
 //! Java source:
 //! `working/Paper/paper-server/src/minecraft/java/net/minecraft/util/Mth.java`.
 
@@ -56,7 +61,3 @@ pub fn lerp_vec3(alpha: f64, p1: Vec3, p2: Vec3) -> Vec3 {
         lerp(alpha, p1.z, p2.z),
     )
 }
-
-#[cfg(test)]
-#[path = "golden_tests.rs"]
-mod golden_tests;

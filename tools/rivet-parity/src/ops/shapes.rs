@@ -270,6 +270,11 @@ fn vec3(request: &Map<String, Value>) -> Result<Map<String, Value>, String> {
         "reverse" => v(need_a()?.reverse()),
         "horizontal" => v(need_a()?.horizontal()),
         "lerp" => v(need_a()?.lerp(&need_b()?, s)),
+        "mthLerp" => v(rivet_registry::util::mth::lerp_vec3(
+            s,
+            need_a()?,
+            need_b()?,
+        )),
         "xRot" => v(need_a()?.x_rot(f)),
         "yRot" => v(need_a()?.y_rot(f)),
         "zRot" => v(need_a()?.z_rot(f)),
@@ -414,6 +419,11 @@ fn aabb(request: &Map<String, Value>) -> Result<Map<String, Value>, String> {
             out
         }
         "collidedAlongVector" => flag(bx.collided_along_vector(&need_v()?, &boxes_of(request)?)),
+        "mthRayIntersects" => flag(rivet_registry::util::mth::ray_intersects_aabb(
+            need_v()?,
+            need_v2()?,
+            bx,
+        )),
         "ofSize" => {
             let d = need_d()?;
             out_box(AABB::of_size(&need_v()?, d.x, d.y, d.z))

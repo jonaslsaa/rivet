@@ -212,6 +212,7 @@ fn vec3_corpus(rng: &mut Rng, out: &mut Lines) {
         ("hashCode", false, false, false),
         ("toString", false, false, false),
         ("rotation", false, false, false),
+        ("mthLerp", true, true, false),
     ];
     for &(name, uses_b, uses_s, uses_f) in FNS {
         for n in 0..24 {
@@ -306,6 +307,7 @@ fn aabb_corpus(rng: &mut Rng, out: &mut Lines) {
         "clipAll",
         "collidedAlongVector",
         "ofSize",
+        "mthRayIntersects",
     ];
     for &name in FNS {
         for n in 0..24 {
@@ -384,6 +386,41 @@ fn aabb_corpus(rng: &mut Rng, out: &mut Lines) {
             fields.insert("boxes".into(), Value::Array(boxes));
             out.push(format!("aabb.{name}.{n}"), Value::Object(fields));
         }
+    }
+    mth_ray_vectors(out);
+}
+
+/// The twelve `Mth.rayIntersectsAABB` vectors the Mth golden probe
+/// (`tools/rivet-codegen` `MthGen`) held before the member moved to
+/// `rivet_registry::util::mth` with the phys types: (start, direction, box).
+fn mth_ray_vectors(out: &mut Lines) {
+    const UNIT: [f64; 6] = [0.0, 0.0, 0.0, 2.0, 2.0, 2.0];
+    const OFFSET: [f64; 6] = [1.0, 1.0, 1.0, 3.0, 3.0, 3.0];
+    const VECTORS: [([f64; 3], [f64; 3], [f64; 6]); 12] = [
+        ([1.0, 1.0, 1.0], [0.0, 0.0, 1.0], UNIT),
+        ([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], UNIT),
+        ([5.0, 5.0, 5.0], [0.0, 0.0, 0.0], UNIT),
+        ([1.0, 1.0, 1.0], [0.0, 0.0, -1.0], UNIT),
+        ([-1.0, -1.0, -1.0], [1.0, 1.0, 1.0], UNIT),
+        ([0.0, 0.0, 0.0], [-1.0, -1.0, -1.0], UNIT),
+        ([2.0, 2.0, 2.0], [1.0, 0.0, 0.0], UNIT),
+        ([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], UNIT),
+        ([1.0, 1.0, 1.0], [1.0, 1.0, 1.0], OFFSET),
+        ([1.0, 1.0, 1.0], [0.0, 0.0, -1.0], OFFSET),
+        ([3.0, 3.0, 3.0], [-1.0, -1.0, -1.0], OFFSET),
+        ([0.5, 0.5, 0.5], [1.0, 0.0, 0.0], OFFSET),
+    ];
+    for (n, (start, direction, b)) in VECTORS.into_iter().enumerate() {
+        let mut fields = Map::new();
+        fields.insert("kind".into(), json!("aabb"));
+        fields.insert("fn".into(), json!("mthRayIntersects"));
+        fields.insert("box".into(), box_value(b));
+        fields.insert("v".into(), vec3_value(start));
+        fields.insert("v2".into(), vec3_value(direction));
+        out.push(
+            format!("aabb.mthRayIntersects.mth{n}"),
+            Value::Object(fields),
+        );
     }
 }
 

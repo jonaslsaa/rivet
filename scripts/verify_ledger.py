@@ -488,6 +488,7 @@ OP_SURFACES = {
         # VoxelShape family with its Moonrise caches, Shapes/BooleanOp/the IndexMerger family, and the
         # Java Math/Guava helpers they lean on.
         ["crates/rivet-registry/src/world/phys/**",
+         "crates/rivet-registry/src/util/mth.rs",
          "crates/rivet-world/src/phys/**",
          "crates/rivet-world/src/spottedleaf/moonrise/patches/collisions/**",
          "crates/rivet-util/src/java_math.rs",
@@ -498,7 +499,8 @@ OP_SURFACES = {
          "net.minecraft.world.phys.shapes.Shapes", "net.minecraft.world.phys.shapes.VoxelShape",
          "net.minecraft.world.phys.shapes.BooleanOp",
          "net.minecraft.world.phys.shapes.BitSetDiscreteVoxelShape",
-         "ca.spottedleaf.moonrise.patches.collisions.CollisionUtil"]),
+         "ca.spottedleaf.moonrise.patches.collisions.CollisionUtil",
+         "net.minecraft.util.Mth"]),
 }
 
 

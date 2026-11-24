@@ -1348,6 +1348,7 @@ public final class RivetReferenceOracle {
             case "reverse" -> putVec3(out, a.reverse());
             case "horizontal" -> putVec3(out, a.horizontal());
             case "lerp" -> putVec3(out, a.lerp(b, s));
+            case "mthLerp" -> putVec3(out, net.minecraft.util.Mth.lerp(s, a, b));
             case "xRot" -> putVec3(out, a.xRot(f));
             case "yRot" -> putVec3(out, a.yRot(f));
             case "zRot" -> putVec3(out, a.zRot(f));
@@ -1441,6 +1442,7 @@ public final class RivetReferenceOracle {
                 out.addProperty("b", box.collidedAlongVector(v, boxes));
             }
             case "ofSize" -> out.add("box", aabbBits(net.minecraft.world.phys.AABB.ofSize(v, d.x, d.y, d.z)));
+            case "mthRayIntersects" -> out.addProperty("b", net.minecraft.util.Mth.rayIntersectsAABB(v, v2, box));
             default -> throw new IllegalStateException("unknown aabb fn " + fn);
         }
     }
