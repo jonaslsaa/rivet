@@ -14,7 +14,9 @@ use crate::server::gametest::exception::GameTestException;
 use crate::server::gametest::game_test_batch_factory::{
     MAX_TESTS_PER_BATCH, direct_test_info, divide_into_batches,
 };
-use crate::server::gametest::game_test_info::{GameTestInfo, TestFunctionRegistry};
+use crate::server::gametest::game_test_info::{
+    GameTestInfo, GameTestTickOutcome, TestExecutionHandle, TestFunctionRegistry,
+};
 use crate::server::gametest::game_test_instance::{
     FunctionGameTestInstance, GameTestInstance, always_pass_instance_key,
 };
@@ -1581,7 +1583,7 @@ fn junit_xml_strips_illegal_xml_1_0_control_characters() {
     let xml = reporter.to_xml();
     assert!(!xml.contains('\u{0000}'), "NUL must be stripped from XML");
     assert!(!xml.contains('\u{001B}'), "ESC must be stripped from XML");
-    assert!(xml.contains("badnullesc\tand\nok"));
+    assert!(xml.contains("badnullesc&#9;and&#10;ok"));
 }
 
 #[test]
@@ -1688,4 +1690,88 @@ fn junit_xml_matches_jdk_transformer_output() {
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>\
          <testsuite><testsuite time=\"0.0\" timestamp=\"t\"/></testsuite>"
     );
+}
+
+/// Runs a single required function test whose body is `body`, ticking from
+/// level tick 1; returns the info and the outcome of the start tick.
+fn run_single_body<F>(body: F) -> (GameTestInfo, GameTestTickOutcome)
+where
+    F: Fn(&mut TestExecutionHandle) -> Result<(), GameTestException> + Send + Sync + 'static,
+{
+    let registries = build_registries_with(
+        Vec::new(),
+        vec![(
+            Identifier::with_default_namespace("order_test"),
+            fn_instance(
+                "order_fn",
+                TestEnvironmentRef::Key(default_environment_key()),
+                10,
+                0,
+                true,
+                1,
+                1,
+            ),
+        )],
+    );
+    let mut fns = TestFunctionRegistry::with_builtins();
+    fns.register(Identifier::with_default_namespace("order_fn"), body);
+    let mut info = make_info(&registries, "order_test", RetryOptions::no_retries());
+    info.set_placed(true);
+    info.set_test_block_pos(Some(BlockPos::new(0, 64, 0)));
+    info.start_execution(0, 0);
+    let outcome = info.tick(1, &fns);
+    (info, outcome)
+}
+
+#[test]
+fn succeed_then_fail_finishes_and_fails_on_the_same_tick() {
+    // Paper: `helper.succeed()` finishes immediately; the later `helper.fail(..)`
+    // throws, `startTest` records the error, and `testFailed` fires this tick.
+    let (info, outcome) = run_single_body(|h| {
+        h.succeed();
+        h.fail("after succeed");
+        Ok(())
+    });
+    assert_eq!(outcome, GameTestTickOutcome::Failed);
+    assert!(info.is_done());
+    assert_eq!(info.end_tick(), Some(1));
+    assert_eq!(
+        info.error().map(GameTestException::message).as_deref(),
+        Some("after succeed on tick 0")
+    );
+}
+
+#[test]
+fn succeed_then_returned_error_finishes_and_fails_on_the_same_tick() {
+    let (info, outcome) = run_single_body(|h| {
+        h.succeed();
+        Err(GameTestException::assert(
+            "thrown after succeed",
+            h.current_tick(),
+        ))
+    });
+    assert_eq!(outcome, GameTestTickOutcome::Failed);
+    assert!(info.is_done());
+    assert_eq!(info.end_tick(), Some(1));
+}
+
+#[test]
+fn first_fail_wins_and_later_calls_are_unreachable() {
+    // Paper's `GameTestHelper.fail(..)` throws, so the first failure is the
+    // reported one and nothing after it (succeed, more fails) runs.
+    let (mut info, outcome) = run_single_body(|h| {
+        h.fail("first");
+        h.fail("second");
+        h.succeed();
+        Err(GameTestException::assert("returned", h.current_tick()))
+    });
+    assert_eq!(outcome, GameTestTickOutcome::Running);
+    assert!(!info.is_done());
+    assert_eq!(
+        info.error().map(GameTestException::message).as_deref(),
+        Some("first on tick 0")
+    );
+    let fns = TestFunctionRegistry::with_builtins();
+    assert_eq!(info.tick(2, &fns), GameTestTickOutcome::Failed);
+    assert_eq!(info.end_tick(), Some(2));
 }

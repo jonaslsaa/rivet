@@ -282,6 +282,9 @@ fn is_valid_xml_1_0_char(ch: char) -> bool {
     )
 }
 
+/// JDK `ToStream.writeAttrString`: `& < > "` become entity refs and TAB/LF/CR
+/// become numeric char refs (`&#9;`/`&#10;`/`&#13;`) so attribute-value
+/// normalization preserves them; `'`, 0x7F-0x9F and U+2028 are written raw.
 fn escape_xml_attr(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
@@ -290,6 +293,9 @@ fn escape_xml_attr(s: &str) -> String {
             '<' => out.push_str("&lt;"),
             '>' => out.push_str("&gt;"),
             '"' => out.push_str("&quot;"),
+            '\t' => out.push_str("&#9;"),
+            '\n' => out.push_str("&#10;"),
+            '\r' => out.push_str("&#13;"),
             other if is_valid_xml_1_0_char(other) => out.push(other),
             _ => {}
         }

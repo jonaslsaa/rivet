@@ -71,6 +71,12 @@ impl TestFunctionRegistry {
 
 /// Handle passed to a running test body or tick callback (minimal subset of
 /// `GameTestHelper` needed for M3 lifecycle, timing, callbacks, and sequences).
+///
+/// Paper's `GameTestHelper.fail(..)` throws, so nothing after the first fail
+/// runs. Rust bodies keep executing after `fail`, so the first recorded
+/// failure latches the handle: later `succeed`/`fail`/scheduling calls are
+/// ignored as unreachable. A `succeed` recorded before the failure is applied
+/// first, as Paper's `testInfo.succeed()` already ran by then.
 pub struct TestExecutionHandle {
     current_tick: i32,
     succeeded: bool,
@@ -96,12 +102,17 @@ impl TestExecutionHandle {
 
     /// Paper: `GameTestHelper.succeed()` -> `testInfo.succeed()`.
     pub fn succeed(&mut self) {
-        self.succeeded = true;
+        if self.failed.is_none() {
+            self.succeeded = true;
+        }
     }
 
-    /// Paper: `GameTestHelper.fail(Component)` -> `testInfo.fail(new GameTestAssertException(msg, tick))`.
+    /// Paper: `GameTestHelper.fail(Component)` throws
+    /// `GameTestAssertException(msg, tick)`, which `startTest`/`tickInternal`
+    /// catch and pass to `testInfo.fail(..)`.
     pub fn fail(&mut self, message: impl Into<String>) {
-        self.failed = Some(GameTestException::assert(message, self.current_tick));
+        let err = GameTestException::assert(message, self.current_tick);
+        self.fail_with(err);
     }
 
     /// Paper: `GameTestHelper.fail(Component, BlockPos)`.
@@ -111,17 +122,16 @@ impl TestExecutionHandle {
         absolute_pos: BlockPos,
         relative_pos: BlockPos,
     ) {
-        self.failed = Some(GameTestException::assert_pos(
-            message,
-            absolute_pos,
-            relative_pos,
-            self.current_tick,
-        ));
+        let err =
+            GameTestException::assert_pos(message, absolute_pos, relative_pos, self.current_tick);
+        self.fail_with(err);
     }
 
-    /// Fail with an explicit `GameTestException`.
+    /// Fail with an explicit `GameTestException` (Paper: `throw error`).
     pub fn fail_with(&mut self, err: GameTestException) {
-        self.failed = Some(err);
+        if self.failed.is_none() {
+            self.failed = Some(err);
+        }
     }
 
     /// Paper: `GameTestInfo.setRunAtTickTime(long tick, Runnable)`.
@@ -129,7 +139,9 @@ impl TestExecutionHandle {
     where
         F: FnOnce(&mut TestExecutionHandle) -> Result<(), GameTestException> + 'static,
     {
-        self.scheduled.push((tick, Box::new(callback)));
+        if self.failed.is_none() {
+            self.scheduled.push((tick, Box::new(callback)));
+        }
     }
 
     /// Paper: `GameTestHelper.runAfterDelay(long delay, Runnable)`.
@@ -143,8 +155,10 @@ impl TestExecutionHandle {
     /// Paper: `GameTestHelper.startSequence()` -> `GameTestSequence(parent)` sets
     /// `lastTick = parent.getTick()`.
     pub fn add_sequence(&mut self, mut sequence: GameTestSequence) {
-        sequence.set_start_tick(self.current_tick);
-        self.sequences.push(sequence);
+        if self.failed.is_none() {
+            sequence.set_start_tick(self.current_tick);
+            self.sequences.push(sequence);
+        }
     }
 }
 
@@ -588,16 +602,14 @@ impl GameTestInfo {
         for seq in handle.sequences {
             self.sequences.push(seq);
         }
-        if let Err(err) = result {
-            self.fail(err);
-            return;
-        }
-        if let Some(err) = handle.failed {
-            self.fail(err);
-            return;
-        }
+        // A succeed recorded before any failure already ran in Paper, so it
+        // finishes the test; the first failure (handle fail, else the body's
+        // returned error) is then recorded on the same tick.
         if handle.succeeded {
             self.succeed(current_level_tick);
+        }
+        if let Some(err) = handle.failed.or_else(|| result.err()) {
+            self.fail(err);
         }
     }
 
