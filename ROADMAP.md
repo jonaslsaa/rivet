@@ -30,6 +30,8 @@ This roadmap and `docs/VERIFICATION.md` were written independently. Where they d
    `gate.sh --fast` + timings, workflow-script fixes (§5.3) → 1B canonical `world.phys` → generic
    oracle-op framework (VERIFICATION #3) → probe regen check (VERIFICATION #2) → DataConverter
    calibration wave (1D) → protocol residual (1E). At most 3 lanes plus the gate lane.
+6. **Plugin threading (D20, 2026-11-24).** P3's adapter runs plugin code on the tick thread through
+   FFM upcalls, with no separate plugin thread; it amends D6 and D11, which this plan cites.
 
 ---
 
