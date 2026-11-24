@@ -2,6 +2,7 @@ package dev.rivet.oracle;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -16,7 +17,19 @@ import java.io.DataOutputStream;
 import java.io.InputStreamReader;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.HexFormat;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.function.Predicate;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.NbtAccounter;
 import net.minecraft.nbt.NbtIo;
@@ -37,6 +50,9 @@ public final class RivetReferenceOracle {
     private static final int MAX_NBT_BYTES = 16 * 1024 * 1024;
     private static final int MAX_BASE64_CHARS = ((MAX_NBT_BYTES + 2) / 3) * 4;
     private static final Gson GSON = new GsonBuilder().disableHtmlEscaping().create();
+    private static final Gson PRETTY = new GsonBuilder().disableHtmlEscaping().setPrettyPrinting().create();
+    /** Repo-relative path of this file: every op's Java source lives here, so its SHA-256 is the op source hash. */
+    private static final String OP_SOURCE = "tools/rivet-reference-oracle/src/RivetReferenceOracle.java";
     private static final TagParser<Tag> SNBT_PARSER = TagParser.create(NbtOps.INSTANCE);
 
     /**
@@ -61,13 +77,165 @@ public final class RivetReferenceOracle {
     private RivetReferenceOracle() {
     }
 
+    // ---- op registry ------------------------------------------------------
+    //
+    // An oracle op is a named handler that runs real Paper classes on one
+    // request object. Every op declares the fixed order of its result keys
+    // (the canonical-JSON contract both sides honour) and which exception
+    // classes are input-rejection verdicts; every other exception is
+    // `unavailable` evidence, never a verdict. The same handler serves live
+    // mode (stdin/stdout JSON Lines, one JVM for any number of ops) and record
+    // mode (`--record`, corpus -> committed JSONL + manifest), so a recorded
+    // golden and a live answer can never come from different code.
+
+    /** Runs an op on one request. {@code dec} receives optional human-readable decimals for float fields. */
+    @FunctionalInterface
+    private interface Handler {
+        JsonObject run(JsonObject request, JsonObject dec) throws Exception;
+    }
+
+    private record Op(String name, List<String> resultKeys, Handler handler, Predicate<Exception> rejection) {
+    }
+
+    private static final List<String> TAG_KEYS = List.of("tag_id", "tag_type", "snbt", "pretty_snbt");
+
+    private static final Map<String, Op> OPS = registry();
+
+    private static Map<String, Op> registry() {
+        Map<String, Op> ops = new LinkedHashMap<>();
+        register(ops, new Op(
+            "ping",
+            List.of("paper_specification", "paper_implementation", "paper_commit", "paper_sha256", "java_version"),
+            (request, dec) -> ping(),
+            error -> false
+        ));
+        register(ops, new Op(
+            "snbt.parse",
+            TAG_KEYS,
+            (request, dec) -> parseSnbt(requiredString(request, "input")),
+            error -> error instanceof CommandSyntaxException
+        ));
+        register(ops, new Op(
+            "nbt.encode",
+            keys(TAG_KEYS, "bytes", "output_base64"),
+            (request, dec) -> encodeNbt(requiredString(request, "input")),
+            error -> error instanceof CommandSyntaxException
+        ));
+        register(ops, new Op(
+            "nbt.decode",
+            keys(TAG_KEYS, "bytes"),
+            (request, dec) -> decodeNbt(requiredString(request, "input_base64")),
+            RivetReferenceOracle::isNbtDecodeRejection
+        ));
+        // Component codec rejection is a successful `accept:false` result, so
+        // no exception is ever a rejection verdict for this op.
+        register(ops, new Op(
+            "component.json",
+            List.of("accept", "canonical"),
+            (request, dec) -> componentJson(requiredString(request, "input")),
+            error -> false
+        ));
+        return Collections.unmodifiableMap(ops);
+    }
+
+    private static void register(final Map<String, Op> ops, final Op op) {
+        if (ops.putIfAbsent(op.name(), op) != null) {
+            throw new IllegalStateException("duplicate op " + op.name());
+        }
+    }
+
+    private static List<String> keys(final List<String> head, final String... tail) {
+        List<String> all = new ArrayList<>(head);
+        all.addAll(List.of(tail));
+        return List.copyOf(all);
+    }
+
+    /** Run one op and return its result in the op's canonical key order. */
+    private static JsonObject execute(final Op op, final JsonObject request, final JsonObject dec) throws Exception {
+        return canonical(op, op.handler().run(request, dec));
+    }
+
+    /**
+     * Rebuild a handler result in the op's declared key order. An undeclared
+     * key, or a raw floating-point number anywhere in the result, is an
+     * infrastructure fault (unavailable), never a verdict: floats must travel
+     * as IEEE-754 bit hex (`f32Bits`/`f64Bits`) so both sides compare bytes.
+     */
+    private static JsonObject canonical(final Op op, final JsonObject result) {
+        JsonObject ordered = new JsonObject();
+        for (String key : op.resultKeys()) {
+            JsonElement value = result.get(key);
+            if (value != null) {
+                requireCanonicalValue(op.name() + "." + key, value);
+                ordered.add(key, value);
+            }
+        }
+        if (ordered.size() != result.size()) {
+            throw new IllegalStateException("op " + op.name() + " emitted undeclared result keys " + result.keySet()
+                + "; declared " + op.resultKeys());
+        }
+        return ordered;
+    }
+
+    private static void requireCanonicalValue(final String path, final JsonElement value) {
+        if (value.isJsonPrimitive() && value.getAsJsonPrimitive().isNumber()) {
+            Number number = value.getAsNumber();
+            if (number instanceof Double || number instanceof Float || number instanceof java.math.BigDecimal) {
+                throw new IllegalStateException(path + ": floating-point values must be emitted as IEEE-754 bit hex, got " + number);
+            }
+        } else if (value.isJsonArray()) {
+            int index = 0;
+            for (JsonElement element : value.getAsJsonArray()) {
+                requireCanonicalValue(path + "[" + index++ + "]", element);
+            }
+        } else if (value.isJsonObject()) {
+            for (Map.Entry<String, JsonElement> entry : value.getAsJsonObject().entrySet()) {
+                requireCanonicalValue(path + "." + entry.getKey(), entry.getValue());
+            }
+        }
+    }
+
+    /** Canonical f32: {@link Float#floatToIntBits} (NaN canonicalized, D14) as {@code 0x} + 8 lowercase hex digits. */
+    static String f32Bits(final float value) {
+        return "0x" + HexFormat.of().toHexDigits(Float.floatToIntBits(value));
+    }
+
+    /** Canonical f64: {@link Double#doubleToLongBits} (NaN canonicalized, D14) as {@code 0x} + 16 lowercase hex digits. */
+    static String f64Bits(final double value) {
+        return "0x" + HexFormat.of().toHexDigits(Double.doubleToLongBits(value));
+    }
+
+    /** Emit an f32 result field as bit hex, with its human decimal in {@code dec} (recorded, never compared). */
+    static void putF32(final JsonObject result, final JsonObject dec, final String key, final float value) {
+        result.addProperty(key, f32Bits(value));
+        dec.addProperty(key, Float.toString(value));
+    }
+
+    /** Emit an f64 result field as bit hex, with its human decimal in {@code dec} (recorded, never compared). */
+    static void putF64(final JsonObject result, final JsonObject dec, final String key, final double value) {
+        result.addProperty(key, f64Bits(value));
+        dec.addProperty(key, Double.toString(value));
+    }
+
     public static void main(final String[] args) throws Exception {
         if (args.length > 0) {
             if (args.length == 1 && args[0].equals("--self-test")) {
                 selfTest();
                 return;
             }
-            System.err.println("Usage: run.sh [--self-test]");
+            if (args.length == 3 && args[0].equals("--record")) {
+                try {
+                    record(Path.of(args[1]), Path.of(args[2]));
+                } catch (Exception error) {
+                    System.err.println("record failed: " + error);
+                    System.err.flush();
+                    // Paper class-init starts non-daemon threads; exit explicitly.
+                    System.exit(1);
+                }
+                RAW_STDOUT.flush();
+                System.exit(0);
+            }
+            System.err.println("Usage: run.sh [--self-test | --record <corpus-dir> <out-dir>]");
             System.exit(64);
         }
 
@@ -87,22 +255,140 @@ public final class RivetReferenceOracle {
     private static JsonObject processLine(final String line) {
         JsonElement id = null;
         String operation = null;
+        Op op = null;
         try {
             JsonObject request = JsonParser.parseString(line).getAsJsonObject();
             id = request.get("id");
             operation = requiredString(request, "op");
-            JsonObject result = switch (operation) {
-                case "ping" -> ping();
-                case "snbt.parse" -> parseSnbt(requiredString(request, "input"));
-                case "nbt.encode" -> encodeNbt(requiredString(request, "input"));
-                case "nbt.decode" -> decodeNbt(requiredString(request, "input_base64"));
-                case "component.json" -> componentJson(requiredString(request, "input"));
-                default -> throw new IllegalArgumentException("unknown operation: " + operation);
-            };
-            return success(id, result);
+            op = OPS.get(operation);
+            if (op == null) {
+                throw new IllegalArgumentException("unknown operation: " + operation);
+            }
+            return success(id, execute(op, request, new JsonObject()));
         } catch (Exception error) {
-            return failure(id, operation, error);
+            return failure(id, operation, op != null && op.rejection().test(error), error);
         }
+    }
+
+    // ---- record mode ------------------------------------------------------
+
+    /**
+     * Record every op corpus under {@code corpusDir} ({@code <op>.jsonl}, one
+     * {@code {"id":...,<request fields>}} object per line) through the same
+     * handlers live mode serves, writing {@code <outDir>/<op>.jsonl} plus a
+     * deterministic {@code manifest.json} (Paper pin + commit, op source
+     * SHA-256, corpus SHA-256 and count, output SHA-256 and count). Each
+     * recorded line is {@code {"id","ok":true,"result",["dec"]}} or
+     * {@code {"id","ok":false,"kind":"input_rejected","detail"}}; an input with
+     * no verdict (unavailable) aborts the recording, as does an empty corpus or
+     * a duplicate id. Re-running on an unchanged Paper must reproduce every
+     * byte; `rivet-oracle regen --check` enforces that.
+     */
+    private static void record(final Path corpusDir, final Path outDir) throws Exception {
+        List<Path> corpora;
+        try (var listing = Files.list(corpusDir)) {
+            corpora = listing.filter(path -> path.getFileName().toString().endsWith(".jsonl")).sorted().toList();
+        }
+        if (corpora.isEmpty()) {
+            throw new IllegalStateException("no <op>.jsonl corpus under " + corpusDir + "; recording nothing is not a recording");
+        }
+        Files.createDirectories(outDir);
+        JsonArray entries = new JsonArray();
+        int total = 0;
+        for (Path corpus : corpora) {
+            String fileName = corpus.getFileName().toString();
+            String opName = fileName.substring(0, fileName.length() - ".jsonl".length());
+            Op op = OPS.get(opName);
+            if (op == null) {
+                throw new IllegalStateException("corpus " + fileName + " names no registered op");
+            }
+            if (opName.equals("ping")) {
+                throw new IllegalStateException("ping is the provenance handshake, not a recordable op");
+            }
+            byte[] corpusBytes = Files.readAllBytes(corpus);
+            List<String> lines = new String(corpusBytes, StandardCharsets.UTF_8).lines().toList();
+            StringBuilder recorded = new StringBuilder();
+            Set<String> ids = new HashSet<>();
+            int count = 0;
+            for (int index = 0; index < lines.size(); index++) {
+                String line = lines.get(index);
+                String where = fileName + ":" + (index + 1);
+                if (line.isBlank()) {
+                    throw new IllegalStateException(where + ": blank corpus line");
+                }
+                JsonObject entry = JsonParser.parseString(line).getAsJsonObject();
+                String id = requiredString(entry, "id");
+                if (!ids.add(id)) {
+                    throw new IllegalStateException(where + ": duplicate input id " + id);
+                }
+                if (entry.has("op")) {
+                    throw new IllegalStateException(where + ": corpus entries must not carry `op` (the file name is the op)");
+                }
+                JsonObject request = entry.deepCopy();
+                request.addProperty("op", opName);
+                recorded.append(GSON.toJson(recordOne(op, id, request))).append('\n');
+                count++;
+            }
+            if (count == 0) {
+                throw new IllegalStateException(fileName + ": empty corpus records nothing");
+            }
+            byte[] output = recorded.toString().getBytes(StandardCharsets.UTF_8);
+            Files.write(outDir.resolve(opName + ".jsonl"), output);
+            JsonObject entry = new JsonObject();
+            entry.addProperty("op", opName);
+            entry.addProperty("corpus", "corpus/" + fileName);
+            entry.addProperty("corpus_sha256", sha256(corpusBytes));
+            entry.addProperty("corpus_n", count);
+            entry.addProperty("output", opName + ".jsonl");
+            entry.addProperty("output_sha256", sha256(output));
+            entry.addProperty("output_n", count);
+            entries.add(entry);
+            total += count;
+        }
+        JsonObject manifest = new JsonObject();
+        manifest.addProperty("format", 1);
+        manifest.addProperty("kind", "oracle-ops");
+        manifest.addProperty("paper", requiredProperty("rivet.paper.pin"));
+        manifest.addProperty("paper_commit", requiredProperty("rivet.paper.commit"));
+        manifest.addProperty("op_source", OP_SOURCE);
+        manifest.addProperty("op_source_sha256", sha256(Files.readAllBytes(Path.of(requiredProperty("rivet.oracle.source")))));
+        manifest.add("ops", entries);
+        Files.writeString(outDir.resolve("manifest.json"), PRETTY.toJson(manifest) + "\n", StandardCharsets.UTF_8);
+
+        JsonObject summary = new JsonObject();
+        summary.addProperty("ok", true);
+        summary.addProperty("ops", entries.size());
+        summary.addProperty("recorded", total);
+        RAW_STDOUT.println(GSON.toJson(summary));
+    }
+
+    private static JsonObject recordOne(final Op op, final String id, final JsonObject request) {
+        JsonObject line = new JsonObject();
+        line.addProperty("id", id);
+        JsonObject dec = new JsonObject();
+        try {
+            JsonObject result = execute(op, request, dec);
+            line.addProperty("ok", true);
+            line.add("result", result);
+            if (dec.size() > 0) {
+                line.add("dec", dec);
+            }
+        } catch (Exception error) {
+            if (!op.rejection().test(error)) {
+                throw new IllegalStateException(op.name() + " input " + id + " produced no verdict (unavailable): " + error, error);
+            }
+            line.addProperty("ok", false);
+            line.addProperty("kind", "input_rejected");
+            JsonObject detail = new JsonObject();
+            detail.addProperty("type", error.getClass().getName());
+            detail.addProperty("message", error.getMessage());
+            line.add("detail", detail);
+        }
+        return line;
+    }
+
+    private static String sha256(final byte[] bytes) throws Exception {
+        return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
     }
 
     private static JsonObject ping() {
@@ -240,27 +526,21 @@ public final class RivetReferenceOracle {
         }
     }
 
-    private static boolean isInputRejection(final String operation, final Exception error) {
-        if ("snbt.parse".equals(operation) || "nbt.encode".equals(operation)) {
-            return error instanceof CommandSyntaxException;
-        }
-        if ("nbt.decode".equals(operation)) {
-            // This operation reads only an in-memory byte array. IOException
-            // (including Paper's wrapping crash report) means malformed input,
-            // not unavailable disk/network I/O. Do not classify arbitrary
-            // runtime exceptions or arbitrary IllegalArgumentException here.
-            return error instanceof RejectedInputException
-                || error instanceof IOException
-                || error instanceof NbtAccounterException
-                || error instanceof NbtFormatException
-                || (error instanceof ReportedNbtException && error.getCause() instanceof IOException);
-        }
-        return false;
+    private static boolean isNbtDecodeRejection(final Exception error) {
+        // This operation reads only an in-memory byte array. IOException
+        // (including Paper's wrapping crash report) means malformed input,
+        // not unavailable disk/network I/O. Do not classify arbitrary
+        // runtime exceptions or arbitrary IllegalArgumentException here.
+        return error instanceof RejectedInputException
+            || error instanceof IOException
+            || error instanceof NbtAccounterException
+            || error instanceof NbtFormatException
+            || (error instanceof ReportedNbtException && error.getCause() instanceof IOException);
     }
 
-    private static JsonObject failure(final JsonElement id, final String operation, final Exception error) {
+    private static JsonObject failure(final JsonElement id, final String operation, final boolean rejected, final Exception error) {
         JsonObject details = new JsonObject();
-        details.addProperty("kind", isInputRejection(operation, error) ? "input_rejected" : "unavailable");
+        details.addProperty("kind", rejected ? "input_rejected" : "unavailable");
         details.addProperty("operation", operation);
         details.addProperty("type", error.getClass().getName());
         details.addProperty("message", error.getMessage());
@@ -332,7 +612,8 @@ public final class RivetReferenceOracle {
         }
         requireEquals("input_rejected", malformed.getAsJsonObject("error").get("kind").getAsString(), "syntax error verdict");
         requireEquals("snbt.parse", malformed.getAsJsonObject("error").get("operation").getAsString(), "syntax error operation");
-        JsonObject internal = failure(null, "snbt.parse", new NullPointerException("injected internal failure"));
+        NullPointerException injected = new NullPointerException("injected internal failure");
+        JsonObject internal = failure(null, "snbt.parse", OPS.get("snbt.parse").rejection().test(injected), injected);
         requireEquals("unavailable", internal.getAsJsonObject("error").get("kind").getAsString(), "internal error is not rejection");
         JsonObject unknown = processLine("{\"op\":\"not_an_operation\"}");
         requireEquals("unavailable", unknown.getAsJsonObject("error").get("kind").getAsString(), "unknown operation is not rejection");
@@ -347,10 +628,32 @@ public final class RivetReferenceOracle {
         // unavailable evidence rather than accepting arbitrary runtime faults.
         requireEquals("unavailable", hostile.getAsJsonObject("error").get("kind").getAsString(), "ambiguous runtime failure is unavailable");
 
+        // Registry contract: every op declares a non-empty, duplicate-free
+        // result-key order, and the canonicalizer refuses raw floats and
+        // undeclared keys instead of passing them through.
+        for (Op op : OPS.values()) {
+            if (op.resultKeys().isEmpty() || Set.copyOf(op.resultKeys()).size() != op.resultKeys().size()) {
+                throw new IllegalStateException("op " + op.name() + " has an invalid result-key order");
+            }
+        }
+        JsonObject rawFloat = new JsonObject();
+        rawFloat.addProperty("accept", 1.5d);
+        requireThrows(() -> canonical(OPS.get("component.json"), rawFloat), "raw float result");
+        JsonObject undeclared = new JsonObject();
+        undeclared.addProperty("accept", true);
+        undeclared.addProperty("extra", 1);
+        requireThrows(() -> canonical(OPS.get("component.json"), undeclared), "undeclared result key");
+        // IEEE-754 bit hex with Java's NaN canonicalization (D14).
+        requireEquals("0x3f800000", f32Bits(1.0f), "f32 bits");
+        requireEquals("0x80000000", f32Bits(-0.0f), "f32 negative zero");
+        requireEquals("0x7fc00000", f32Bits(Float.intBitsToFloat(0x7fc00001)), "f32 NaN canonical");
+        requireEquals("0x3ff0000000000000", f64Bits(1.0d), "f64 bits");
+        requireEquals("0x7ff8000000000000", f64Bits(Double.longBitsToDouble(0x7ff0000000000001L)), "f64 NaN canonical");
+
         JsonObject summary = new JsonObject();
         summary.addProperty("ok", true);
         summary.addProperty("protocol", PROTOCOL_VERSION);
-        summary.addProperty("tests", 14);
+        summary.addProperty("tests", 22);
         // Emit on the raw stream, not System.out: Bootstrap.bootStrap() has
         // re-wired System.out through log4j's SysOutOverSLF4J wrapper, so a
         // System.out.println here would surface as a `[HH:mm:ss LEVEL]: [STDOUT]:
@@ -359,6 +662,15 @@ public final class RivetReferenceOracle {
         // on the raw stream.
         RAW_STDOUT.println(GSON.toJson(summary));
         RAW_STDOUT.flush();
+    }
+
+    private static void requireThrows(final Runnable action, final String label) {
+        try {
+            action.run();
+        } catch (IllegalStateException expected) {
+            return;
+        }
+        throw new IllegalStateException(label + ": expected the canonicalizer to refuse it");
     }
 
     private static void requireSuccess(final JsonObject response, final String operation) {
