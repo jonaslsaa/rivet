@@ -40,6 +40,8 @@ pub mod handlers;
 pub mod packet;
 pub mod packet_corpus;
 pub mod packet_seeds;
+pub mod shapes;
+pub mod shapes_corpus;
 pub mod worldgen;
 
 use std::collections::BTreeSet;
@@ -792,6 +794,7 @@ pub fn emit_corpus() -> Result<Vec<(&'static str, String)>, String> {
         ("feature.place", worldgen::emit_feature_corpus()),
         ("nbt.decode", decode),
         ("packet.reencode", packet_corpus::emit()?),
+        ("shapes.eval", shapes_corpus::emit()?),
         ("snbt.parse", snbt),
         ("structure.start", worldgen::emit_structure_corpus()),
     ];

@@ -1,7 +1,9 @@
 //! Mirrors `net.minecraft.world.entity.ai.goal.LeapAtTargetGoal`.
 
-use super::context::{EntityId, GoalContext, GoalRandom, Vec3};
+use super::context::{GoalContext, GoalRandom};
 use super::goal::{Goal, GoalFlags, reduced_tick_delay};
+use crate::world::entity::entity_id::EntityId;
+use rivet_registry::world::phys::Vec3;
 
 /// Makes a mob leap horizontally and vertically toward its target when within
 /// squared distance `[4.0, 16.0]`.
@@ -31,7 +33,7 @@ impl<C: GoalContext> Goal<C> for LeapAtTargetGoal {
             return false;
         };
         self.target = Some(target.id);
-        let d = ctx.pos().distance_to_sqr(target.pos);
+        let d = ctx.pos().distance_to_sqr(&target.pos);
         if !(4.0..=16.0).contains(&d) {
             return false;
         }
@@ -53,7 +55,7 @@ impl<C: GoalContext> Goal<C> for LeapAtTargetGoal {
         let pos = ctx.pos();
         let mut delta = Vec3::new(target.pos.x - pos.x, 0.0, target.pos.z - pos.z);
         if delta.length_sqr() > 1.0e-7 {
-            delta = delta.normalize().scale(0.4) + movement.scale(0.2);
+            delta = delta.normalize().scale(0.4).add(&movement.scale(0.2));
         }
         ctx.set_delta_movement(delta.x, self.yd as f64, delta.z);
     }

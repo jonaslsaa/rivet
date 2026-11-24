@@ -1,11 +1,10 @@
 //! Mirrors `net.minecraft.world.entity.ai.goal.target.OwnerHurtByTargetGoal`.
 
-use crate::world::entity::ai::goal::context::{
-    EntityId, GoalContext, TargetReason, TargetingConditions,
-};
+use crate::world::entity::ai::goal::context::{GoalContext, TargetReason, TargetingConditions};
 use crate::world::entity::ai::goal::goal::{Goal, GoalFlags};
 
 use super::target_goal::TargetGoalState;
+use crate::world::entity::entity_id::EntityId;
 
 /// Defends a tamable mob's owner by targeting whoever last hurt the owner.
 #[derive(Debug, Clone)]

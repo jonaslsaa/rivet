@@ -12,7 +12,7 @@ use rivet_protocol::{
     },
     registry_friendly_byte_buf::RegistryFriendlyByteBuf,
 };
-use rivet_registry::{RegistryAccess, core::Vec3};
+use rivet_registry::{RegistryAccess, world::phys::Vec3};
 use rivet_util::mth::Uuid;
 use rivet_world::entity::{
     loaded_entity::NativeLoadedEntity,

@@ -5,9 +5,7 @@
 use super::SpawnerData;
 use rivet_nbt::compound_tag::CompoundTag;
 use rivet_registry::{
-    Identifier,
-    core::{BlockPos, Vec3},
-    generated::registries::ENTITY_TYPE_BY_NAME,
+    Identifier, core::BlockPos, generated::registries::ENTITY_TYPE_BY_NAME, world::phys::Vec3,
 };
 use rivet_util::RandomSource;
 

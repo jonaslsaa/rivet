@@ -21,9 +21,9 @@ pub mod use_item_goal;
 mod tests;
 
 pub use context::{
-    Aabb, BlockPos, DAMAGE_TYPE_TAG_PANIC_CAUSES, DamageTypeTagId, EntityId, EntitySnapshot,
-    EntityTypeId, EquipmentSlot, GoalContext, GoalRandom, InteractionHand, ItemStackRef,
-    PathHandle, PathNode, SoundId, TargetReason, TargetingConditions, TeamId, Vec3,
+    DAMAGE_TYPE_TAG_PANIC_CAUSES, DamageTypeTagId, EntitySnapshot, EntityTypeId, EquipmentSlot,
+    GoalContext, GoalRandom, ItemStackRef, PathHandle, PathNode, SoundId, TargetReason,
+    TargetingConditions, TeamId,
 };
 pub use float_goal::FloatGoal;
 pub use goal::{

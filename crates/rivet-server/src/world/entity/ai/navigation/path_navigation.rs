@@ -9,7 +9,8 @@
 use rivet_util::mth;
 
 use crate::world::entity::ai::control::control::MoveControl;
-use crate::world::entity::ai::goal::context::{BlockPos, GoalRandom, Vec3};
+use crate::world::entity::ai::goal::context::BlockPos;
+use crate::world::entity::ai::goal::context::GoalRandom;
 use crate::world::level::pathfinder::node_evaluator::{
     AmphibiousNodeEvaluator, FlyNodeEvaluator, NodeEvaluator, SwimNodeEvaluator, WalkNodeEvaluator,
 };
@@ -17,6 +18,7 @@ use crate::world::level::pathfinder::path::Path;
 use crate::world::level::pathfinder::path_finder::PathFinder;
 use crate::world::level::pathfinder::path_type::{PathType, PathTypeCache};
 use crate::world::level::pathfinder::world_view::{MobPathingState, PathWorldView};
+use rivet_registry::world::phys::Vec3;
 
 /// Concrete navigation variant mirroring Paper 26.2's `PathNavigation` subclasses.
 #[derive(Debug)]
@@ -847,7 +849,7 @@ impl PathNavigation {
 
         let cur = path.get_next_node_pos();
         let current_node = Vec3::new(cur.x as f64 + 0.5, cur.y as f64, cur.z as f64 + 0.5);
-        if mob_position.distance_to_sqr(current_node) >= 4.0 {
+        if mob_position.distance_to_sqr(&current_node) >= 4.0 {
             return false;
         }
 
@@ -910,7 +912,7 @@ impl PathNavigation {
             };
             let threshold_distance: f32 =
                 effective_speed * 100.0 * Self::STUCK_THRESHOLD_DISTANCE_FACTOR;
-            if mob_pos.distance_to_sqr(self.last_stuck_check_pos)
+            if mob_pos.distance_to_sqr(&self.last_stuck_check_pos)
                 < f64::from(threshold_distance * threshold_distance)
             {
                 self.is_stuck = true;
@@ -933,7 +935,7 @@ impl PathNavigation {
             } else {
                 self.timeout_cached_node = pos;
                 let node_center = Vec3::new(pos.x as f64 + 0.5, pos.y as f64, pos.z as f64 + 0.5);
-                let dist_to_node = mob_pos.distance_to_sqr(node_center).sqrt();
+                let dist_to_node = mob_pos.distance_to_sqr(&node_center).sqrt();
                 self.timeout_limit = if mob.speed > 0.0 {
                     dist_to_node / f64::from(mob.speed) * 20.0
                 } else {

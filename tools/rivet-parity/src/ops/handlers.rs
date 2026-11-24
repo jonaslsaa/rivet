@@ -44,6 +44,7 @@ pub fn handler(op: &str) -> Option<Handler> {
         "feature.place" => Some(super::worldgen::feature::feature_place),
         "carver.carve" => Some(super::worldgen::carver::carver_carve),
         "structure.start" => Some(super::worldgen::structure::structure_start),
+        "shapes.eval" => Some(super::shapes::shapes_eval),
         "brigadier.dispatch" => Some(super::brigadier::brigadier_dispatch),
         "effect" => Some(super::gameplay::effect::effect),
         "enchant.select" => Some(super::gameplay::enchant::enchant_select),
@@ -65,6 +66,7 @@ pub fn subject(op: &str, request: &Map<String, Value>) -> Option<String> {
     match op {
         "packet.reencode" => super::packet::subject_of(request),
         "codec.reencode" => super::codec::subject_of(request),
+        "shapes.eval" => super::shapes::subject_of(request),
         "brigadier.dispatch" => super::brigadier::subject_of(request),
         _ => super::gameplay::subject(op, request),
     }

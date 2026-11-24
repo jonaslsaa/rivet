@@ -11,7 +11,7 @@
 
 use crate::codec::{StreamCodec, composite_4, float, of};
 use crate::friendly_byte_buf::FriendlyByteBuf;
-use rivet_registry::core::Vec3;
+use rivet_registry::world::phys::Vec3;
 
 /// `PositionMoveRotation` — the record `(position, deltaMovement, yRot, xRot)`.
 #[derive(Debug, Clone, Copy, PartialEq)]

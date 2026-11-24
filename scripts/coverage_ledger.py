@@ -69,7 +69,7 @@ underscores removed and lower-cased, so `AABB` -> `aabb.rs`). A candidate is a
     `net.minecraft.world.level.levelgen.feature`).
 Directory and package segments are compared split on `_` as well as `/` and
 `.`, so `block_entity/` mirrors `...block.entity`. Among mirrored candidates
-the exact mount wins, then the longest suffix, then the assigned crate, then
+the assigned crate wins, then the exact mount, then the longest suffix, then
 the current crate, then the lexicographically smallest path.
 A class over 2,000 LOC may be split into a directory module (PORTING.md): when
 the home is `x.rs` with a sibling `x/` directory, or `x/mod.rs`, every
@@ -116,6 +116,8 @@ current crate is the package's majority MANIFEST.tsv `crate` (ties by name).
      effects and damage move; chunks, storage, levelgen, lighting, block-state
      tables and item value types (crafting, component) stay in rivet-world.
   4. Every other package keeps its current crate.
+  5. CLASS_CRATES overrides single classes (split classes, dependency floors);
+     SPLITS adds each split class's other half to `other_paths`.
 Class references are resolved imports (longest matching class prefix, so
 nested and static imports land on the outer class), wildcard imports and
 same-package classes matched by simple-name token, and inline fully
@@ -183,13 +185,75 @@ MOUNTS = {
     "rivet-text": [("net.minecraft.network.chat", "")],
     "rivet-brigadier": [("com.mojang.brigadier", "")],
     "rivet-registry": [("net.minecraft.core", ""), ("net.minecraft.resources", ""),
-                       ("net.minecraft.tags", "")],
+                       ("net.minecraft.tags", ""), ("net.minecraft.world", "world")],
     "rivet-protocol": [("net.minecraft.network", "")],
     "rivet-world": [("net.minecraft.world", ""), ("net.minecraft.world.level", "")],
     "rivet-server": [("net.minecraft", ""),
                      ("ca.spottedleaf.dataconverter", "server/dataconverter")],
 }
 
+
+# Class-level D15 homes that differ from the package's assignment (the
+# "split classes" exception, D15). Each is a dependency floor or a live class
+# in a package that is otherwise below the live-game crate, found by the
+# Rust crate graph, never chosen per call site:
+#   - rivet-registry: `rivet-protocol` (packets) and `rivet-registry` (`core`)
+#     use these value types and `rivet-world` depends on `rivet-protocol`, so
+#     the one definition cannot live in `rivet-world`. Their members that need a
+#     live type are `<Class>Live` extension traits in `rivet-server` at the
+#     same mirrored path (`HitResultLive::distance_to(Entity)`,
+#     `InteractionHandLive::as_equipment_slot`).
+#   - rivet-server: classes that hold an `Entity`, so they cannot compile
+#     below the live-game crate (`EntityHitResult`, the entity collision
+#     contexts); the rest of `phys.shapes` stays in `rivet-world`.
+#   - rivet-world: the Moonrise shape classes `VoxelShape` holds or calls
+#     (below the `rivet-server` assignment of the rest of Moonrise).
+# TODO(#834): D15 says the ledger computes these from the crate graph; they are
+# hand-written until it does.
+CLASS_CRATES = {
+    "net.minecraft.world.InteractionHand": "rivet-registry",
+    "net.minecraft.world.phys.AABB": "rivet-registry",
+    "net.minecraft.world.phys.BlockHitResult": "rivet-registry",
+    "net.minecraft.world.phys.HitResult": "rivet-registry",
+    "net.minecraft.world.phys.Vec2": "rivet-registry",
+    "net.minecraft.world.phys.Vec3": "rivet-registry",
+    "net.minecraft.world.phys.EntityHitResult": "rivet-server",
+    "net.minecraft.world.phys.shapes.EntityCollisionContext": "rivet-server",
+    "net.minecraft.world.phys.shapes.MinecartCollisionContext": "rivet-server",
+    # Moonrise's shape-cache and AABB/shape helpers: `VoxelShape` (rivet-world)
+    # holds `CachedShapeData`, `CachedToAABBs` and `MergedORCache`, and calls
+    # `CollisionUtil`'s live-free members and the two `common.util` helpers, so
+    # these cannot sit above it in rivet-server (the rest of Moonrise does).
+    "ca.spottedleaf.moonrise.patches.collisions.CollisionUtil": "rivet-world",
+    "ca.spottedleaf.moonrise.patches.collisions.shape.CachedShapeData": "rivet-world",
+    "ca.spottedleaf.moonrise.patches.collisions.shape.CachedToAABBs": "rivet-world",
+    "ca.spottedleaf.moonrise.patches.collisions.shape.MergedORCache": "rivet-world",
+    "ca.spottedleaf.moonrise.common.util.FlatBitsetUtil": "rivet-world",
+    "ca.spottedleaf.moonrise.common.util.MixinWorkarounds": "rivet-world",
+}
+
+# D15 split classes: the class straddles two crates, `rust_path` being the
+# assigned crate's half and these the other half (one file per crate at the
+# mirrored path). The ledger lists every split with both homes: the paths below
+# are appended to `other_paths` (suffixed `(pending)` while the file does not
+# exist yet, so a split whose upper half is still to be written stays visible).
+SPLITS = {
+    # Live members take `Entity`/`Level`; ported with the Moonrise unit.
+    "ca.spottedleaf.moonrise.patches.collisions.CollisionUtil": [
+        "crates/rivet-server/src/spottedleaf/moonrise/patches/collisions/collision_util.rs",
+    ],
+    # `rayIntersectsAABB` and `lerp(double, Vec3, Vec3)` sit above rivet-util
+    # because they take the phys value types.
+    "net.minecraft.util.Mth": ["crates/rivet-registry/src/util/mth.rs"],
+    # Members that need rivet-world's shapes (`AABB.of`) or an `Entity`/live
+    # level (`HitResult.distanceTo`, the `CollisionContext` factories) sit above
+    # the value type.
+    "net.minecraft.world.phys.AABB": ["crates/rivet-world/src/phys/aabb.rs"],
+    "net.minecraft.world.phys.HitResult": ["crates/rivet-server/src/world/phys/hit_result.rs"],
+    "net.minecraft.world.phys.shapes.CollisionContext": [
+        "crates/rivet-server/src/world/phys/shapes/collision_context.rs",
+    ],
+}
 
 OBJECT_ALIASES = {
     "toString": ["fmt", "to_string"],
@@ -768,7 +832,7 @@ def build_rows(detail: str | None = None) -> list[dict[str, str]]:
                 print_detail(c, row, None)
             rows.append(row)
             continue
-        assigned = pkg_crate[c.pkg]
+        assigned = CLASS_CRATES.get(c.fqn, pkg_crate[c.pkg])
         cands = by_key.get(c.name.lower(), [])
         best = None
         best_key = None
@@ -776,10 +840,15 @@ def build_rows(detail: str | None = None) -> list[dict[str, str]]:
             score = mirror_score(rf, c.pkg)
             if score is None:
                 continue
-            key = (score[0], score[1], rf.crate == assigned, rf.crate == current[c.path])
+            key = (rf.crate == assigned, score[0], score[1], rf.crate == current[c.path])
             if best is None or key > best_key or (key == best_key and rf.rel < best.rel):
                 best, best_key = rf, key
         others = sorted(rf.rel for rf in cands if rf is not best and not is_package_module(rf, c.pkg))
+        for half in SPLITS.get(c.fqn, []):
+            if half in others or (best is not None and half == best.rel):
+                continue
+            others.append(half if half in by_path else f"{half}(pending)")
+        others.sort()
         methods = [n for _, n in java_scan.scan_methods(c.code)]
         if best is None:
             total = len(set(methods))
@@ -791,7 +860,10 @@ def build_rows(detail: str | None = None) -> list[dict[str, str]]:
             missing = sorted(set(methods))
         else:
             files = home_files(best, c.pkg, by_path, java_pkgs)
-            total, covered, missing = method_coverage(methods, files)
+            # Members ported in a split's other half (D15) count as covered.
+            halves = [by_path[h] for h in SPLITS.get(c.fqn, []) if h in by_path and h != best.rel]
+            total, covered, missing = method_coverage(
+                methods, files + [h for rf in halves for h in home_files(rf, c.pkg, by_path, java_pkgs)])
             stubs, todos = marker_counts(files)
             complete = covered == total and stubs == 0 and todos == 0
             row.update({

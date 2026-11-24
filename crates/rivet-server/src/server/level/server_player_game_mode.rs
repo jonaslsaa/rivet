@@ -27,7 +27,13 @@ use rivet_protocol::game::ClientboundBlockChangedAckPacket;
 use rivet_protocol::game::serversbound_player_action_packet::Action as PlayerAction;
 use rivet_protocol::protocol::game::clientbound_block_updates::ClientboundBlockUpdatePacket;
 use rivet_registry::block_state::BlockState;
-use rivet_registry::core::{BlockHitResult, BlockPos, Direction, GameType, InteractionHand, Vec3};
+use rivet_registry::core::{BlockPos, Direction, GameType};
+
+use rivet_registry::world::phys::BlockHitResult;
+
+use rivet_registry::world::interaction_hand::InteractionHand;
+
+use rivet_registry::world::phys::Vec3;
 use rivet_world::interaction_result::InteractionResult;
 use rivet_world::item::item_stack::ItemStack;
 

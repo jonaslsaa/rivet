@@ -46,7 +46,11 @@ use rivet_nbt::end_tag::EndTag;
 use rivet_nbt::nbt_accounter::NbtAccounter;
 use rivet_nbt::nbt_io;
 use rivet_nbt::tag::Tag;
-use rivet_registry::core::{BlockHitResult, BlockPos, ChunkPos, Direction, Vec3};
+use rivet_registry::core::{BlockPos, ChunkPos, Direction};
+
+use rivet_registry::world::phys::{BlockHitResult, HitResultBehavior};
+
+use rivet_registry::world::phys::Vec3;
 
 use crate::codec::CodecError;
 use rivet_util::data_io::{DataInput, DataOutput};

@@ -3,16 +3,21 @@
 //! Preserves exact Paper collision ordering:
 //! 1. Clip blocks (including world border) along `[from, from + delta]`.
 //! 2. Truncate `to` to the block hit location if blocks were hit.
-//! 3. Search entities in `source.bounding_box.expand_towards(delta).inflate(1.0)`
+//! 3. Search entities in `source.bounding_box.expand_towards(&delta).inflate(1.0)`
 //!    with `entity.bounding_box.inflate(entity_margin)`.
-//! 4. Single-hit picks strict nearest `from.distance_to_sqr(hit_loc)` (`<`, first wins ties).
+//! 4. Single-hit picks strict nearest `from.distance_to_sqr(&hit_loc)` (`<`, first wins ties).
 //! 5. Multi-hit collects all intersecting entities in level iteration order (caller sorts).
 
+use rivet_registry::world::phys::HitResultBehavior;
+use rivet_registry::world::phys::hit_result::Type as HitResultType;
 use rivet_util::mth;
 
-use crate::world::entity::projectile::phys::{Aabb, ClipBlock, EntityHitResult, HitResult, Vec3};
+use crate::world::entity::projectile::phys::ClipBlock;
 use crate::world::entity::projectile::projectile::ProjectileState;
 use crate::world::entity::projectile::world_view::{EntitySnapshot, ProjectileWorld};
+use crate::world::phys::entity_hit_result::EntityHitResult;
+use rivet_registry::world::phys::AABB;
+use rivet_registry::world::phys::Vec3;
 
 /// Paper `ProjectileUtil.computeMargin(Entity source)`:
 /// `Math.max(0.0F, Math.min(0.3F, (source.tickCount - 2) / 20.0F))`.
@@ -26,7 +31,7 @@ pub fn get_hit_result_on_move_vector<W, F>(
     world: &W,
     source: &ProjectileState,
     matching: F,
-) -> HitResult
+) -> Box<dyn HitResultBehavior>
 where
     W: ProjectileWorld,
     F: Fn(&EntitySnapshot) -> bool,
@@ -51,21 +56,19 @@ pub fn get_hit_result<W, F>(
     world: &W,
     entity_margin: f32,
     clip_block: ClipBlock,
-) -> HitResult
+) -> Box<dyn HitResultBehavior>
 where
     W: ProjectileWorld,
     F: Fn(&EntitySnapshot) -> bool,
 {
-    let mut to = from.add(delta);
+    let mut to = from.add(&delta);
     let block_hit = world.clip_including_border(from, to, clip_block, source.id);
-    let mut hit_result = if block_hit.miss {
-        HitResult::Miss(block_hit)
-    } else {
-        to = block_hit.location;
-        HitResult::Block(block_hit)
-    };
+    if block_hit.get_type() != HitResultType::Miss {
+        to = block_hit.get_location();
+    }
+    let mut hit_result: Box<dyn HitResultBehavior> = Box::new(block_hit);
 
-    let search_area = source.bounding_box.expand_towards(delta).inflate(1.0);
+    let search_area = source.bounding_box.expand_towards(&delta).inflate(1.0);
     if let Some(entity_hit) = get_entity_hit_result(
         world,
         source,
@@ -75,7 +78,7 @@ where
         matching,
         entity_margin,
     ) {
-        hit_result = HitResult::Entity(entity_hit);
+        hit_result = Box::new(entity_hit);
     }
 
     hit_result
@@ -83,14 +86,14 @@ where
 
 /// Paper `ProjectileUtil.getEntityHitResult(Level, Entity, Vec3 from, Vec3 to, AABB, Predicate, float margin)`.
 ///
-/// Uses strict `<` comparison on `from.distance_to_sqr(location)` so earlier entities in
+/// Uses strict `<` comparison on `from.distance_to_sqr(&location)` so earlier entities in
 /// deterministic level iteration order win exact distance ties.
 pub fn get_entity_hit_result<W, F>(
     world: &W,
     source: &ProjectileState,
     from: Vec3,
     to: Vec3,
-    target_search_area: Aabb,
+    target_search_area: AABB,
     matching: F,
     entity_margin: f32,
 ) -> Option<EntityHitResult>
@@ -107,8 +110,8 @@ where
             continue;
         }
         let bb = entity.bounding_box.inflate(entity_margin as f64);
-        if let Some(location) = bb.clip(from, to) {
-            let dd = from.distance_to_sqr(location);
+        if let Some(location) = bb.clip(&from, &to) {
+            let dd = from.distance_to_sqr(&location);
             if dd < nearest {
                 hit_entity = Some(entity);
                 nearest = dd;
@@ -126,14 +129,14 @@ where
 /// Paper `ProjectileUtil.getManyEntityHitResult(...)`.
 ///
 /// Preserves level iteration order; callers such as `AbstractArrow::step_move_and_hit`
-/// sort the collected results by `initial_position.distance_to_sqr(entity.position)`.
+/// sort the collected results by `initial_position.distance_to_sqr(&entity.position)`.
 #[allow(clippy::too_many_arguments)]
 pub fn get_many_entity_hit_result<W, F>(
     world: &W,
     source: &ProjectileState,
     from: Vec3,
     to: Vec3,
-    target_search_area: Aabb,
+    target_search_area: AABB,
     matching: F,
     entity_margin: f32,
     include_inside: bool,
@@ -148,9 +151,9 @@ where
             continue;
         }
         let bb = entity.bounding_box.inflate(entity_margin as f64);
-        if include_inside && bb.contains(from) {
+        if include_inside && bb.contains(&from) {
             collector.push(EntityHitResult::new(entity.id, from));
-        } else if let Some(location) = bb.clip(from, to) {
+        } else if let Some(location) = bb.clip(&from, &to) {
             collector.push(EntityHitResult::new(entity.id, location));
         }
     }

@@ -9,9 +9,11 @@ use rivet_protocol::syncher::{
     SynchedEntityDataBuilder, serializers,
 };
 use rivet_registry::Identifier;
-use rivet_registry::core::{BlockPos, Vec3};
+use rivet_registry::core::BlockPos;
+
 use rivet_registry::holder::Holder;
 use rivet_registry::registries::Attribute;
+use rivet_registry::world::phys::Vec3;
 use rivet_util::mth::{Uuid, pack_degrees};
 use std::collections::HashMap;
 

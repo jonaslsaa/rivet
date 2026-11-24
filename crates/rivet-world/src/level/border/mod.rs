@@ -24,14 +24,12 @@
 //! `WorldBorder.TYPE` a `LazyLock` static pinned to `NbtOps`.
 //!
 //! Cross-unit STUB seams (pending units; `// STUB(unit-id)`):
-//! [`shapes`] (`VoxelShape`/`Shapes`/`BooleanOp` — `mc.world.phys.shapes`),
 //! [`entity_stub`] (`Entity` — `mc.world.entity`). Paper's plugin-event and
 //! server-tick additions defer (`RivetTodo(#417)` in `world_border`).
 
 pub mod border_change_listener;
 pub mod border_status;
 pub mod entity_stub;
-pub mod shapes;
 pub mod world_border;
 
 pub use border_change_listener::BorderChangeListener;

@@ -14,7 +14,9 @@ use rivet_protocol::game::{
     ClientboundUpdateAttributesPacket,
 };
 use rivet_protocol::syncher::{DataValue, SynchedEntityData};
-use rivet_registry::core::{BlockPos, Vec3};
+use rivet_registry::core::BlockPos;
+
+use rivet_registry::world::phys::Vec3;
 use rivet_util::mth::{Uuid, pack_degrees, unpack_degrees};
 
 /// `ServerEntity.TOLERANCE_LEVEL_ROTATION`.

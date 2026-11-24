@@ -38,7 +38,9 @@ One row per Java class (per `.java` file) of the three Paper source roots that
   mixed packages, which is a follow-up and not done here. The Batch 2 crate
   move must not consume `assigned_crate` as final.
 - **rust_path**: the mirrored Rust file, or `-`. **other_paths** lists same-named
-  files at non-mirrored paths: misplaced ports and duplicates.
+  files at non-mirrored paths (misplaced ports and duplicates) and, for a D15
+  split class declared in `SPLITS`, its other half (`(pending)` while that file
+  is not written yet).
 - **method_total / method_covered**: distinct Java method names, and how many
   have a Rust `fn` of the same snake-case name in the home (or a getter
   without `get`, a pub field, an overload suffix, or a `// n/a: <reason>` note).

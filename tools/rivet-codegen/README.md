@@ -30,7 +30,8 @@ JVM and to use `anyhow`/`serde`.
   those tables.
 - **`mth-gen`** — regenerates the Mth tables + golden tests
   (`crates/rivet-util/src/mth_sin_table.rs`, `mth_atan_tables.rs`,
-  `mth_cos_tab_{x86_64,aarch64}.rs`, `mth_golden_tests.rs`) from the real Paper
+  `mth_cos_tab_{x86_64,aarch64}.rs`, `mth_golden_tests.rs`, plus the `rayIntersectsAABB` vectors in
+  `crates/rivet-registry/src/util/golden_tests.rs`, rendered from `data/mth_ray_golden_skeleton.rs`) from the real Paper
   `Mth` class. These files are `GENERATED — do not hand-edit`; this is the
   checked-in generator that makes regeneration possible. Idempotent per arch:
   over the current committed files it reproduces them byte-for-byte on the

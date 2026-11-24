@@ -8,8 +8,10 @@
 
 use rivet_util::mth;
 
-use crate::world::entity::ai::goal::context::{Aabb, BlockPos, Vec3};
+use crate::world::entity::ai::goal::context::BlockPos;
 use crate::world::level::pathfinder::path_type::{PathType, PathTypeCache};
+use rivet_registry::world::phys::AABB;
+use rivet_registry::world::phys::Vec3;
 
 /// Classification facts for a single block position needed by Paper 26.2's
 /// `WalkNodeEvaluator.getPathTypeFromState`, `SwimNodeEvaluator`, `MoveControl`,
@@ -344,7 +346,7 @@ pub trait PathWorldView {
     /// `WorldBorder.isInsideCloseToBorder(mob, aabb)`. The region contributes no
     /// entity collisions.
     // RivetTodo(#781) real VoxelShape collision, WorldBorder.isInsideCloseToBorder/noBorderCollision and getChunkForCollisions unloaded-chunk semantics are provided by the PathWorldView implementor, not ported here.
-    fn is_aabb_collision_free(&self, aabb: Aabb) -> bool;
+    fn is_aabb_collision_free(&self, aabb: AABB) -> bool;
 
     /// Paper's `WorldBorder.isWithinBounds(BlockPos)`:
     /// `x >= minX && x < maxX && z >= minZ && z < maxZ` on the block coordinates.
@@ -645,9 +647,9 @@ impl MobPathingState {
 
     /// Mirrors `Entity.getBoundingBox()`.
     #[must_use]
-    pub fn bounding_box(&self) -> Aabb {
+    pub fn bounding_box(&self) -> AABB {
         let half = f64::from(self.bb_width) * 0.5;
-        Aabb::new(
+        AABB::new(
             self.pos.x - half,
             self.pos.y,
             self.pos.z - half,

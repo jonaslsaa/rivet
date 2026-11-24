@@ -1,9 +1,10 @@
 //! Shared superclass state for Paper 26.2 `net.minecraft.world.entity.ai.goal.target.TargetGoal`.
 
 use crate::world::entity::ai::goal::context::{
-    EntityId, EntitySnapshot, GoalContext, GoalRandom, TargetReason, TargetingConditions,
+    EntitySnapshot, GoalContext, GoalRandom, TargetReason, TargetingConditions,
 };
 use crate::world::entity::ai::goal::goal::{GoalFlags, reduced_tick_delay};
+use crate::world::entity::entity_id::EntityId;
 
 /// Embedded superclass state mirroring `TargetGoal` per `PORTING.md`.
 #[derive(Debug, Clone)]
@@ -60,7 +61,7 @@ impl TargetGoalState {
         }
 
         let follow_distance = ctx.follow_range();
-        if ctx.pos().distance_to_sqr(target.pos) > follow_distance * follow_distance {
+        if ctx.pos().distance_to_sqr(&target.pos) > follow_distance * follow_distance {
             return false;
         }
 

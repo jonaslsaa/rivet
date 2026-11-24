@@ -1,7 +1,7 @@
 //! Unit tests for `world::level::entity` and `world::entity::entity_record` grounded in Paper 26.2 behavior.
 
 use crate::world::entity::entity_record::{
-    Aabb, EntityRemovalReason, EntitySaveLimits, EntityStorageError, MAX_HORIZONTAL_POSITION,
+    EntityRemovalReason, EntitySaveLimits, EntityStorageError, MAX_HORIZONTAL_POSITION,
     MAX_VERTICAL_POSITION, NetworkIdAllocator, StoredEntityRecord, TAG_DATA_VERSION, TAG_ENTITIES,
     TAG_ID, TAG_PASSENGERS, TAG_POSITION, TAG_UUID, decode_chunk_entities_nbt,
     encode_chunk_entities_nbt,
@@ -22,7 +22,10 @@ use rivet_nbt::double_tag::DoubleTag;
 use rivet_nbt::float_tag::FloatTag;
 use rivet_nbt::list_tag::ListTag;
 use rivet_nbt::tag::Tag;
-use rivet_registry::core::{ChunkPos, SectionPos, Vec3};
+use rivet_registry::core::{ChunkPos, SectionPos};
+
+use rivet_registry::world::phys::AABB;
+use rivet_registry::world::phys::Vec3;
 use rivet_util::mth::Uuid;
 
 fn make_uuid(hi: i64, lo: i64) -> Uuid {
@@ -530,7 +533,7 @@ fn spatial_bounds_query_respects_accessibility_and_grace_margins() {
         64.0,
         8.0,
     );
-    big_entity.bounding_box = Aabb::new(14.5, 64.0, 7.0, 17.0, 66.0, 9.0);
+    big_entity.bounding_box = AABB::new(14.5, 64.0, 7.0, 17.0, 66.0, 9.0);
     manager.add_new_entity(big_entity).unwrap();
 
     // Entity in hidden chunk inside query box must NOT be returned.
@@ -548,7 +551,7 @@ fn spatial_bounds_query_respects_accessibility_and_grace_margins() {
     assert_eq!(manager.chunk_visibility(hidden_chunk), Visibility::Hidden);
 
     // Query entirely inside x=[16.1, 17.5]: reaches section x=0 via CHONKY_ENTITY_SEARCH_GRACE (2).
-    let hits = manager.get_entities_in_bounds(Aabb::new(16.1, 64.0, 7.5, 17.5, 65.5, 8.5));
+    let hits = manager.get_entities_in_bounds(AABB::new(16.1, 64.0, 7.5, 17.5, 65.5, 8.5));
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].network_id, e_vis);
 }

@@ -215,6 +215,13 @@ pub mod registry_ops;
 /// (issue #125) — see the crate doc for the ownership split.
 pub mod core;
 
+/// `net.minecraft.util` members that need types above `rivet-util` (D15).
+pub mod util;
+
+/// `net.minecraft.world` classes that live below `rivet-world` (D15): `world.phys`
+/// and `InteractionHand`.
+pub mod world;
+
 pub use access::RegistryAccess;
 pub use builder::{RegistryAccessTransaction, RegistryBuilder, RegistryBuilderTransaction};
 pub use holder::{Holder, HolderId, HolderKind, RegistryId};

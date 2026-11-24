@@ -28,14 +28,16 @@
 //! - Java `(int)Math.floor(d)` / `(int)Math.ceil(d)` saturate and map NaN->0;
 //!   Rust `as` matches.
 //! - Cross-unit types are declared in `mth_stubs.rs` (see the `RivetTodo(#206)`
-//!   marker there): `RandomSource` is owned by mc.util.random, `Vec3`/`AABB` by
-//!   mc.world.phys, `Vec3f`/`Quaternionf` by JOML, `ARGB` by mc.util,
-//!   `Fraction` by commons-lang3. The LCG stub `SingleThreadedRandomSource` is
+//!   marker there): `RandomSource` is owned by mc.util.random, `Vec3f`/
+//!   `Quaternionf` by JOML, `ARGB` by mc.util, `Fraction` by commons-lang3.
+//!   The two `Mth` members that take `world.phys` types (`rayIntersectsAABB`
+//!   and `lerp(double, Vec3, Vec3)`) are split members (D15) at
+//!   `rivet_registry::util::mth`, where `Vec3`/`AABB` live. The LCG stub `SingleThreadedRandomSource` is
 //!   minimal but bit-exact (48-bit LCG + Marsaglia polar gaussian).
 
 use crate::mth_atan_tables::{ASIN_TAB, COS_TAB};
 use crate::mth_sin_table::SIN;
-use crate::mth_stubs::{Aabb, Fraction, Quaternionf, Vec3, Vec3f};
+use crate::mth_stubs::{Fraction, Quaternionf, Vec3f};
 use crate::random_source::{RandomSource, random_source_create_thread_local_instance_with_seed};
 
 /// `Mth.PI` = `(float)Math.PI`.
@@ -991,15 +993,6 @@ pub fn lerp(alpha1: f64, p0: f64, p1: f64) -> f64 {
     p0 + alpha1 * (p1 - p0)
 }
 
-/// `Mth.lerp(double, Vec3, Vec3)`.
-pub fn lerp_vec3(alpha: f64, p1: Vec3, p2: Vec3) -> Vec3 {
-    Vec3::new(
-        lerp(alpha, p1.x, p2.x),
-        lerp(alpha, p1.y, p2.y),
-        lerp(alpha, p1.z, p2.z),
-    )
-}
-
 /// `Mth.lerp2(double, double, double x00, double x10, double x01, double x11)`.
 pub fn lerp2(alpha1: f64, alpha2: f64, x00: f64, x10: f64, x01: f64, x11: f64) -> f64 {
     lerp(alpha2, lerp(alpha1, x00, x10), lerp(alpha1, x01, x11))
@@ -1341,41 +1334,8 @@ pub fn rotation_around_axis(axis: Vec3f, rotation: Quaternionf) -> Quaternionf {
     .normalized()
 }
 
-/// `Mth.rayIntersectsAABB(Vec3 rayStart, Vec3 rayDir, AABB aabb)` — the
-/// slab/Andrew-Woo test.
-pub fn ray_intersects_aabb(ray_start: Vec3, ray_dir: Vec3, aabb: Aabb) -> bool {
-    let center_x = (aabb.min_x + aabb.max_x) * 0.5;
-    let box_extent_x = (aabb.max_x - aabb.min_x) * 0.5;
-    let diff_x = ray_start.x - center_x;
-    if diff_x.abs() > box_extent_x && diff_x * ray_dir.x >= 0.0 {
-        return false;
-    }
-    let center_y = (aabb.min_y + aabb.max_y) * 0.5;
-    let box_extent_y = (aabb.max_y - aabb.min_y) * 0.5;
-    let diff_y = ray_start.y - center_y;
-    if diff_y.abs() > box_extent_y && diff_y * ray_dir.y >= 0.0 {
-        return false;
-    }
-    let center_z = (aabb.min_z + aabb.max_z) * 0.5;
-    let box_extent_z = (aabb.max_z - aabb.min_z) * 0.5;
-    let diff_z = ray_start.z - center_z;
-    if diff_z.abs() > box_extent_z && diff_z * ray_dir.z >= 0.0 {
-        return false;
-    }
-    let andrew_woo_diff_x = ray_dir.x.abs();
-    let andrew_woo_diff_y = ray_dir.y.abs();
-    let andrew_woo_diff_z = ray_dir.z.abs();
-    let mut f = ray_dir.y * diff_z - ray_dir.z * diff_y;
-    if f.abs() > box_extent_y * andrew_woo_diff_z + box_extent_z * andrew_woo_diff_y {
-        return false;
-    }
-    f = ray_dir.z * diff_x - ray_dir.x * diff_z;
-    if f.abs() > box_extent_x * andrew_woo_diff_z + box_extent_z * andrew_woo_diff_x {
-        return false;
-    }
-    f = ray_dir.x * diff_y - ray_dir.y * diff_x;
-    f.abs() < box_extent_x * andrew_woo_diff_y + box_extent_y * andrew_woo_diff_x
-}
+// n/a: rayIntersectsAABB takes `world.phys` types that live above this crate
+// (D15 split member): see `rivet_registry::util::mth::ray_intersects_aabb`.
 
 /// `Mth.mulAndTruncate(Fraction fraction, int factor)` — Apache Commons
 /// `Fraction.getNumerator() * factor / getDenominator()` (int, wrapping).

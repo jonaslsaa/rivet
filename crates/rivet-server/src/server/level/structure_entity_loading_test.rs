@@ -135,7 +135,7 @@ impl super::super::generation_creature_runtime::GenerationCreatureFactory for Un
 #[test]
 fn actual_paper_duplicate_uuid_stream_policy_and_removal_rng() {
     use super::super::entity_post_load::*;
-    use rivet_registry::{Identifier, RegistryAccess, core::Vec3};
+    use rivet_registry::{Identifier, RegistryAccess, world::phys::Vec3};
     use rivet_world::entity::loaded_entity::NativeLoadedEntity;
     struct RecordingRemoval<'a> {
         inner: EmptyInventoryEntityRemoval<'a, LegacyRandomSource>,
@@ -280,7 +280,7 @@ fn actual_paper_duplicate_uuid_stream_policy_and_removal_rng() {
 #[test]
 fn post_load_unavailable_support_preserves_typed_prefix_and_current_removal_value() {
     use super::super::entity_post_load::*;
-    use rivet_registry::{Identifier, RegistryAccess, core::Vec3};
+    use rivet_registry::{Identifier, RegistryAccess, world::phys::Vec3};
     let factory = Factory::new(false);
     let access = RegistryAccess::empty();
     let mut removal = DetachedAnimalRemoval;

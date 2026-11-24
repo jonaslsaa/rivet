@@ -16,9 +16,7 @@ use super::arrow::abstract_arrow::{
 use super::arrow::arrow::{EXPOSED_POTION_DECAY_TIME, NO_EFFECT_COLOR};
 use super::arrow::spectral_arrow::DEFAULT_DURATION;
 use super::arrow::thrown_trident::{TRIDENT_BASE_DAMAGE, TRIDENT_WATER_INERTIA};
-use super::phys::{
-    Aabb, BlockHitResult, BlockPos, ClipBlock, Direction, EntityId, EntityUuid, Vec3,
-};
+use super::phys::{ClipBlock, EntityUuid};
 use super::projectile::EntityReference;
 use super::projectile_deflection::ProjectileDeflection;
 use super::projectile_util;
@@ -29,6 +27,11 @@ use super::world_view::{
 use super::{
     AbstractArrow, Arrow, Pickup, PotionContents, PotionEffect, SpectralArrow, ThrownTrident,
 };
+use crate::world::entity::entity_id::EntityId;
+use crate::world::phys::entity_hit_result::EntityHitResult;
+use rivet_registry::core::{BlockPos, Direction};
+use rivet_registry::world::phys::hit_result::Type as HitResultType;
+use rivet_registry::world::phys::{AABB, BlockHitResult, Vec3};
 
 /// Deterministic in-memory test world implementing `ProjectileWorld`.
 #[derive(Default)]
@@ -68,7 +71,7 @@ impl TestWorld {
             eye_position: pos.add_xyz(0.0, 1.62, 0.0),
             delta_movement: Vec3::ZERO,
             look_angle: Vec3::new(0.0, 0.0, 1.0),
-            bounding_box: Aabb::from_entity_pos(pos, 0.6, 1.8),
+            bounding_box: crate::world::entity::projectile::phys::bounding_box_at(pos, 0.6, 1.8),
             bb_width: 0.6,
             on_ground: true,
             alive: true,
@@ -98,32 +101,32 @@ impl ProjectileWorld for TestWorld {
         // Simple AABB clip against all solid blocks in `self.blocks`, picking nearest hit.
         let mut best: Option<(f64, BlockPos, Vec3)> = None;
         for &pos in self.blocks.keys() {
-            let bb = Aabb::new(
-                pos.x as f64,
-                pos.y as f64,
-                pos.z as f64,
-                (pos.x + 1) as f64,
-                (pos.y + 1) as f64,
-                (pos.z + 1) as f64,
+            let bb = AABB::new(
+                pos.get_x() as f64,
+                pos.get_y() as f64,
+                pos.get_z() as f64,
+                (pos.get_x() + 1) as f64,
+                (pos.get_y() + 1) as f64,
+                (pos.get_z() + 1) as f64,
             );
-            if let Some(loc) = bb.clip(from, to) {
-                let d = from.distance_to_sqr(loc);
+            if let Some(loc) = bb.clip(&from, &to) {
+                let d = from.distance_to_sqr(&loc);
                 if best.is_none_or(|(bd, _, _)| d < bd) {
                     best = Some((d, pos, loc));
                 }
             }
         }
         if let Some((_, pos, loc)) = best {
-            BlockHitResult::hit(loc, Direction::West, pos, false)
+            BlockHitResult::new(loc, Direction::West, pos, false)
         } else {
-            BlockHitResult::miss(to, Direction::Up, BlockPos::containing(to))
+            BlockHitResult::miss(to, Direction::Up, BlockPos::containing(to.x, to.y, to.z))
         }
     }
 
-    fn get_entities(&self, source_id: EntityId, search_area: Aabb) -> Vec<EntitySnapshot> {
+    fn get_entities(&self, source_id: EntityId, search_area: AABB) -> Vec<EntitySnapshot> {
         self.entities
             .iter()
-            .filter(|e| e.id != source_id && e.bounding_box.intersects(search_area))
+            .filter(|e| e.id != source_id && e.bounding_box.intersects(&search_area))
             .cloned()
             .collect()
     }
@@ -287,7 +290,7 @@ fn collision_ordering_block_clips_ray_before_entity_behind_wall() {
 fn collision_ordering_piercing_sorts_by_distance_from_initial_position() {
     let mut world = TestWorld::new();
     // Deliberately insert entities in REVERSE distance order (far, mid, near)
-    // to prove `step_move_and_hit` sorts by `initial_position.distance_to_sqr(entity.position)`.
+    // to prove `step_move_and_hit` sorts by `initial_position.distance_to_sqr(&entity.position)`.
     let far = TestWorld::make_entity(30, Vec3::new(6.0, 0.5, 0.5));
     let mid = TestWorld::make_entity(20, Vec3::new(4.0, 0.5, 0.5));
     let near = TestWorld::make_entity(10, Vec3::new(2.0, 0.5, 0.5));
@@ -325,10 +328,12 @@ fn collision_ordering_exact_tie_preserves_first_entity_in_iteration_order() {
     source.delta_movement = Vec3::new(5.0, 0.0, 0.0);
 
     let hit = projectile_util::get_hit_result_on_move_vector(&world, &source, |_| true);
-    match hit {
-        super::HitResult::Entity(e) => assert_eq!(e.entity_id, EntityId(101)),
-        other => panic!("expected EntityHitResult for first entity, got {other:?}"),
-    }
+    assert_eq!(hit.get_type(), HitResultType::Entity);
+    let e = hit
+        .as_any()
+        .downcast_ref::<EntityHitResult>()
+        .expect("expected EntityHitResult for first entity");
+    assert_eq!(e.get_entity(), EntityId(101));
 }
 
 #[test]
@@ -374,10 +379,12 @@ fn arrow_damage_formula_and_crit_bonus_match_paper() {
 #[test]
 fn arrow_deflects_on_world_border_and_failed_hurt() {
     let mut world = TestWorld::new();
-    world.block_hit_override = Some(BlockHitResult::world_border_hit(
+    world.block_hit_override = Some(BlockHitResult::new_with_world_border_hit(
         Vec3::new(2.0, 1.0, 0.0),
         Direction::West,
         BlockPos::new(2, 1, 0),
+        false,
+        true,
     ));
 
     let mut arrow = Arrow::new(EntityId(10), Vec3::new(0.0, 1.0, 0.0));
@@ -828,7 +835,7 @@ fn reverse_bounces_preserve_current_owner() {
     let mut world = TestWorld::new();
     let owner = TestWorld::make_entity(120, Vec3::new(-5.0, 0.0, 0.0));
     world.add_entity(owner.clone());
-    world.block_hit_override = Some(BlockHitResult::hit(
+    world.block_hit_override = Some(BlockHitResult::new(
         Vec3::new(2.0, 1.0, 0.0),
         Direction::West,
         BlockPos::new(2, 1, 0),
@@ -963,7 +970,7 @@ fn tipped_arrow_preserves_infinite_effect_duration() {
 
 #[test]
 fn aabb_new_matches_java_math_min_max_for_nan_and_signed_zero() {
-    let nan_box = Aabb::new(f64::NAN, -0.0, 1.0, 2.0, 0.0, f64::NAN);
+    let nan_box = AABB::new(f64::NAN, -0.0, 1.0, 2.0, 0.0, f64::NAN);
     assert!(nan_box.min_x.is_nan());
     assert!(nan_box.max_x.is_nan());
     assert!(nan_box.min_y.is_sign_negative() && nan_box.min_y == 0.0);

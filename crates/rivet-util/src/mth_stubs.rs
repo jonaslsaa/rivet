@@ -2,37 +2,11 @@
 //! by other units. Only the surface `Mth` actually calls is provided here;
 //! these become real ports when their owning units land.
 //!
-//! - `Vec3` / `AABB` — owned by `net.minecraft.world.phys` (rivet-util).
 //! - `Vec3f` / `Quaternionf` — owned by JOML (`org.joml`).
 //! - `Fraction` — owned by Apache Commons Lang (`org.apache.commons.lang3.math`).
 //!
 //! `net.minecraft.util.RandomSource` is NOT stubbed here — `mth.rs` uses the
 //! real trait from `random.rs` (unit `mc.util.random`).
-
-/// `net.minecraft.world.phys.Vec3` — the double-precision 3-vector.
-#[derive(Clone, Copy, Debug)]
-pub struct Vec3 {
-    pub x: f64,
-    pub y: f64,
-    pub z: f64,
-}
-
-impl Vec3 {
-    /// `Vec3(double, double, double)`.
-    pub fn new(x: f64, y: f64, z: f64) -> Vec3 {
-        Vec3 { x, y, z }
-    }
-}
-
-/// `net.minecraft.world.phys.AABB` — axis-aligned bounding box.
-pub struct Aabb {
-    pub min_x: f64,
-    pub min_y: f64,
-    pub min_z: f64,
-    pub max_x: f64,
-    pub max_y: f64,
-    pub max_z: f64,
-}
 
 /// `org.joml.Vector3f` — the float 3-vector (Mth reads it through the
 /// `Vector3fc` immutable view).

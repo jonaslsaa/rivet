@@ -5,10 +5,10 @@
 //! - `working/Paper/paper-server/src/minecraft/java/net/minecraft/world/level/entity/EntitySection.java`
 //! - `working/Paper/paper-server/src/minecraft/java/net/minecraft/world/level/entity/EntitySectionStorage.java`
 
-use crate::world::entity::entity_record::Aabb;
 use crate::world::level::entity::visibility::Visibility;
 use indexmap::IndexSet;
 use rivet_registry::core::{ChunkPos, SectionPos};
+use rivet_registry::world::phys::AABB;
 use std::collections::{BTreeSet, HashMap};
 
 /// `EntitySectionStorage.CHONKY_ENTITY_SEARCH_GRACE`.
@@ -191,7 +191,7 @@ impl EntitySectionStorage {
     /// - `xMin = posToSectionCoord(minX - 2.0)`, `xMax = posToSectionCoord(maxX + 2.0)`
     /// - `yMin = posToSectionCoord(minY - 4.0)`, `yMax = posToSectionCoord(maxY + 0.0)`
     /// - `zMin = posToSectionCoord(minZ - 2.0)`, `zMax = posToSectionCoord(maxZ + 2.0)`
-    pub fn for_each_accessible_non_empty_section<F>(&self, bounds: Aabb, mut f: F)
+    pub fn for_each_accessible_non_empty_section<F>(&self, bounds: AABB, mut f: F)
     where
         F: FnMut(i64, &EntitySection) -> IterationControl,
     {

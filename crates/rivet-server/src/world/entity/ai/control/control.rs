@@ -7,9 +7,10 @@
 
 use rivet_util::mth;
 
-use crate::world::entity::ai::goal::context::{BlockPos, Vec3};
+use crate::world::entity::ai::goal::context::BlockPos;
 use crate::world::level::pathfinder::path_type::PathType;
 use crate::world::level::pathfinder::world_view::{MobPathingState, PathWorldView};
+use rivet_registry::world::phys::Vec3;
 
 /// `Mth.atan2(y, x) * 180.0F / (float)Math.PI` evaluated in double with the
 /// float-widened constants, as Java does before the caller's `(float)` cast.

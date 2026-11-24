@@ -12,10 +12,7 @@
 use rivet_nbt::{compound_tag::CompoundTag, double_tag::DoubleTag, list_tag::ListTag, tag::Tag};
 #[path = "chest_minecart_data.rs"]
 mod saved_data;
-use rivet_registry::{
-    Identifier,
-    core::{BlockPos, Vec3},
-};
+use rivet_registry::{Identifier, core::BlockPos, world::phys::Vec3};
 use rivet_util::{
     mth::{Uuid, create_insecure_uuid},
     random_source::RandomSource,

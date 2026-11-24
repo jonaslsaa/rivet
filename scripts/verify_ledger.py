@@ -668,6 +668,24 @@ OP_SURFACES = {
          "net.minecraft.world.level.levelgen.structure.structures.MineshaftStructure",
          "net.minecraft.world.level.levelgen.structure.structures.BuriedTreasureStructure",
          "net.minecraft.world.level.levelgen.structure.placement.RandomSpreadStructurePlacement"]),
+    "shapes.eval": (
+        # The canonical phys value hubs and the collision shape engine (Batch 1B): Vec3/AABB, the
+        # VoxelShape family with its Moonrise caches, Shapes/BooleanOp/the IndexMerger family, and the
+        # Java Math/Guava helpers they lean on.
+        ["crates/rivet-registry/src/world/phys/**",
+         "crates/rivet-registry/src/util/mth.rs",
+         "crates/rivet-world/src/phys/**",
+         "crates/rivet-world/src/spottedleaf/moonrise/patches/collisions/**",
+         "crates/rivet-util/src/java_math.rs",
+         "crates/rivet-util/src/guava_math.rs",
+         "crates/rivet-util/src/double_list.rs",
+         "crates/rivet-util/src/java_bit_set.rs"],
+        ["net.minecraft.world.phys.Vec3", "net.minecraft.world.phys.AABB",
+         "net.minecraft.world.phys.shapes.Shapes", "net.minecraft.world.phys.shapes.VoxelShape",
+         "net.minecraft.world.phys.shapes.BooleanOp",
+         "net.minecraft.world.phys.shapes.BitSetDiscreteVoxelShape",
+         "ca.spottedleaf.moonrise.patches.collisions.CollisionUtil",
+         "net.minecraft.util.Mth"]),
     # Gameplay-data ops (VERIFICATION item 8). The globs name the files the handler's answers
     # depend on: the recipe loader/matchers, the enchantment registry and selection helper, the
     # mob-effect table, the scoreboard codec and load/pack paths. loot.roll answers the blocks/*
@@ -833,7 +851,8 @@ GOLDENS = {
 # Goldens whose vectors are compiled into a generated test file instead of being
 # read by path: golden id -> consumer files.
 GOLDEN_CONSUMERS = {
-    "util-mth-vectors": ["crates/rivet-util/src/mth_golden_tests.rs"],
+    "util-mth-vectors": ["crates/rivet-util/src/mth_golden_tests.rs",
+                         "crates/rivet-registry/src/util/golden_tests.rs"],
 }
 
 CURATED: list[dict] = [

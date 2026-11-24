@@ -4,8 +4,10 @@ use rivet_nbt::compound_tag::CompoundTag;
 use rivet_util::random::RandomSource;
 
 use crate::world::entity::projectile::arrow::abstract_arrow::{AbstractArrow, ArrowHooks};
-use crate::world::entity::projectile::phys::{EntityId, Vec3};
+
+use crate::world::entity::entity_id::EntityId;
 use crate::world::entity::projectile::world_view::{PickupItem, PostHurtEffect, ProjectileWorld};
+use rivet_registry::world::phys::Vec3;
 
 /// `SpectralArrow.DEFAULT_DURATION` (`200` ticks = 10 seconds).
 pub const DEFAULT_DURATION: i32 = 200;

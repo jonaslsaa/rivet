@@ -1,11 +1,12 @@
 //! Mirrors `net.minecraft.world.entity.ai.goal.target.HurtByTargetGoal`.
 
 use crate::world::entity::ai::goal::context::{
-    Aabb, EntityTypeId, GoalContext, TargetReason, TargetingConditions,
+    EntityTypeId, GoalContext, TargetReason, TargetingConditions,
 };
 use crate::world::entity::ai::goal::goal::{Goal, GoalFlags};
 
 use super::target_goal::TargetGoalState;
+use rivet_registry::world::phys::AABB;
 
 /// Retaliates against the mob that last hurt this entity, with optional pack alerting.
 #[derive(Debug, Clone)]
@@ -43,10 +44,10 @@ impl HurtByTargetGoal {
     fn alert_others<C: GoalContext>(
         &self,
         ctx: &mut C,
-        attacker_id: crate::world::entity::ai::goal::context::EntityId,
+        attacker_id: crate::world::entity::entity_id::EntityId,
     ) {
         let within = ctx.follow_range();
-        let search_area = Aabb::unit_cube_from_lower_corner(ctx.pos()).inflate(
+        let search_area = AABB::unit_cube_from_lower_corner(&ctx.pos()).inflate_xyz(
             within,
             Self::ALERT_RANGE_Y,
             within,

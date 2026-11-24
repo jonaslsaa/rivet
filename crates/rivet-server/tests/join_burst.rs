@@ -33,8 +33,10 @@ use rivet_protocol::var_int;
 use rivet_protocol::varint21_frame_decoder::Varint21FrameDecoder;
 use rivet_registry::Identifier;
 use rivet_registry::ResourceKey;
-use rivet_registry::core::{GameProfile, GameType, Vec3, create_offline_player_uuid};
+use rivet_registry::core::{GameProfile, GameType, create_offline_player_uuid};
+
 use rivet_registry::registries;
+use rivet_registry::world::phys::Vec3;
 use rivet_registry::{RegistrationInfo, RegistryAccess, RegistryBuilder};
 use rivet_server::server::level::player_chunk_loader::PlayerChunkLoader;
 use rivet_server::server::level::server_level::{ServerLevel, ServerLevelConfig};

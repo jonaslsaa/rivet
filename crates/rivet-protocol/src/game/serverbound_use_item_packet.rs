@@ -8,7 +8,7 @@
 //! the decoding constructor only (see `serverbound_use_item_on_packet`).
 //! Rotations are carried raw (NaN/infinite included); the listener wraps them.
 
-use rivet_registry::core::InteractionHand;
+use rivet_registry::world::interaction_hand::InteractionHand;
 
 use super::serverbound_use_item_on_packet::{current_time_millis, read_interaction_hand};
 use crate::codec::StreamCodec;

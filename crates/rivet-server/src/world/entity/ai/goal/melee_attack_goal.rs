@@ -1,9 +1,10 @@
 //! Mirrors `net.minecraft.world.entity.ai.goal.MeleeAttackGoal`.
 
-use super::context::{
-    EntityId, GoalContext, GoalRandom, InteractionHand, PathHandle, TargetReason, Vec3,
-};
+use super::context::{GoalContext, GoalRandom, PathHandle, TargetReason};
 use super::goal::{Goal, GoalFlags};
+use crate::world::entity::entity_id::EntityId;
+use rivet_registry::world::interaction_hand::InteractionHand;
+use rivet_registry::world::phys::Vec3;
 
 /// Drives a mob to pathfind toward and melee-attack its current target.
 #[derive(Debug, Clone)]
@@ -140,14 +141,14 @@ impl<C: GoalContext> Goal<C> for MeleeAttackGoal {
             && ((self.pathed_target_x == 0.0
                 && self.pathed_target_y == 0.0
                 && self.pathed_target_z == 0.0)
-                || target.pos.distance_to_sqr(pathed_pos) >= 1.0
+                || target.pos.distance_to_sqr(&pathed_pos) >= 1.0
                 || ctx.random().next_float() < 0.05)
         {
             self.pathed_target_x = target.pos.x;
             self.pathed_target_y = target.pos.y;
             self.pathed_target_z = target.pos.z;
             self.ticks_until_next_path_recalculation = 4_i32.wrapping_add(ctx.random().next_int(7));
-            let dist_sqr = ctx.pos().distance_to_sqr(target.pos);
+            let dist_sqr = ctx.pos().distance_to_sqr(&target.pos);
             if dist_sqr > 1024.0 {
                 self.ticks_until_next_path_recalculation =
                     self.ticks_until_next_path_recalculation.wrapping_add(10);

@@ -3505,7 +3505,7 @@ mod tests {
     #[test]
     fn native_minecart_admission_retains_actual_center_and_dependency_entity_storage() {
         use rivet_nbt::tag_parser::parse_compound_fully;
-        use rivet_registry::core::Vec3;
+        use rivet_registry::world::phys::Vec3;
         use rivet_util::{mth::Uuid, random_source::LegacyRandomSource};
         use rivet_world::entity::chest_minecart::{EntityConstructionContext, NativeChestMinecart};
         fn proto(
