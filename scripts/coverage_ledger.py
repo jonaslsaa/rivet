@@ -5,7 +5,7 @@ and a method-level port-coverage estimate (ROADMAP.md section 0.1 / Batch 1A).
 Run:  python3 scripts/coverage_ledger.py            # rewrite COVERAGE.tsv
       python3 scripts/coverage_ledger.py --check    # exit 1 if COVERAGE.tsv is stale
       python3 scripts/coverage_ledger.py --show net.minecraft.nbt.CompoundTag
-      python3 scripts/coverage_ledger.py --summary  # status counts per crate
+      python3 scripts/coverage_ledger.py --summary  # status counts per crate (writes nothing)
 
 Deterministic and offline: reads the three Java roots of
 scripts/analyze_graph.py (`working/Paper/...`), MANIFEST.tsv, and the
@@ -88,7 +88,8 @@ and lower-cased, equals:
   - for the Object/Comparable/Iterable trait methods, a std trait fn
     (OBJECT_ALIASES: `toString` -> `fmt`, `equals` -> `eq`, `hashCode` -> `hash`,
     `compareTo` -> `cmp`/`partial_cmp`, `iterator` -> `iter`/`into_iter`,
-    `close` -> `drop`);
+    `close` -> `drop`), or a `#[derive]` of the matching trait in the home
+    (`Debug`, `PartialEq`, `Hash`, `Ord`/`PartialOrd`);
 or, when `m` is overloaded in the Java file, a `fn` named `snake(m)_...`
 (PORTING.md overload suffixes), or when a `// n/a: <reason>` comment in the
 Rust home names `m` or `snake(m)` as a whole word.
@@ -192,6 +193,15 @@ OBJECT_ALIASES = {
     "iterator": ["iter", "into_iter"],
     "close": ["drop"],
 }
+
+# `#[derive(...)]` traits that implement a Java Object/Comparable method.
+DERIVE_ALIASES = {
+    "toString": {"Debug"},
+    "equals": {"PartialEq"},
+    "hashCode": {"Hash"},
+    "compareTo": {"Ord", "PartialOrd"},
+}
+DERIVE_RE = re.compile(r"#\[derive\(([^)]*)\)\]")
 
 QUALIFIED_RE = re.compile(
     r"\b(?:net\.minecraft|ca\.spottedleaf|io\.papermc|com\.destroystokyo|org\.spigotmc|org\.bukkit)"
@@ -650,9 +660,12 @@ def method_coverage(java_methods: list[str], files: list[RustFile]) -> tuple[int
     rust_fns: set[str] = set()
     raw_fns: set[str] = set()
     fields: set[str] = set()
+    derived: set[str] = set()
     na_text: list[str] = []
     for rf in files:
         rf.load()
+        for m in DERIVE_RE.finditer(rf.code):
+            derived.update(t.strip().rsplit("::", 1)[-1] for t in m.group(1).split(","))
         for fn in rust_scan.fn_names(rf.code):
             raw_fns.add(fn.removeprefix("r#"))
             rust_fns.add(norm(fn))
@@ -670,7 +683,7 @@ def method_coverage(java_methods: list[str], files: list[RustFile]) -> tuple[int
         if not ok and re.match(r"get[A-Z]", m):
             ok = norm(m[3:]) in rust_fns or norm(m[3:]) in fields
         if not ok and m in OBJECT_ALIASES:
-            ok = any(a in raw_fns for a in OBJECT_ALIASES[m])
+            ok = any(a in raw_fns for a in OBJECT_ALIASES[m]) or bool(derived & DERIVE_ALIASES.get(m, set()))
         if not ok and names[m] > 1:
             ok = any(f.startswith(snake + "_") for f in raw_fns)
         if not ok and na_blob:
@@ -826,7 +839,7 @@ def main() -> int:
     text = render(rows)
     if args.summary:
         print(summarize(rows))
-    if args.show:
+    if (args.show or args.summary) and not args.check:
         return 0
     if args.check:
         current = args.output.read_text(encoding="utf-8") if args.output.exists() else ""

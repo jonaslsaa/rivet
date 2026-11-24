@@ -81,6 +81,11 @@ Known blind spots
   not seen, so its consumer is missed.
 - A production consumer that loads a fixture as runtime data, not in a test,
   is credited like a test consumer.
+- Consumers are found in raw text, comments included: a file that only names
+  a fixture in a comment counts as a consumer.
+- Result columns are carried over by row id and `--check` never re-derives
+  them: a row stays PASS at its old last_verified_commit until the next
+  `record-tests` (or `record`) run, even if its consumer tests changed.
 - Probe -> fixture ownership is the PROBE_OUTPUTS table below (the probes
   print to stdout or an argument; nothing records which file they wrote).
   `rivet-oracle regen --check` (VERIFICATION item 2) is the real fix.
@@ -474,7 +479,8 @@ def count_corpus(paths: list[str], tracked: list[str]) -> str:
             seen = seen or bool(files)
         elif full.is_file():
             seen = True
-            total += file_records(full)
+            # A manifest describes the corpus files next to it; it is no input.
+            total += 0 if p.endswith("manifest.json") else file_records(full)
     return str(total) if seen else "-"
 
 
@@ -622,14 +628,14 @@ class RustTree:
                     and not self.is_test_only(parent, self._text(parent)):
                 primary.add(parent)
         if test_only or not in_crates:
-            own_src = "/".join(consumer.split("/")[:3]) + "/"
+            own_crate = "/".join(consumer.split("/")[:2]) + "/"
             code = rust_scan.blank_comments_and_strings(text)
             for m in USE_RE.finditer(code):
                 for path in expand_use(m.group(1)):
                     target = self.resolve_use(consumer, path)
                     if target and target.startswith("crates/") and target in self.modules \
                             and self.modules[target].parent is not None \
-                            and (not in_crates or target.startswith(own_src)) \
+                            and (not in_crates or target.startswith(own_crate)) \
                             and not self.is_test_only(target, self._text(target)):
                         secondary.add(target)
         return primary, secondary - primary
@@ -649,16 +655,23 @@ class RustTree:
 
 
 def consumers_of(fixtures: list[str], rs_texts: dict[str, str]) -> list[str]:
-    pats = []
+    pats = []  # (pattern, path prefix a consumer must have, or "")
     for f in fixtures:
+        if f.endswith("/fixtures"):
+            # A crate's own fixtures directory (`crates/x/tests/fixtures`): its
+            # basename names every fixture in the tree, so only that crate's
+            # files referencing `tests/fixtures/...` consume it.
+            parts = f.split("/")
+            pats.append((re.compile(re.escape("/".join(parts[2:]) + "/")), "/".join(parts[:2]) + "/"))
+            continue
         rel = f.split("/fixtures/", 1)[1] if "/fixtures/" in f else f
         anchor = f"fixtures/{rel}" if "/fixtures/" in f else rel
-        pats.append(re.compile(re.escape(anchor) + r"(?![\w.-])"))
+        pats.append((re.compile(re.escape(anchor) + r"(?![\w.-])"), ""))
         if "/fixtures/" not in f:
-            pats.append(re.compile(re.escape(Path(f).name) + r"(?![\w.-])"))
+            pats.append((re.compile(re.escape(Path(f).name) + r"(?![\w.-])"), ""))
     found = []
     for path, text in rs_texts.items():
-        if any(p.search(text) for p in pats):
+        if any(path.startswith(pre) and p.search(text) for p, pre in pats):
             found.append(path)
     return sorted(found)
 

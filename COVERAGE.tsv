@@ -470,7 +470,7 @@ com.mojang.math.OctahedralGroup	minecraft:com/mojang/math/OctahedralGroup.java	1
 com.mojang.math.Quadrant	minecraft:com/mojang/math/Quadrant.java	64	A		com.mojang.math	rivet-server	rivet-server	-		4	0	0	0	absent
 com.mojang.math.SymmetricGroup3	minecraft:com/mojang/math/SymmetricGroup3.java	89	A		com.mojang.math	rivet-server	rivet-server	-		6	0	0	0	absent
 com.mojang.math.Transformation	minecraft:com/mojang/math/Transformation.java	180	A		com.mojang.math	rivet-server	rivet-server	-		12	0	0	0	absent
-com.mojang.serialization.Dynamic	minecraft:com/mojang/serialization/Dynamic.java	248	A		com.mojang.serialization	rivet-serialization	rivet-serialization	crates/rivet-serialization/src/dynamic.rs		35	17	0	0	partial
+com.mojang.serialization.Dynamic	minecraft:com/mojang/serialization/Dynamic.java	248	A		com.mojang.serialization	rivet-serialization	rivet-serialization	crates/rivet-serialization/src/dynamic.rs		35	19	0	0	partial
 io.papermc.paper.FeatureHooks	minecraft:io/papermc/paper/FeatureHooks.java	213	A		io.papermc.paper	rivet-api	rivet-server	-		24	0	0	0	absent
 io.papermc.paper.command.subcommands.ChunkDebugCommand	minecraft:io/papermc/paper/command/subcommands/ChunkDebugCommand.java	269	A		paper.command.subcommands	rivet-api	rivet-server	-		5	0	0	0	absent
 io.papermc.paper.command.subcommands.FixLightCommand	minecraft:io/papermc/paper/command/subcommands/FixLightCommand.java	116	A		paper.command.subcommands	rivet-api	rivet-server	-		3	0	0	0	absent
@@ -738,7 +738,7 @@ net.minecraft.core.Holder	minecraft:net/minecraft/core/Holder.java	278	A	spine	m
 net.minecraft.core.HolderGetter	minecraft:net/minecraft/core/HolderGetter.java	48	A		mc.core	rivet-registry	rivet-registry	-		5	0	0	0	absent
 net.minecraft.core.HolderLookup	minecraft:net/minecraft/core/HolderLookup.java	148	A		mc.core	rivet-registry	rivet-registry	crates/rivet-registry/src/holder_lookup.rs		18	11	0	0	partial
 net.minecraft.core.HolderOwner	minecraft:net/minecraft/core/HolderOwner.java	7	A		mc.core	rivet-registry	rivet-registry	-		1	0	0	0	absent
-net.minecraft.core.HolderSet	minecraft:net/minecraft/core/HolderSet.java	232	A		mc.core	rivet-registry	rivet-registry	crates/rivet-registry/src/holder_set.rs		20	15	0	0	partial
+net.minecraft.core.HolderSet	minecraft:net/minecraft/core/HolderSet.java	232	A		mc.core	rivet-registry	rivet-registry	crates/rivet-registry/src/holder_set.rs		20	16	0	0	partial
 net.minecraft.core.IdMap	minecraft:net/minecraft/core/IdMap.java	31	A		mc.core	rivet-registry	rivet-registry	crates/rivet-registry/src/id_map.rs		5	5	0	0	complete
 net.minecraft.core.IdMapper	minecraft:net/minecraft/core/IdMapper.java	67	A		mc.core	rivet-registry	rivet-registry	-		7	0	0	0	absent
 net.minecraft.core.LayeredRegistryAccess	minecraft:net/minecraft/core/LayeredRegistryAccess.java	97	A		mc.core	rivet-registry	rivet-registry	-		8	0	0	0	absent
@@ -1032,29 +1032,29 @@ net.minecraft.gizmos.SimpleGizmoCollector	minecraft:net/minecraft/gizmos/SimpleG
 net.minecraft.gizmos.TextGizmo	minecraft:net/minecraft/gizmos/TextGizmo.java	43	A		mc.gizmos	rivet-server	rivet-server	-		6	0	0	0	absent
 net.minecraft.locale.DeprecatedTranslationsInfo	minecraft:net/minecraft/locale/DeprecatedTranslationsInfo.java	63	A		mc.locale	rivet-server	rivet-server	-		4	0	0	0	absent
 net.minecraft.locale.Language	minecraft:net/minecraft/locale/Language.java	109	A		mc.locale	rivet-server	rivet-server	-		9	0	0	0	absent
-net.minecraft.nbt.ByteArrayTag	minecraft:net/minecraft/nbt/ByteArrayTag.java	159	A		mc.nbt	rivet-nbt	rivet-nbt	crates/rivet-nbt/src/byte_array_tag.rs		17	8	0	0	partial
-net.minecraft.nbt.ByteTag	minecraft:net/minecraft/nbt/ByteTag.java	141	A		mc.nbt	rivet-nbt	rivet-nbt	crates/rivet-nbt/src/byte_tag.rs		15	2	0	0	partial
+net.minecraft.nbt.ByteArrayTag	minecraft:net/minecraft/nbt/ByteArrayTag.java	159	A		mc.nbt	rivet-nbt	rivet-nbt	crates/rivet-nbt/src/byte_array_tag.rs		17	11	0	0	partial
+net.minecraft.nbt.ByteTag	minecraft:net/minecraft/nbt/ByteTag.java	141	A		mc.nbt	rivet-nbt	rivet-nbt	crates/rivet-nbt/src/byte_tag.rs		15	3	0	0	partial
 net.minecraft.nbt.CollectionTag	minecraft:net/minecraft/nbt/CollectionTag.java	49	A		mc.nbt	rivet-nbt	rivet-nbt	crates/rivet-nbt/src/collection_tag.rs		9	7	0	0	partial
-net.minecraft.nbt.CompoundTag	minecraft:net/minecraft/nbt/CompoundTag.java	570	A	spine	mc.nbt	rivet-nbt	rivet-nbt	crates/rivet-nbt/src/compound_tag.rs		63	53	0	0	partial
-net.minecraft.nbt.DoubleTag	minecraft:net/minecraft/nbt/DoubleTag.java	127	A		mc.nbt	rivet-nbt	rivet-nbt	crates/rivet-nbt/src/double_tag.rs		15	7	0	0	partial
-net.minecraft.nbt.EndTag	minecraft:net/minecraft/nbt/EndTag.java	85	A		mc.nbt	rivet-nbt	rivet-nbt	crates/rivet-nbt/src/end_tag.rs		7	1	0	0	partial
-net.minecraft.nbt.FloatTag	minecraft:net/minecraft/nbt/FloatTag.java	127	A		mc.nbt	rivet-nbt	rivet-nbt	crates/rivet-nbt/src/float_tag.rs		15	6	0	0	partial
-net.minecraft.nbt.IntArrayTag	minecraft:net/minecraft/nbt/IntArrayTag.java	166	A		mc.nbt	rivet-nbt	rivet-nbt	crates/rivet-nbt/src/int_array_tag.rs		17	8	0	0	partial
-net.minecraft.nbt.IntTag	minecraft:net/minecraft/nbt/IntTag.java	137	A		mc.nbt	rivet-nbt	rivet-nbt	crates/rivet-nbt/src/int_tag.rs		15	4	0	0	partial
-net.minecraft.nbt.ListTag	minecraft:net/minecraft/nbt/ListTag.java	441	A		mc.nbt	rivet-nbt	rivet-nbt	crates/rivet-nbt/src/list_tag.rs		45	36	0	0	partial
-net.minecraft.nbt.LongArrayTag	minecraft:net/minecraft/nbt/LongArrayTag.java	165	A		mc.nbt	rivet-nbt	rivet-nbt	crates/rivet-nbt/src/long_array_tag.rs		17	8	0	0	partial
-net.minecraft.nbt.LongTag	minecraft:net/minecraft/nbt/LongTag.java	137	A		mc.nbt	rivet-nbt	rivet-nbt	crates/rivet-nbt/src/long_tag.rs		15	6	0	0	partial
+net.minecraft.nbt.CompoundTag	minecraft:net/minecraft/nbt/CompoundTag.java	570	A	spine	mc.nbt	rivet-nbt	rivet-nbt	crates/rivet-nbt/src/compound_tag.rs		63	55	0	0	partial
+net.minecraft.nbt.DoubleTag	minecraft:net/minecraft/nbt/DoubleTag.java	127	A		mc.nbt	rivet-nbt	rivet-nbt	crates/rivet-nbt/src/double_tag.rs		15	8	0	0	partial
+net.minecraft.nbt.EndTag	minecraft:net/minecraft/nbt/EndTag.java	85	A		mc.nbt	rivet-nbt	rivet-nbt	crates/rivet-nbt/src/end_tag.rs		7	2	0	0	partial
+net.minecraft.nbt.FloatTag	minecraft:net/minecraft/nbt/FloatTag.java	127	A		mc.nbt	rivet-nbt	rivet-nbt	crates/rivet-nbt/src/float_tag.rs		15	7	0	0	partial
+net.minecraft.nbt.IntArrayTag	minecraft:net/minecraft/nbt/IntArrayTag.java	166	A		mc.nbt	rivet-nbt	rivet-nbt	crates/rivet-nbt/src/int_array_tag.rs		17	11	0	0	partial
+net.minecraft.nbt.IntTag	minecraft:net/minecraft/nbt/IntTag.java	137	A		mc.nbt	rivet-nbt	rivet-nbt	crates/rivet-nbt/src/int_tag.rs		15	5	0	0	partial
+net.minecraft.nbt.ListTag	minecraft:net/minecraft/nbt/ListTag.java	441	A		mc.nbt	rivet-nbt	rivet-nbt	crates/rivet-nbt/src/list_tag.rs		45	38	0	0	partial
+net.minecraft.nbt.LongArrayTag	minecraft:net/minecraft/nbt/LongArrayTag.java	165	A		mc.nbt	rivet-nbt	rivet-nbt	crates/rivet-nbt/src/long_array_tag.rs		17	11	0	0	partial
+net.minecraft.nbt.LongTag	minecraft:net/minecraft/nbt/LongTag.java	137	A		mc.nbt	rivet-nbt	rivet-nbt	crates/rivet-nbt/src/long_tag.rs		15	7	0	0	partial
 net.minecraft.nbt.NbtAccounter	minecraft:net/minecraft/nbt/NbtAccounter.java	88	A		mc.nbt	rivet-nbt	rivet-nbt	crates/rivet-nbt/src/nbt_accounter.rs		9	9	0	0	complete
 net.minecraft.nbt.NbtAccounterException	minecraft:net/minecraft/nbt/NbtAccounterException.java	7	A		mc.nbt	rivet-nbt	rivet-nbt	crates/rivet-nbt/src/nbt_accounter_exception.rs		0	0	0	0	complete
 net.minecraft.nbt.NbtException	minecraft:net/minecraft/nbt/NbtException.java	7	A		mc.nbt	rivet-nbt	rivet-nbt	crates/rivet-nbt/src/nbt_exception.rs		0	0	0	0	complete
 net.minecraft.nbt.NbtFormatException	minecraft:net/minecraft/nbt/NbtFormatException.java	7	A		mc.nbt	rivet-nbt	rivet-nbt	crates/rivet-nbt/src/nbt_format_exception.rs		0	0	0	0	complete
 net.minecraft.nbt.NbtIo	minecraft:net/minecraft/nbt/NbtIo.java	211	A		mc.nbt.io	rivet-nbt	rivet-nbt	crates/rivet-nbt/src/nbt_io.rs		15	15	0	1	partial
-net.minecraft.nbt.NbtOps	minecraft:net/minecraft/nbt/NbtOps.java	508	A		mc.nbt.ops	rivet-nbt	rivet-nbt	crates/rivet-nbt/src/nbt_ops.rs		41	38	0	0	partial
+net.minecraft.nbt.NbtOps	minecraft:net/minecraft/nbt/NbtOps.java	508	A		mc.nbt.ops	rivet-nbt	rivet-nbt	crates/rivet-nbt/src/nbt_ops.rs		41	39	0	0	partial
 net.minecraft.nbt.NbtUtils	minecraft:net/minecraft/nbt/NbtUtils.java	560	A		mc.nbt.utils	rivet-nbt	rivet-nbt	crates/rivet-nbt/src/nbt_utils.rs		18	16	0	3	partial
 net.minecraft.nbt.NumericTag	minecraft:net/minecraft/nbt/NumericTag.java	59	A		mc.nbt	rivet-nbt	rivet-nbt	crates/rivet-nbt/src/numeric_tag.rs		15	6	0	0	partial
 net.minecraft.nbt.PrimitiveTag	minecraft:net/minecraft/nbt/PrimitiveTag.java	8	A		mc.nbt	rivet-nbt	rivet-nbt	crates/rivet-nbt/src/primitive_tag.rs		1	0	0	0	partial
 net.minecraft.nbt.ReportedNbtException	minecraft:net/minecraft/nbt/ReportedNbtException.java	10	A		mc.nbt	rivet-nbt	rivet-nbt	crates/rivet-nbt/src/reported_nbt_exception.rs		0	0	0	0	complete
-net.minecraft.nbt.ShortTag	minecraft:net/minecraft/nbt/ShortTag.java	137	A		mc.nbt	rivet-nbt	rivet-nbt	crates/rivet-nbt/src/short_tag.rs		15	3	0	0	partial
+net.minecraft.nbt.ShortTag	minecraft:net/minecraft/nbt/ShortTag.java	137	A		mc.nbt	rivet-nbt	rivet-nbt	crates/rivet-nbt/src/short_tag.rs		15	4	0	0	partial
 net.minecraft.nbt.SnbtGrammar	minecraft:net/minecraft/nbt/SnbtGrammar.java	938	A		mc.nbt.snbt	rivet-nbt	rivet-nbt	crates/rivet-nbt/src/snbt_grammar.rs		19	1	0	0	partial
 net.minecraft.nbt.SnbtOperations	minecraft:net/minecraft/nbt/SnbtOperations.java	96	A		mc.nbt.snbt	rivet-nbt	rivet-nbt	crates/rivet-nbt/src/snbt_operations.rs		2	1	0	0	partial
 net.minecraft.nbt.SnbtPrinterTagVisitor	minecraft:net/minecraft/nbt/SnbtPrinterTagVisitor.java	248	A		mc.nbt.snbt	rivet-nbt	rivet-nbt	crates/rivet-nbt/src/snbt_printer_tag_visitor.rs		19	19	0	0	complete
@@ -1083,7 +1083,7 @@ net.minecraft.network.CompressionEncoder	minecraft:net/minecraft/network/Compres
 net.minecraft.network.Connection	minecraft:net/minecraft/network/Connection.java	972	A		mc.network	rivet-protocol	rivet-protocol	-	crates/rivet-server/src/server/network/connection.rs	62	0	0	0	absent
 net.minecraft.network.ConnectionProtocol	minecraft:net/minecraft/network/ConnectionProtocol.java	19	A		mc.network	rivet-protocol	rivet-protocol	-		1	0	0	0	absent
 net.minecraft.network.DisconnectionDetails	minecraft:net/minecraft/network/DisconnectionDetails.java	18	A		mc.network	rivet-protocol	rivet-protocol	-		0	0	0	0	absent
-net.minecraft.network.FriendlyByteBuf	minecraft:net/minecraft/network/FriendlyByteBuf.java	1700	A	spine	mc.network.buf	rivet-protocol	rivet-protocol	crates/rivet-protocol/src/friendly_byte_buf.rs		203	64	0	0	partial
+net.minecraft.network.FriendlyByteBuf	minecraft:net/minecraft/network/FriendlyByteBuf.java	1700	A	spine	mc.network.buf	rivet-protocol	rivet-protocol	crates/rivet-protocol/src/friendly_byte_buf.rs		203	65	0	0	partial
 net.minecraft.network.HandlerNames	minecraft:net/minecraft/network/HandlerNames.java	20	A		mc.network	rivet-protocol	rivet-protocol	-		0	0	0	0	absent
 net.minecraft.network.HashedPatchMap	minecraft:net/minecraft/network/HashedPatchMap.java	60	A		mc.network	rivet-protocol	rivet-protocol	-		2	0	0	0	absent
 net.minecraft.network.HashedStack	minecraft:net/minecraft/network/HashedStack.java	56	A		mc.network	rivet-protocol	rivet-protocol	-		2	0	0	0	absent
@@ -1126,7 +1126,7 @@ net.minecraft.network.chat.ComponentUtils	minecraft:net/minecraft/network/chat/C
 net.minecraft.network.chat.FilterMask	minecraft:net/minecraft/network/chat/FilterMask.java	166	A		mc.network.chat	rivet-text	rivet-text	-		13	0	0	0	absent
 net.minecraft.network.chat.FontDescription	minecraft:net/minecraft/network/chat/FontDescription.java	26	A		mc.network.chat	rivet-text	rivet-text	crates/rivet-text/src/font_description.rs		0	0	0	0	complete
 net.minecraft.network.chat.FormattedText	minecraft:net/minecraft/network/chat/FormattedText.java	102	A		mc.network.chat	rivet-text	rivet-text	-		5	0	0	0	absent
-net.minecraft.network.chat.HoverEvent	minecraft:net/minecraft/network/chat/HoverEvent.java	145	A		mc.network.chat	rivet-text	rivet-text	crates/rivet-text/src/hover_event.rs		8	4	2	0	partial
+net.minecraft.network.chat.HoverEvent	minecraft:net/minecraft/network/chat/HoverEvent.java	145	A		mc.network.chat	rivet-text	rivet-text	crates/rivet-text/src/hover_event.rs		8	5	2	0	partial
 net.minecraft.network.chat.LastSeenMessages	minecraft:net/minecraft/network/chat/LastSeenMessages.java	85	A		mc.network.chat	rivet-text	rivet-text	-		6	0	0	0	absent
 net.minecraft.network.chat.LastSeenMessagesTracker	minecraft:net/minecraft/network/chat/LastSeenMessagesTracker.java	78	A		mc.network.chat	rivet-text	rivet-text	-		6	0	0	0	absent
 net.minecraft.network.chat.LastSeenMessagesValidator	minecraft:net/minecraft/network/chat/LastSeenMessagesValidator.java	83	A		mc.network.chat	rivet-text	rivet-text	-		4	0	0	0	absent
@@ -1144,7 +1144,7 @@ net.minecraft.network.chat.SignedMessageBody	minecraft:net/minecraft/network/cha
 net.minecraft.network.chat.SignedMessageChain	minecraft:net/minecraft/network/chat/SignedMessageChain.java	122	A		mc.network.chat	rivet-text	rivet-text	-		6	0	0	0	absent
 net.minecraft.network.chat.SignedMessageLink	minecraft:net/minecraft/network/chat/SignedMessageLink.java	45	A		mc.network.chat	rivet-text	rivet-text	-		5	0	0	0	absent
 net.minecraft.network.chat.SignedMessageValidator	minecraft:net/minecraft/network/chat/SignedMessageValidator.java	75	A		mc.network.chat	rivet-text	rivet-text	-		3	0	0	0	absent
-net.minecraft.network.chat.Style	minecraft:net/minecraft/network/chat/Style.java	628	A		mc.network.chat	rivet-text	rivet-text	crates/rivet-text/src/style.rs		33	31	0	0	partial
+net.minecraft.network.chat.Style	minecraft:net/minecraft/network/chat/Style.java	628	A		mc.network.chat	rivet-text	rivet-text	crates/rivet-text/src/style.rs		33	32	0	0	partial
 net.minecraft.network.chat.SubStringSource	minecraft:net/minecraft/network/chat/SubStringSource.java	85	A		mc.network.chat	rivet-text	rivet-text	-		3	0	0	0	absent
 net.minecraft.network.chat.TextColor	minecraft:net/minecraft/network/chat/TextColor.java	127	A		mc.network.chat	rivet-text	rivet-text	crates/rivet-text/src/text_color.rs		10	9	0	0	partial
 net.minecraft.network.chat.ThrowingComponent	minecraft:net/minecraft/network/chat/ThrowingComponent.java	19	A		mc.network.chat	rivet-text	rivet-text	-		1	0	0	0	absent
@@ -1475,7 +1475,7 @@ net.minecraft.resources.DelegatingOps	minecraft:net/minecraft/resources/Delegati
 net.minecraft.resources.DependantName	minecraft:net/minecraft/resources/DependantName.java	10	A		mc.resources	rivet-registry	rivet-registry	-		2	0	0	0	absent
 net.minecraft.resources.FileToIdConverter	minecraft:net/minecraft/resources/FileToIdConverter.java	39	A		mc.resources	rivet-registry	rivet-registry	-		7	0	0	0	absent
 net.minecraft.resources.HolderSetCodec	minecraft:net/minecraft/resources/HolderSetCodec.java	108	A		mc.resources	rivet-registry	rivet-registry	-		7	0	0	0	absent
-net.minecraft.resources.Identifier	minecraft:net/minecraft/resources/Identifier.java	282	A	spine	mc.resources	rivet-registry	rivet-registry	crates/rivet-registry/src/identifier.rs		32	29	0	0	partial
+net.minecraft.resources.Identifier	minecraft:net/minecraft/resources/Identifier.java	282	A	spine	mc.resources	rivet-registry	rivet-registry	crates/rivet-registry/src/identifier.rs		32	30	0	0	partial
 net.minecraft.resources.NetworkRegistryLoadTask	minecraft:net/minecraft/resources/NetworkRegistryLoadTask.java	88	A		mc.resources	rivet-registry	rivet-registry	-		1	0	0	0	absent
 net.minecraft.resources.RegistryDataLoader	minecraft:net/minecraft/resources/RegistryDataLoader.java	334	A	spine	mc.resources	rivet-registry	rivet-registry	crates/rivet-registry/src/registry_data_loader.rs		8	2	0	0	partial
 net.minecraft.resources.RegistryFileCodec	minecraft:net/minecraft/resources/RegistryFileCodec.java	82	A		mc.resources	rivet-registry	rivet-registry	crates/rivet-registry/src/registry_file_codec.rs		4	4	0	0	complete
@@ -1741,7 +1741,7 @@ net.minecraft.server.level.ServerBossEvent	minecraft:net/minecraft/server/level/
 net.minecraft.server.level.ServerChunkCache	minecraft:net/minecraft/server/level/ServerChunkCache.java	840	A		mc.server.level.pipeline.servercache	rivet-server	rivet-server	-		71	0	0	0	absent
 net.minecraft.server.level.ServerEntity	minecraft:net/minecraft/server/level/ServerEntity.java	426	A		mc.server.level	rivet-server	rivet-server	-		15	0	0	0	absent
 net.minecraft.server.level.ServerEntityGetter	minecraft:net/minecraft/server/level/ServerEntityGetter.java	134	A		mc.server.level	rivet-server	rivet-server	-		5	0	0	0	absent
-net.minecraft.server.level.ServerLevel	minecraft:net/minecraft/server/level/ServerLevel.java	2997	A	spine	mc.server.level	rivet-server	rivet-server	crates/rivet-server/src/server/level/server_level.rs		198	5	0	2	partial
+net.minecraft.server.level.ServerLevel	minecraft:net/minecraft/server/level/ServerLevel.java	2997	A	spine	mc.server.level	rivet-server	rivet-server	crates/rivet-server/src/server/level/server_level.rs		198	6	0	2	partial
 net.minecraft.server.level.ServerPlayer	minecraft:net/minecraft/server/level/ServerPlayer.java	3141	A	spine	mc.server.level	rivet-server	rivet-server	-		211	0	0	0	absent
 net.minecraft.server.level.ServerPlayerGameMode	minecraft:net/minecraft/server/level/ServerPlayerGameMode.java	600	A		mc.server.level	rivet-server	rivet-server	-		16	0	0	0	absent
 net.minecraft.server.level.SimulationChunkTracker	minecraft:net/minecraft/server/level/SimulationChunkTracker.java	46	A		mc.server.level.pipeline.tracker	rivet-server	rivet-server	-		4	0	0	0	absent
@@ -1954,7 +1954,7 @@ net.minecraft.util.GsonHelper	minecraft:net/minecraft/util/GsonHelper.java	595	A
 net.minecraft.util.HashOps	minecraft:net/minecraft/util/HashOps.java	391	A		mc.util	rivet-util	rivet-util	crates/rivet-util/src/hash_ops.rs		46	44	0	0	partial
 net.minecraft.util.HttpUtil	minecraft:net/minecraft/util/HttpUtil.java	228	A		mc.util	rivet-util	rivet-util	-		12	0	0	0	absent
 net.minecraft.util.IdentifierPattern	minecraft:net/minecraft/util/IdentifierPattern.java	43	A		mc.util	rivet-util	rivet-util	-		3	0	0	0	absent
-net.minecraft.util.InclusiveRange	minecraft:net/minecraft/util/InclusiveRange.java	81	A		mc.util	rivet-util	rivet-util	crates/rivet-util/src/inclusive_range.rs		6	1	1	0	partial
+net.minecraft.util.InclusiveRange	minecraft:net/minecraft/util/InclusiveRange.java	81	A		mc.util	rivet-util	rivet-util	crates/rivet-util/src/inclusive_range.rs		6	2	1	0	partial
 net.minecraft.util.KeyDispatchDataCodec	minecraft:net/minecraft/util/KeyDispatchDataCodec.java	9	A		mc.util	rivet-util	rivet-util	-	crates/rivet-serialization/src/key_dispatch_data_codec.rs	1	0	0	0	absent
 net.minecraft.util.Keyframe	minecraft:net/minecraft/util/Keyframe.java	13	A		mc.util	rivet-util	rivet-util	-		1	0	0	0	absent
 net.minecraft.util.KeyframeTrack	minecraft:net/minecraft/util/KeyframeTrack.java	95	A		mc.util	rivet-util	rivet-util	-		7	0	0	0	absent
@@ -3327,7 +3327,7 @@ net.minecraft.world.entity.vehicle.minecart.OldMinecartBehavior	minecraft:net/mi
 net.minecraft.world.flag.FeatureElement	minecraft:net/minecraft/world/flag/FeatureElement.java	18	A		mc.world.flag	rivet-world	rivet-world	-		2	0	0	0	absent
 net.minecraft.world.flag.FeatureFlag	minecraft:net/minecraft/world/flag/FeatureFlag.java	11	A		mc.world.flag	rivet-world	rivet-world	crates/rivet-world/src/flag/feature_flag.rs		0	0	0	0	complete
 net.minecraft.world.flag.FeatureFlagRegistry	minecraft:net/minecraft/world/flag/FeatureFlagRegistry.java	110	A		mc.world.flag	rivet-world	rivet-world	crates/rivet-world/src/flag/feature_flag_registry.rs		9	9	0	0	complete
-net.minecraft.world.flag.FeatureFlagSet	minecraft:net/minecraft/world/flag/FeatureFlagSet.java	103	A		mc.world.flag	rivet-world	rivet-world	crates/rivet-world/src/flag/feature_flag_set.rs		11	8	0	0	partial
+net.minecraft.world.flag.FeatureFlagSet	minecraft:net/minecraft/world/flag/FeatureFlagSet.java	103	A		mc.world.flag	rivet-world	rivet-world	crates/rivet-world/src/flag/feature_flag_set.rs		11	10	0	0	partial
 net.minecraft.world.flag.FeatureFlagUniverse	minecraft:net/minecraft/world/flag/FeatureFlagUniverse.java	14	A		mc.world.flag	rivet-world	rivet-world	crates/rivet-world/src/flag/feature_flag_universe.rs		1	1	0	0	complete
 net.minecraft.world.flag.FeatureFlags	minecraft:net/minecraft/world/flag/FeatureFlags.java	43	A		mc.world.flag	rivet-world	rivet-world	crates/rivet-world/src/flag/feature_flags.rs		2	2	0	0	complete
 net.minecraft.world.food.FoodConstants	minecraft:net/minecraft/world/food/FoodConstants.java	33	A		mc.world.food	rivet-world	rivet-world	-	crates/rivet-entity/src/survival/food_constants.rs	1	0	0	0	absent
@@ -3571,7 +3571,7 @@ net.minecraft.world.item.crafting.FireworkRocketRecipe	minecraft:net/minecraft/w
 net.minecraft.world.item.crafting.FireworkStarFadeRecipe	minecraft:net/minecraft/world/item/crafting/FireworkStarFadeRecipe.java	104	A		mc.world.item.crafting	rivet-world	rivet-world	-		3	0	0	0	absent
 net.minecraft.world.item.crafting.FireworkStarRecipe	minecraft:net/minecraft/world/item/crafting/FireworkStarRecipe.java	172	A		mc.world.item.crafting	rivet-world	rivet-world	-		3	0	0	0	absent
 net.minecraft.world.item.crafting.ImbueRecipe	minecraft:net/minecraft/world/item/crafting/ImbueRecipe.java	127	A		mc.world.item.crafting	rivet-world	rivet-world	-		6	0	0	0	absent
-net.minecraft.world.item.crafting.Ingredient	minecraft:net/minecraft/world/item/crafting/Ingredient.java	157	A		mc.world.item.crafting	rivet-world	rivet-world	crates/rivet-world/src/crafting/ingredient.rs		13	6	0	0	partial
+net.minecraft.world.item.crafting.Ingredient	minecraft:net/minecraft/world/item/crafting/Ingredient.java	157	A		mc.world.item.crafting	rivet-world	rivet-world	crates/rivet-world/src/crafting/ingredient.rs		13	7	0	0	partial
 net.minecraft.world.item.crafting.MapExtendingRecipe	minecraft:net/minecraft/world/item/crafting/MapExtendingRecipe.java	85	A		mc.world.item.crafting	rivet-world	rivet-world	-		4	0	0	0	absent
 net.minecraft.world.item.crafting.NormalCraftingRecipe	minecraft:net/minecraft/world/item/crafting/NormalCraftingRecipe.java	43	A		mc.world.item.crafting	rivet-world	rivet-world	-		6	0	0	0	absent
 net.minecraft.world.item.crafting.PlacementInfo	minecraft:net/minecraft/world/item/crafting/PlacementInfo.java	74	A		mc.world.item.crafting	rivet-world	rivet-world	-		5	0	0	0	absent
@@ -3627,7 +3627,7 @@ net.minecraft.world.item.enchantment.EnchantmentHelper	minecraft:net/minecraft/w
 net.minecraft.world.item.enchantment.EnchantmentInstance	minecraft:net/minecraft/world/item/enchantment/EnchantmentInstance.java	9	A		mc.world.item.enchantment	rivet-world	rivet-world	-		1	0	0	0	absent
 net.minecraft.world.item.enchantment.EnchantmentTarget	minecraft:net/minecraft/world/item/enchantment/EnchantmentTarget.java	23	A		mc.world.item.enchantment	rivet-world	rivet-world	-		1	0	0	0	absent
 net.minecraft.world.item.enchantment.Enchantments	minecraft:net/minecraft/world/item/enchantment/Enchantments.java	1310	A		mc.world.item.enchantment	rivet-world	rivet-world	-		3	0	0	0	absent
-net.minecraft.world.item.enchantment.ItemEnchantments	minecraft:net/minecraft/world/item/enchantment/ItemEnchantments.java	164	A		mc.world.item.enchantment	rivet-world	rivet-world	crates/rivet-world/src/enchantment/item_enchantments.rs		14	9	0	0	partial
+net.minecraft.world.item.enchantment.ItemEnchantments	minecraft:net/minecraft/world/item/enchantment/ItemEnchantments.java	164	A		mc.world.item.enchantment	rivet-world	rivet-world	crates/rivet-world/src/enchantment/item_enchantments.rs		14	12	0	0	partial
 net.minecraft.world.item.enchantment.LevelBasedValue	minecraft:net/minecraft/world/item/enchantment/LevelBasedValue.java	185	A		mc.world.item.enchantment	rivet-world	rivet-world	crates/rivet-world/src/enchantment/level_based_value.rs		6	4	0	0	partial
 net.minecraft.world.item.enchantment.Repairable	minecraft:net/minecraft/world/item/enchantment/Repairable.java	25	A		mc.world.item.enchantment	rivet-world	rivet-world	-		1	0	0	0	absent
 net.minecraft.world.item.enchantment.TargetedConditionalEffect	minecraft:net/minecraft/world/item/enchantment/TargetedConditionalEffect.java	49	A		mc.world.item.enchantment	rivet-world	rivet-world	-		4	0	0	0	absent
@@ -4256,12 +4256,12 @@ net.minecraft.world.level.chunk.SingleValuePalette	minecraft:net/minecraft/world
 net.minecraft.world.level.chunk.Strategy	minecraft:net/minecraft/world/level/chunk/Strategy.java	91	A		mc.world.level.chunk.wire	rivet-world	rivet-world	crates/rivet-world/src/chunk/strategy.rs		9	8	0	0	partial
 net.minecraft.world.level.chunk.StructureAccess	minecraft:net/minecraft/world/level/chunk/StructureAccess.java	21	A		mc.world.level.chunk.support	rivet-world	rivet-world	crates/rivet-world/src/chunk/structure_access.rs		6	6	0	0	complete
 net.minecraft.world.level.chunk.UpgradeData	minecraft:net/minecraft/world/level/chunk/UpgradeData.java	505	A		mc.world.level.chunk.access	rivet-world	rivet-world	crates/rivet-world/src/chunk/upgrade_data.rs		10	3	0	1	partial
-net.minecraft.world.level.chunk.status.ChunkDependencies	minecraft:net/minecraft/world/level/chunk/status/ChunkDependencies.java	58	A		mc.world.level.chunk.status	rivet-world	rivet-world	crates/rivet-world/src/chunk/status/chunk_dependencies.rs		6	5	0	0	partial
+net.minecraft.world.level.chunk.status.ChunkDependencies	minecraft:net/minecraft/world/level/chunk/status/ChunkDependencies.java	58	A		mc.world.level.chunk.status	rivet-world	rivet-world	crates/rivet-world/src/chunk/status/chunk_dependencies.rs		6	6	0	0	complete
 net.minecraft.world.level.chunk.status.ChunkPyramid	minecraft:net/minecraft/world/level/chunk/status/ChunkPyramid.java	83	A		mc.world.level.chunk.status	rivet-world	rivet-world	crates/rivet-world/src/chunk/status/chunk_pyramid.rs		3	3	0	0	complete
-net.minecraft.world.level.chunk.status.ChunkStatus	minecraft:net/minecraft/world/level/chunk/status/ChunkStatus.java	176	A		mc.world.level.chunk.status	rivet-world	rivet-world	crates/rivet-world/src/chunk/status/chunk_status.rs		23	9	0	0	partial
+net.minecraft.world.level.chunk.status.ChunkStatus	minecraft:net/minecraft/world/level/chunk/status/ChunkStatus.java	176	A		mc.world.level.chunk.status	rivet-world	rivet-world	crates/rivet-world/src/chunk/status/chunk_status.rs		23	10	0	0	partial
 net.minecraft.world.level.chunk.status.ChunkStatusTask	minecraft:net/minecraft/world/level/chunk/status/ChunkStatusTask.java	11	A		mc.world.level.chunk.status	rivet-world	rivet-world	crates/rivet-world/src/chunk/status/chunk_status_task.rs		1	0	0	0	partial
 net.minecraft.world.level.chunk.status.ChunkStatusTasks	minecraft:net/minecraft/world/level/chunk/status/ChunkStatusTasks.java	260	A		mc.world.level.chunk.status	rivet-world	rivet-world	crates/rivet-world/src/chunk/status/chunk_status_tasks.rs		16	1	0	0	partial
-net.minecraft.world.level.chunk.status.ChunkStep	minecraft:net/minecraft/world/level/chunk/status/ChunkStep.java	231	A	spine	mc.world.level.chunk.status	rivet-world	rivet-world	crates/rivet-world/src/chunk/status/chunk_step.rs		17	11	0	0	partial
+net.minecraft.world.level.chunk.status.ChunkStep	minecraft:net/minecraft/world/level/chunk/status/ChunkStep.java	231	A	spine	mc.world.level.chunk.status	rivet-world	rivet-world	crates/rivet-world/src/chunk/status/chunk_step.rs		17	13	0	0	partial
 net.minecraft.world.level.chunk.status.ChunkType	minecraft:net/minecraft/world/level/chunk/status/ChunkType.java	6	A		mc.world.level.chunk.status	rivet-world	rivet-world	-		0	0	0	0	absent
 net.minecraft.world.level.chunk.status.WorldGenContext	minecraft:net/minecraft/world/level/chunk/status/WorldGenContext.java	18	A		mc.world.level.chunk.status	rivet-world	rivet-world	crates/rivet-world/src/chunk/status/world_gen_context.rs		0	0	0	1	partial
 net.minecraft.world.level.chunk.storage.ChunkIOErrorReporter	minecraft:net/minecraft/world/level/chunk/storage/ChunkIOErrorReporter.java	25	A		mc.world.level.chunk.storage	rivet-world	rivet-world	-		4	0	0	0	absent
@@ -4598,7 +4598,7 @@ net.minecraft.world.level.levelgen.placement.SurfaceRelativeThresholdFilter	mine
 net.minecraft.world.level.levelgen.placement.SurfaceWaterDepthFilter	minecraft:net/minecraft/world/level/levelgen/placement/SurfaceWaterDepthFilter.java	35	A		mc.world.level.levelgen.placement.filter	rivet-world	rivet-world	crates/rivet-world/src/levelgen/placement/surface_water_depth_filter.rs		3	2	0	0	partial
 net.minecraft.world.level.levelgen.presets.WorldPreset	minecraft:net/minecraft/world/level/levelgen/presets/WorldPreset.java	53	A		mc.world.level.levelgen.presets	rivet-world	rivet-world	crates/rivet-world/src/levelgen/presets/world_preset.rs		4	4	0	0	complete
 net.minecraft.world.level.levelgen.presets.WorldPresets	minecraft:net/minecraft/world/level/levelgen/presets/WorldPresets.java	184	A		mc.world.level.levelgen.presets	rivet-world	rivet-world	crates/rivet-world/src/levelgen/presets/world_presets.rs		15	6	0	0	partial
-net.minecraft.world.level.levelgen.structure.BoundingBox	minecraft:net/minecraft/world/level/levelgen/structure/BoundingBox.java	307	A		mc.world.level.levelgen.structure.framework	rivet-world	rivet-world	crates/rivet-world/src/levelgen/structure/bounding_box.rs		28	5	0	0	partial
+net.minecraft.world.level.levelgen.structure.BoundingBox	minecraft:net/minecraft/world/level/levelgen/structure/BoundingBox.java	307	A		mc.world.level.levelgen.structure.framework	rivet-world	rivet-world	crates/rivet-world/src/levelgen/structure/bounding_box.rs		28	7	0	0	partial
 net.minecraft.world.level.levelgen.structure.BuiltinStructureSets	minecraft:net/minecraft/world/level/levelgen/structure/BuiltinStructureSets.java	32	A		mc.world.level.levelgen.structure	rivet-world	rivet-world	-		1	0	0	0	absent
 net.minecraft.world.level.levelgen.structure.BuiltinStructures	minecraft:net/minecraft/world/level/levelgen/structure/BuiltinStructures.java	46	A		mc.world.level.levelgen.structure	rivet-world	rivet-world	-		1	0	0	0	absent
 net.minecraft.world.level.levelgen.structure.PoolElementStructurePiece	minecraft:net/minecraft/world/level/levelgen/structure/PoolElementStructurePiece.java	163	A		mc.world.level.levelgen.structure.framework.pieces	rivet-world	rivet-world	-		11	0	0	0	absent
@@ -4705,7 +4705,7 @@ net.minecraft.world.level.levelgen.structure.templatesystem.StructureProcessor	m
 net.minecraft.world.level.levelgen.structure.templatesystem.StructureProcessorList	minecraft:net/minecraft/world/level/levelgen/structure/templatesystem/StructureProcessorList.java	20	A		mc.world.level.levelgen.structure.templatesystem.core	rivet-world	rivet-world	-		2	0	0	0	absent
 net.minecraft.world.level.levelgen.structure.templatesystem.StructureProcessorType	minecraft:net/minecraft/world/level/levelgen/structure/templatesystem/StructureProcessorType.java	14	A		mc.world.level.levelgen.structure.templatesystem.core	rivet-world	rivet-world	-		0	0	0	0	absent
 net.minecraft.world.level.levelgen.structure.templatesystem.StructureProcessorTypes	minecraft:net/minecraft/world/level/levelgen/structure/templatesystem/StructureProcessorTypes.java	20	A		mc.world.level.levelgen.structure.templatesystem.processors	rivet-world	rivet-world	-		1	0	0	0	absent
-net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemplate	minecraft:net/minecraft/world/level/levelgen/structure/templatesystem/StructureTemplate.java	947	A	spine	mc.world.level.levelgen.structure.templatesystem.core	rivet-world	rivet-world	crates/rivet-world/src/levelgen/structure/templatesystem/structure_template.rs		35	19	0	0	partial
+net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemplate	minecraft:net/minecraft/world/level/levelgen/structure/templatesystem/StructureTemplate.java	947	A	spine	mc.world.level.levelgen.structure.templatesystem.core	rivet-world	rivet-world	crates/rivet-world/src/levelgen/structure/templatesystem/structure_template.rs		35	20	0	0	partial
 net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemplateManager	minecraft:net/minecraft/world/level/levelgen/structure/templatesystem/StructureTemplateManager.java	175	A	spine	mc.world.level.levelgen.structure.templatesystem.core	rivet-world	rivet-world	crates/rivet-world/src/levelgen/structure/templatesystem/structure_template_manager.rs		9	5	0	0	partial
 net.minecraft.world.level.levelgen.structure.templatesystem.TagMatchTest	minecraft:net/minecraft/world/level/levelgen/structure/templatesystem/TagMatchTest.java	27	A		mc.world.level.levelgen.structure.templatesystem.rules	rivet-world	rivet-world	-		2	0	0	0	absent
 net.minecraft.world.level.levelgen.structure.templatesystem.loader.DirectoryTemplateSource	minecraft:net/minecraft/world/level/levelgen/structure/templatesystem/loader/DirectoryTemplateSource.java	81	A		mc.world.level.levelgen.structure.templatesystem.loader	rivet-world	rivet-server	-		2	0	0	0	absent

@@ -176,13 +176,14 @@ class RealClassTest(unittest.TestCase):
         sizeInBytes, getId, getType, toString, copy and accept (overloaded
         twice) = 7 distinct names; the anonymous TagType body (load, parse,
         skip, getName, getPrettyName) is excluded. crates/rivet-nbt/src/end_tag.rs
-        defines size_in_bytes, copy_tag and as_tag: only sizeInBytes matches
-        (`copy` is not overloaded, so `copy_tag` is no overload suffix; the
-        trait methods live on the `Tag` enum in tag.rs, a documented blind
-        spot). 1 of 7 -> partial."""
+        defines size_in_bytes, copy_tag and as_tag and derives Debug: sizeInBytes
+        matches by name and toString by the Debug derive (`copy` is not
+        overloaded, so `copy_tag` is no overload suffix; write, getId, getType
+        and accept live on the `Tag` enum in tag.rs, a documented blind spot).
+        2 of 7 -> partial."""
         r = self.rows["net.minecraft.nbt.EndTag"]
         self.assertEqual(r["rust_path"], "crates/rivet-nbt/src/end_tag.rs")
-        self.assertEqual((r["method_total"], r["method_covered"], r["status"]), ("7", "1", "partial"))
+        self.assertEqual((r["method_total"], r["method_covered"], r["status"]), ("7", "2", "partial"))
 
     def test_float_goal_assigned_to_server(self):
         """net/minecraft/world/entity/ai/goal/FloatGoal.java declares canUse,
