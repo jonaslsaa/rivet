@@ -69,8 +69,12 @@ pub trait NodeEvaluator {
         random: &mut dyn GoalRandom,
     ) -> usize;
 
-    fn get_target(&self, x: f64, y: f64, z: f64) -> Target {
-        Target::new(mth::floor_d(x), mth::floor_d(y), mth::floor_d(z))
+    /// Mirrors `NodeEvaluator.getTargetNodeAt`: `new Target(getNode(floor x, y, z))`.
+    /// The cell is registered in the node map and the Target takes the
+    /// coordinates of whatever node the (hash-keyed) map returns.
+    fn get_target(&self, arena: &mut NodeArena, x: f64, y: f64, z: f64) -> Target {
+        let idx = arena.get_or_create(mth::floor_d(x), mth::floor_d(y), mth::floor_d(z));
+        Target::from_node(arena.get(idx))
     }
 
     fn get_neighbors<W: PathWorldView + ?Sized>(
@@ -162,6 +166,7 @@ pub fn check_neighbour_blocks<W: PathWorldView + ?Sized>(
 pub fn get_floor_level_static<W: PathWorldView + ?Sized>(world: &W, pos: BlockPos) -> f64 {
     let below = BlockPos::new(pos.x, pos.y - 1, pos.z);
     let info = world.block_info(below);
+    // RivetTodo(#781) getFloorLevel uses the max-Y approximation of the collision VoxelShape (Shapes.max(Axis.Y)).
     let max_y = info.collision_max_y.unwrap_or(0.0);
     below.y as f64 + max_y
 }
@@ -458,11 +463,12 @@ impl WalkNodeEvaluator {
         dir: Direction,
         path_type_at_current: PathType,
     ) -> Option<usize> {
-        let mut path_type = self.get_cached_path_type(ctx, mob, x, y, z);
         let floor_level = self.get_floor_level(ctx.level(), mob, BlockPos::new(x, y, z));
         if floor_level - node_floor_level > self.get_mob_jump_height(mob) {
             return None;
         }
+
+        let mut path_type = self.get_cached_path_type(ctx, mob, x, y, z);
 
         let mut cost_malus = mob.get_pathfinding_malus(path_type);
         let mut best = if cost_malus >= 0.0 {
@@ -1629,8 +1635,9 @@ impl NodeEvaluator for AmphibiousNodeEvaluator {
         }
     }
 
-    fn get_target(&self, x: f64, y: f64, z: f64) -> Target {
-        Target::new(mth::floor_d(x), mth::floor_d(y + 0.5), mth::floor_d(z))
+    fn get_target(&self, arena: &mut NodeArena, x: f64, y: f64, z: f64) -> Target {
+        let idx = arena.get_or_create(mth::floor_d(x), mth::floor_d(y + 0.5), mth::floor_d(z));
+        Target::from_node(arena.get(idx))
     }
 
     fn get_neighbors<W: PathWorldView + ?Sized>(

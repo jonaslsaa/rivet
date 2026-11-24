@@ -73,7 +73,7 @@ impl PathFinder {
         let mut target_entries: Vec<(Target, BlockPos)> = Vec::with_capacity(targets.len());
         for &pos in targets {
             target_entries.push((
-                evaluator.get_target(pos.x as f64, pos.y as f64, pos.z as f64),
+                evaluator.get_target(&mut arena, pos.x as f64, pos.y as f64, pos.z as f64),
                 pos,
             ));
         }

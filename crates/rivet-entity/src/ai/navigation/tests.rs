@@ -21,6 +21,8 @@ struct TestWorld {
     sea_level: i32,
     /// `(minX, minZ, maxX, maxZ)` of the world border; unbounded when `None`.
     border: Option<(i32, i32, i32, i32)>,
+    /// Every `block_info` read, in order.
+    reads: std::cell::RefCell<Vec<BlockPos>>,
 }
 
 impl TestWorld {
@@ -30,6 +32,7 @@ impl TestWorld {
             default_floor_y: Some(floor_y),
             sea_level: 63,
             border: None,
+            reads: std::cell::RefCell::default(),
         }
     }
 
@@ -39,6 +42,7 @@ impl TestWorld {
             default_floor_y: None,
             sea_level: 63,
             border: None,
+            reads: std::cell::RefCell::default(),
         }
     }
 
@@ -63,6 +67,7 @@ impl PathWorldView for TestWorld {
     }
 
     fn block_info(&self, pos: BlockPos) -> BlockPathInfo {
+        self.reads.borrow_mut().push(pos);
         if let Some(&info) = self.blocks.get(&pos) {
             return info;
         }
@@ -1976,4 +1981,55 @@ fn evaluators_run_mob_pathfinding_hooks_at_paper_points() {
         1.0,
     );
     assert_eq!(take_log(), ["start", "start", "done", "done"]);
+}
+
+#[test]
+fn get_target_registers_cell_and_takes_hash_colliding_node() {
+    use super::NodeEvaluator;
+
+    // Java `getTargetNodeAt` = `new Target(getNode(floor x, y, z))`; `Node.createHash`
+    // keeps only `y & 0xFF`, so (5, 10, 5) and (5, 266, 5) share the key 266 - 10 = 256.
+    let mut arena = NodeArena::new();
+    let start = arena.get_or_create(5, 10, 5);
+    let walk = WalkNodeEvaluator::new();
+    let t = walk.get_target(&mut arena, 5.0, 266.0, 5.0);
+    assert_eq!((t.x, t.y, t.z), (5, 10, 5));
+    assert_eq!(arena.len(), 1);
+    assert_eq!(start, 0);
+
+    // Amphibious uses `getTargetNodeAt(x, y + 0.5, z)`: floor(265.5 + 0.5) = 266, same collision.
+    let amph = AmphibiousNodeEvaluator::new(true);
+    let t = amph.get_target(&mut arena, 5.0, 265.5, 5.0);
+    assert_eq!((t.x, t.y, t.z), (5, 10, 5));
+
+    // A fresh cell is registered in the arena (Java's computeIfAbsent side effect).
+    let t = walk.get_target(&mut arena, 7.0, 20.0, 7.0);
+    assert_eq!((t.x, t.y, t.z), (7, 20, 7));
+    assert_eq!(arena.len(), 2);
+}
+
+#[test]
+fn walk_find_accepted_node_rejects_by_floor_level_before_scanning_path_type() {
+    use super::NodeEvaluator;
+
+    // Start (0,2,0) over air: node height = (2-1) + 0 = 1.0. Candidate (1,2,0) sits on a
+    // fence (collision_max_y 1.5): maxYTarget = 1 + 1.5 = 2.5; 2.5 - 1.0 = 1.5 > jump
+    // height 1.0, so Java `findAcceptedNode` returns null before `getCachedPathType`
+    // reads any cell of the candidate's mob box (e.g. (1,2,0)).
+    let mut world = TestWorld::empty();
+    world.set(1, 1, 0, BlockPathInfo::FENCE);
+    let mut mob = MobPathingState::new(Vec3::new(0.5, 2.0, 0.5), 0.6, 1.8);
+    let mut eval = WalkNodeEvaluator::new();
+    eval.prepare(&mut mob, &world);
+    let mut ctx = PathfindingContext::new(&world, None, BlockPos::new(0, 2, 0));
+    let mut arena = NodeArena::new();
+    let start = arena.get_or_create(0, 2, 0);
+    world.reads.borrow_mut().clear();
+    let mut out = [0usize; 32];
+    eval.get_neighbors(&mut ctx, &mob, &mut arena, start, &mut out);
+    let reads = world.reads.borrow();
+    assert!(
+        !reads.contains(&BlockPos::new(1, 2, 0)),
+        "rejected candidate was scanned: {reads:?}"
+    );
 }

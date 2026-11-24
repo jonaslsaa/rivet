@@ -215,6 +215,7 @@ impl MoveControl {
 
                 let pos = mob.block_position();
                 let info = world.block_info(pos);
+                // RivetTodo(#781) uses the max-Y approximation of the block collision VoxelShape.
                 let shape_max_y = info.collision_max_y.unwrap_or(0.0);
                 // `Math.max(1.0F, bbWidth)` is compared against the squared
                 // horizontal distance without squaring it.

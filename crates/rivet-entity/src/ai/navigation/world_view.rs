@@ -49,6 +49,7 @@ pub struct BlockPathInfo {
     /// `blockState.isSolid()` (the legacy-solid flag).
     pub is_solid: bool,
     /// `blockState.isSolidRender()`.
+    // RivetTodo(#781) isSolidRender is a host-supplied flag; real BlockState.isSolidRender (occlusion shape) is not ported.
     pub is_solid_render: bool,
     /// `blockState.entityCanStandOn(level, pos, mob)`: whether the block's collision
     /// shape under the navigating mob's `CollisionContext` has a full `UP` face.
@@ -59,6 +60,7 @@ pub struct BlockPathInfo {
     pub is_pathfindable_water: bool,
     /// Maximum Y of the block's collision `VoxelShape` in local `[0.0, 1.0+]` space,
     /// or `None` if `collisionShape.isEmpty()`.
+    // RivetTodo(#781) collision VoxelShapes are reduced to a [0,1]x[0,maxY]x[0,1] box; real block shapes under the mob's CollisionContext come with the level services.
     pub collision_max_y: Option<f64>,
     /// Whether sky light reaches this position (`level.canSeeSky(pos)`).
     pub can_see_sky: bool,
@@ -339,10 +341,12 @@ pub trait PathWorldView {
     /// `noBorderCollision`, the world border's collision shape when
     /// `WorldBorder.isInsideCloseToBorder(mob, aabb)`. The region contributes no
     /// entity collisions.
+    // RivetTodo(#781) real VoxelShape collision, WorldBorder.isInsideCloseToBorder/noBorderCollision and getChunkForCollisions unloaded-chunk semantics are provided by the PathWorldView implementor, not ported here.
     fn is_aabb_collision_free(&self, aabb: Aabb) -> bool;
 
     /// Paper's `WorldBorder.isWithinBounds(BlockPos)`:
     /// `x >= minX && x < maxX && z >= minZ && z < maxZ` on the block coordinates.
+    // RivetTodo(#781) world border state is supplied by the host; the real WorldBorder is not ported.
     fn is_within_world_border(&self, pos: BlockPos) -> bool;
 
     /// One cell of Paper's `Level.clip` (Moonrise `fastClip`) for a
@@ -355,6 +359,7 @@ pub trait PathWorldView {
     /// clips it. Air and positions outside the build height never hit. `Level.clip`
     /// reads chunks through `Level.getChunk`, so the implementation sees the
     /// level's real block at `pos`, never the region's unloaded sentinel.
+    // RivetTodo(#781) VoxelShape.clip and fluid shapes come from the host; Level.clip chunk access is not ported.
     fn clip_hits_block(&self, pos: BlockPos, from: Vec3, to: Vec3, blocked_by_fluids: bool)
     -> bool;
 

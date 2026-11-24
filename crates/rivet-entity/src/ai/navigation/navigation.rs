@@ -782,6 +782,7 @@ impl PathNavigation {
                     if info.is_air {
                         next_pos.y
                     } else {
+                        // RivetTodo(#781) uses the max-Y approximation of the block collision VoxelShape.
                         below.y as f64 + info.collision_max_y.unwrap_or(0.0)
                     }
                 }
@@ -1009,6 +1010,7 @@ impl PathNavigation {
         pos: BlockPos,
     ) -> bool {
         let below = BlockPos::new(pos.x, pos.y - 1, pos.z);
+        // RivetTodo(#781) isSolidRender/entityCanStandOn come from host-supplied flags, not real BlockState shapes.
         match self.variant {
             NavigationVariant::Amphibious { .. } => !world.block_info(below).is_air,
             NavigationVariant::WaterBound { .. } => !world.block_info(pos).is_solid_render,
@@ -1022,6 +1024,7 @@ impl PathNavigation {
     /// Mirrors `PathNavigation.shouldRecomputePath(BlockPos)`, called by
     /// `ServerLevel.sendBlockUpdated` for a changed block.
     #[must_use]
+    // RivetTodo(#781) ServerLevel.sendBlockUpdated wiring (and the real level/chunk services feeding it) is not ported; only the distance test is.
     pub fn should_recompute_path(&self, mob: &MobPathingState, pos: BlockPos) -> bool {
         if self.has_delayed_recomputation {
             return false;
