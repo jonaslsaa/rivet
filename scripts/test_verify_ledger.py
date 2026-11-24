@@ -201,6 +201,21 @@ class RealTreeTest(unittest.TestCase):
         self.assertTrue(r["rust_globs"])
         self.assertIn("net.minecraft.world.level.material.FlowingFluid", r["java_classes"])
 
+    def test_arena_rows(self):
+        """One L4 row per tools/rivet-oracle/arenas/arenas.tsv entry plus the
+        harness row; water_source_spread.json declares 40 ticks, so its trace
+        holds 41 tick records."""
+        arenas = sorted(p.stem for p in (vl.REPO / vl.ARENAS).glob("*.json"))
+        self.assertGreaterEqual(len(arenas), 10)
+        for name in arenas:
+            r = self.rows[f"arena.{name}"]
+            self.assertEqual((r["layer"], r["negative"], r["tier"]), ("L4", "y", "T2"), name)
+            self.assertIn(f"{vl.ARENAS}/paper/{name}.trace.jsonl", r["fixtures"])
+        self.assertEqual(self.rows["arena.water_source_spread"]["corpus_n"], "41")
+        self.assertIn("crates/rivet-server/src/server/level/fluid_runtime.rs",
+                      self.rows["arena.water_source_spread"]["rust_globs"])
+        self.assertEqual(self.rows["arena.harness"]["corpus_n"], str(len(arenas)))
+
     def test_inactive_and_boot_rows_are_never_pass(self):
         self.assertEqual(self.rows["hash.diff"]["seed_status"], "INACTIVE")
         self.assertEqual(self.rows["generated-full"]["seed_status"], "INACTIVE")
