@@ -1,0 +1,22 @@
+{"name":"basic","commands":[
+{"literal":"bool","children":[{"argument":"value","type":{"kind":"bool"},"executes":1}]},
+{"literal":"int","children":[{"argument":"value","type":{"kind":"integer"},"executes":2}]},
+{"literal":"intb","children":[{"argument":"value","type":{"kind":"integer","min":-5,"max":10},"executes":3}]},
+{"literal":"intmin","children":[{"argument":"value","type":{"kind":"integer","min":0},"executes":4}]},
+{"literal":"long","children":[{"argument":"value","type":{"kind":"long"},"executes":5}]},
+{"literal":"longb","children":[{"argument":"value","type":{"kind":"long","min":-1000,"max":1000},"executes":6}]},
+{"literal":"float","children":[{"argument":"value","type":{"kind":"float"},"executes":7}]},
+{"literal":"floatb","children":[{"argument":"value","type":{"kind":"float","min":-1.5,"max":2.5},"executes":8}]},
+{"literal":"double","children":[{"argument":"value","type":{"kind":"double"},"executes":9}]},
+{"literal":"doubleb","children":[{"argument":"value","type":{"kind":"double","min":0.0,"max":100.0},"executes":10}]},
+{"literal":"word","children":[{"argument":"value","type":{"kind":"string","mode":"word"},"executes":11}]},
+{"literal":"string","children":[{"argument":"value","type":{"kind":"string","mode":"quotable"},"executes":12}]},
+{"literal":"greedy","children":[{"argument":"value","type":{"kind":"string","mode":"greedy"},"executes":13}]},
+{"literal":"two","children":[{"argument":"a","type":{"kind":"integer"},"children":[{"argument":"b","type":{"kind":"string","mode":"word"},"executes":14}]}]},
+{"literal":"opt","executes":15,"children":[{"argument":"a","type":{"kind":"integer"},"executes":17,"children":[{"argument":"b","type":{"kind":"integer"},"executes":16}]}]},
+{"literal":"fail","executes":{"throws":"command failed"}},
+{"literal":"failarg","children":[{"argument":"n","type":{"kind":"integer"},"executes":{"throws":"bad value"}}]},
+{"literal":"nocmd","children":[{"literal":"leaf"}]},
+{"literal":"hidden","requires":false,"children":[{"argument":"n","type":{"kind":"integer"},"executes":18}]},
+{"literal":"ex","children":[{"literal":"ex"},{"literal":"exit"},{"literal":"exe","executes":19}]}
+]}

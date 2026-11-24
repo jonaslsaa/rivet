@@ -1,0 +1,7 @@
+{"name":"ambiguous","commands":[
+{"literal":"pick","children":[{"argument":"count","type":{"kind":"integer"},"executes":1},{"argument":"name","type":{"kind":"string","mode":"word"},"executes":2},{"argument":"flag","type":{"kind":"bool"},"executes":3},{"argument":"text","type":{"kind":"string","mode":"quotable"},"executes":4},{"literal":"all","executes":5},{"literal":"none","executes":6}]},
+{"literal":"num","children":[{"argument":"i","type":{"kind":"integer","min":0,"max":100},"executes":1},{"argument":"l","type":{"kind":"long"},"executes":2},{"argument":"f","type":{"kind":"float"},"executes":3},{"argument":"d","type":{"kind":"double"},"executes":4}]},
+{"literal":"nested","children":[{"literal":"a","children":[{"argument":"x","type":{"kind":"integer"},"executes":1},{"argument":"y","type":{"kind":"string","mode":"word"},"executes":2}]},{"literal":"b","children":[{"argument":"x","type":{"kind":"bool"},"executes":3},{"argument":"y","type":{"kind":"bool"},"executes":4}]},{"argument":"z","type":{"kind":"string","mode":"word"},"children":[{"argument":"w","type":{"kind":"integer"},"executes":5},{"argument":"v","type":{"kind":"string","mode":"word"},"executes":6}]}]},
+{"literal":"lit","children":[{"literal":"one","executes":1},{"literal":"two","executes":2},{"literal":"onetwo","executes":3}]},
+{"literal":"greed","children":[{"argument":"g","type":{"kind":"string","mode":"greedy"},"executes":1},{"argument":"w","type":{"kind":"string","mode":"word"},"executes":2}]}
+]}

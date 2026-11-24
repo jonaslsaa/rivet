@@ -1,0 +1,12 @@
+op	count	reason
+loot.roll	3872	only the blocks/* loot tables have a Rust evaluator (rivet_world::block::drops); chest, entity, gameplay and fishing tables need loot functions, conditions and entity/level context that are not ported
+recipe.match	3	special recipe CraftingSpecialFireworkStarFade has no matching logic
+recipe.match	3	special recipe CraftingSpecialMapExtending has no matching logic
+recipe.match	3	special recipe CraftingSpecialShieldDecoration has no matching logic
+recipe.match	4	special recipe CraftingDecoratedPot has no matching logic
+recipe.match	4	special recipe CraftingSpecialBookCloning has no matching logic
+recipe.match	4	special recipe CraftingSpecialFireworkRocket has no matching logic
+recipe.match	4	special recipe CraftingSpecialRepairItem has no matching logic
+recipe.match	5	special recipe CraftingSpecialFireworkStar has no matching logic
+recipe.match	64	special recipe CraftingSpecialBannerDuplicate has no matching logic
+trade.offers	1088	villager_trade / trade_set data-pack documents have no Rust loader (rivet_world::trading has the value types and the selection loop, not the documents or the loot context their providers read)

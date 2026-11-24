@@ -3,9 +3,18 @@
   "kind": "oracle-ops",
   "paper": "26.2-DEV-main@0a99345",
   "paper_commit": "0a99345",
-  "op_source": "tools/rivet-reference-oracle/src/RivetReferenceOracle.java",
-  "op_source_sha256": "aec6084e000ebe6a745c12ebdb2ec199f4a50ce38ee18b812134a9fa357927dc",
+  "op_source": "tools/rivet-reference-oracle/src",
+  "op_source_sha256": "9c2d02d03d0e2fe3d13ca8ea8098c0086de8b5e573b84d71c5aef5ad688bc1e2",
   "ops": [
+    {
+      "op": "brigadier.dispatch",
+      "corpus": "corpus/brigadier.dispatch.jsonl",
+      "corpus_sha256": "42c777484d078162051d8b01db02688903a7d1561478c4ae6d2635c0139e471e",
+      "corpus_n": 3539,
+      "output": "brigadier.dispatch.jsonl",
+      "output_sha256": "63872b275a52d7ca9ea79b83091d2aa1f4ede3b532e17e12f2069d848c69cfac",
+      "output_n": 3539
+    },
     {
       "op": "codec.reencode",
       "corpus": "corpus/codec.reencode.jsonl",
@@ -23,6 +32,60 @@
       "output": "component.json.jsonl",
       "output_sha256": "704687d0133e5bfe5d4f387e9e4c3b176054a873ccfb143b6a4ea28779e94740",
       "output_n": 62
+    },
+    {
+      "op": "damage.calc",
+      "corpus": "corpus/damage.calc.jsonl",
+      "corpus_sha256": "d3b3da6c37c9dee219a414509caa6d92d9bf05e9fe879b247c878720c121f0d9",
+      "corpus_n": 10233,
+      "output": "damage.calc.jsonl",
+      "output_sha256": "c715b7b3ea7a9af3e31e7658d62f0e4b6c78e9ea1bbb579c052211f109267931",
+      "output_n": 10233
+    },
+    {
+      "op": "damage_source.scaling",
+      "corpus": "corpus/damage_source.scaling.jsonl",
+      "corpus_sha256": "0d5575e79d070ceba1c60222b371b8089e949b8ba3db45f39278694734b961f7",
+      "corpus_n": 1764,
+      "output": "damage_source.scaling.jsonl",
+      "output_sha256": "782962c2c27361343a585217533c775f741c08e2c33b5d875ad3366b130e0fd0",
+      "output_n": 1764
+    },
+    {
+      "op": "effect",
+      "corpus": "corpus/effect.jsonl",
+      "corpus_sha256": "8c8d5bfbb67c2ad32d0fa0a40993829372fb2aa95bcec472c5be79aa02b9ea68",
+      "corpus_n": 520,
+      "output": "effect.jsonl",
+      "output_sha256": "970aa04ff596e71aa1e60f26a279a589e0d930761ce1139d7ec9a31cf0c82f56",
+      "output_n": 520
+    },
+    {
+      "op": "enchant.select",
+      "corpus": "corpus/enchant.select.jsonl",
+      "corpus_sha256": "da11851d709af9df8f0f5cb5535e547e715e80f892ffb6dbe0c2d8feb3f31a6b",
+      "corpus_n": 3252,
+      "output": "enchant.select.jsonl",
+      "output_sha256": "96028ef67f7adddfe4303cc6d45a7a75549a55f4eb3bafbd57165a396efa0eb8",
+      "output_n": 3252
+    },
+    {
+      "op": "food.exhaustion",
+      "corpus": "corpus/food.exhaustion.jsonl",
+      "corpus_sha256": "0878bcc433ec930e436cedf7a580d5466fcf5adbe3897332349db5b6c28d9cf4",
+      "corpus_n": 518,
+      "output": "food.exhaustion.jsonl",
+      "output_sha256": "5d6c5d5ec04314804027cd472a016818993f6ec9e258bc93dad9acb5e4227c79",
+      "output_n": 518
+    },
+    {
+      "op": "loot.roll",
+      "corpus": "corpus/loot.roll.jsonl",
+      "corpus_sha256": "48564055ed561b5011fd019ee7509b70789afa002a9f60a0a4d6bc716163ed88",
+      "corpus_n": 21680,
+      "output": "loot.roll.jsonl",
+      "output_sha256": "c399255871249f42ffd30a17de2fda1af1206417d7915dfbaa17a4873b9bd364",
+      "output_n": 21680
     },
     {
       "op": "nbt.decode",
@@ -43,13 +106,22 @@
       "output_n": 2654
     },
     {
-      "op": "shapes.eval",
-      "corpus": "corpus/shapes.eval.jsonl",
-      "corpus_sha256": "7dc9d2573a5db0c8b511b23b0fd7c46bae75dd73878baf21766c02398535b714",
-      "corpus_n": 14720,
-      "output": "shapes.eval.jsonl",
-      "output_sha256": "a156a90dbd5467f626bc0848cd2a7101acd064787d23d6ce46076c4a8dba771b",
-      "output_n": 14720
+      "op": "recipe.match",
+      "corpus": "corpus/recipe.match.jsonl",
+      "corpus_sha256": "d72a87d8f99777390e5f4ddfb436be14fe4292f58d77117866333d57ba516a09",
+      "corpus_n": 9965,
+      "output": "recipe.match.jsonl",
+      "output_sha256": "a164203a2cc82125553f9784eac79e7477c0b11a37ba9f0eb4a9f1af574d4690",
+      "output_n": 9965
+    },
+    {
+      "op": "scoreboard.saved_data",
+      "corpus": "corpus/scoreboard.saved_data.jsonl",
+      "corpus_sha256": "08addd5b9249dac88b4354b4530b59c3aa8e1312ddbdd950c86cfc3336a6c9fa",
+      "corpus_n": 82,
+      "output": "scoreboard.saved_data.jsonl",
+      "output_sha256": "f94f29140342e08f017e43de0635c5bb43fdbc8a4939cbad80b190247c8a4d48",
+      "output_n": 82
     },
     {
       "op": "snbt.parse",
@@ -59,6 +131,24 @@
       "output": "snbt.parse.jsonl",
       "output_sha256": "263c55f8b330f1953d6b9e666bc8b9e620ed48abeb357cf28df80e40dc8958a8",
       "output_n": 170
+    },
+    {
+      "op": "trade.offers",
+      "corpus": "corpus/trade.offers.jsonl",
+      "corpus_sha256": "7887ca61827579c257ab4e1066e60e600c1c59de7355f4959930729580743fc4",
+      "corpus_n": 1088,
+      "output": "trade.offers.jsonl",
+      "output_sha256": "19f0b240f86fbc674c92f9429af94e244883e57478f7cad6a86e6cd6d9592b6f",
+      "output_n": 1088
+    },
+    {
+      "op": "xp.curves",
+      "corpus": "corpus/xp.curves.jsonl",
+      "corpus_sha256": "5a7eb8f3ef93f33ba97f31470815933ed713b7c1d122f7c250480f697ee881b4",
+      "corpus_n": 955,
+      "output": "xp.curves.jsonl",
+      "output_sha256": "1252ac0666b73a0204cd3072a01d710dd2e736ca048be3ce19f725cc9c750723",
+      "output_n": 955
     }
   ]
 }
