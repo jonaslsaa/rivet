@@ -128,7 +128,8 @@ const REVIEW_SCOPE =
   `In \`${WT}\`, fetch origin, record full 40-character hashes from \`git rev-parse HEAD\` and \`git rev-parse origin/main\`, then inspect ` +
   `\`git log --oneline origin/main..HEAD\`, \`git diff $(git merge-base origin/main HEAD) HEAD\`, and \`git status --short\`. ` +
   `Read every changed and untracked deliverable file. A dirty tree, untracked deliverable, detached HEAD, zero commits ahead, ` +
-  `or any commit behind current origin/main is a release-blocking process finding. You are READ-ONLY: do not edit files, ` +
+  `or a branch that does not merge cleanly into current origin/main (check with \`git merge-tree --write-tree HEAD origin/main\`) is a release-blocking process finding. ` +
+  `Being behind origin/main is NOT a finding (the coordinator merges current main and gates right before release), unless the new main commits conflict or touch the PR's files. You are READ-ONLY: do not edit files, ` +
   `commit, rebase, or create scratch files in the worktree. List every file actually read as a repo-relative path in files_inspected.`
 
 function processFinding(description) {
@@ -205,7 +206,9 @@ for (let round = 1; round <= MAX; round++) {
     log(`check r${round} failed after retries`)
     return { merge_ready: false, strict_gate_ready: false, check_failed: true, findings: all, rounds: round, worktree: WT }
   }
-  if (check.head !== refresh.head || check.base !== refresh.base) {
+  // Base drift between refresh and check is expected (other PRs merge meanwhile);
+  // the coordinator merges current main and gates before release. Only head must hold.
+  if (check.head !== refresh.head) {
     const findings = processFinding(`head/base changed during preparation: refresh ${refresh.head}/${refresh.base}, check ${check.head}/${check.base}`)
     all = all.concat(findings.map((finding) => ({ ...finding, round })))
     prior = findings
@@ -225,7 +228,7 @@ for (let round = 1; round <= MAX; round++) {
         `test strength, generated artifacts, and process integrity. Report only concrete actionable defects, not preferences. ` +
         `The refresh phase reports these repo-relative deliverable files, all of which must appear in files_inspected: ` +
         `${JSON.stringify(refresh.files)}. merge_ready=true requires: exact reviewed HEAD=${refresh.head}, base=${refresh.base}, ` +
-        `clean=true, ahead>0, behind=0, every changed file inspected, and an EMPTY findings array. Any finding of any severity ` +
+        `clean=true, ahead>0, merges cleanly into current origin/main, every changed file inspected, and an EMPTY findings array. Any finding of any severity ` +
         `means merge_ready=false. The full strict gate was intentionally ` +
         `not run and must not be requested as a finding; it is the coordinator's next step after this workflow.`,
       { label: `review:${SLUG}:r${round}`, phase: 'Review', schema: VERDICT, effort: 'high' },
@@ -235,9 +238,9 @@ for (let round = 1; round <= MAX; round++) {
       return { merge_ready: false, strict_gate_ready: false, review_failed: true, findings: all, rounds: round, worktree: WT }
     }
     all = all.concat(verdict.findings.map((finding) => ({ ...finding, round })))
-    const exactState = verdict.head === refresh.head && verdict.base === refresh.base
+    const exactState = verdict.head === refresh.head
     const inspectionComplete = refresh.files.length > 0 && refresh.files.every((file) => verdict.files_inspected.includes(file))
-    const consistentReady = verdict.merge_ready && verdict.findings.length === 0 && verdict.clean && verdict.ahead > 0 && verdict.behind === 0 && exactState && inspectionComplete
+    const consistentReady = verdict.merge_ready && verdict.findings.length === 0 && verdict.clean && verdict.ahead > 0 && exactState && inspectionComplete
     if (verdict.merge_ready && !consistentReady) {
       log(`review r${round} returned an inconsistent merge-ready verdict; treating it as not ready`)
     }
