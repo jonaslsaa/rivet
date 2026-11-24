@@ -562,12 +562,6 @@ run_oracle_verify() {
   fi
 }
 
-# Source-disjoint Stage-B/G4 generated normal-overworld FULL parity. This is a
-# dedicated verifier, never a generic fixture-manifest walk and never a
-# generated-expected/superflat substitution. It owns the typed 0/1/3/4 outcome:
-# absent genuine sides are UNVERIFIED (3), a dedicated producer capability
-# boundary is BLOCKED (4), malformed/tampered/divergent output is FAIL (1), and
-# byte-identical closure is PASS (0).
 # L4 arena tick-trace differential (tools/rivet-oracle/arenas/README.md) —
 # opt-in via RIVET_ARENA_TRACE=1. Offline: Rivet's level runtime against the
 # committed twin-admitted Paper traces, plus closure and the per-trace tamper
@@ -589,6 +583,12 @@ run_arena_trace() {
   echo "    PASS — harness healthy; per-arena PASS/FAIL above (ledger: arena.* rows)"
 }
 
+# Source-disjoint Stage-B/G4 generated normal-overworld FULL parity. This is a
+# dedicated verifier, never a generic fixture-manifest walk and never a
+# generated-expected/superflat substitution. It owns the typed 0/1/3/4 outcome:
+# absent genuine sides are UNVERIFIED (3), a dedicated producer capability
+# boundary is BLOCKED (4), malformed/tampered/divergent output is FAIL (1), and
+# byte-identical closure is PASS (0).
 run_oracle_generated_full() {
   # G4 promotion is deliberately opt-in.  The direct verifier remains strict,
   # but ordinary pre-G4/full gates must not become unreleasable merely because

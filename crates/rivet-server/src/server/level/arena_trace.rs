@@ -80,9 +80,6 @@ const WORLD_UUID: Uuid = Uuid {
     most: 0x5249_5645_5441_5245,
     least: 0x4e41_5452_4143_4531,
 };
-/// The world-defaults the Paper arena boot runs under.
-const PAPER_WORLD_DEFAULTS: &str =
-    include_str!("../../../../../tools/rivet-oracle/fixtures/paper-world-defaults.yml");
 
 /// Field-exclusion table (`tools/rivet-oracle/arenas/exclusions.tsv`): top-level
 /// NBT keys both emitters drop. A key enters only when Paper twin runs differ.
@@ -297,7 +294,9 @@ pub fn mix(seed: i64, site: i64, ordinal: i64) -> i64 {
 /// World effects with no Rust owner yet are refusals. Client transport and
 /// level events have no recipients: the arena has no players and no debug
 /// subscribers, which is the state the Paper boot runs in.
-struct ArenaEffects;
+struct ArenaEffects {
+    water_over_lava_flow_speed: i32,
+}
 
 fn refuse<T>(what: impl std::fmt::Display) -> Result<T, LiveBlockMutationError> {
     Err(LiveBlockMutationError::Unavailable(format!(
@@ -319,10 +318,12 @@ impl BlockEntityWorldServices for ArenaEffects {
         Ok(())
     }
     fn require_ticker_body(&self, kind: NativeTickerKind) -> Result<(), BlockEntityTickerError> {
-        // A native ticker family exists for every kind; whether its body can
-        // run is decided when the level actually ticks it.
-        let _ = kind;
-        Ok(())
+        // The trait forbids accepting a ticker whose body cannot execute: the
+        // runner wires no tick-body world (entity construction, collision,
+        // events) for any native family yet.
+        be_refuse(format_args!(
+            "{kind:?} tick-body world (entity construction, collision, events) is not wired"
+        ))
     }
     fn tick_body(
         &mut self,
@@ -420,9 +421,7 @@ impl NativeWorldEffects for ArenaEffects {
         ))
     }
     fn water_over_lava_flow_speed(&self) -> i32 {
-        WorldRuntimeSettings::from_yaml(PAPER_WORLD_DEFAULTS, "", "", "minecraft:overworld")
-            .map(|s| s.water_over_lava_flow_speed)
-            .expect("pinned world defaults parse")
+        self.water_over_lava_flow_speed
     }
     fn place_effectful_container(
         &mut self,
@@ -440,7 +439,10 @@ impl NativeWorldEffects for ArenaEffects {
 
 type Services = NativeWorldServices<ArenaEffects>;
 
-fn build_world(header: &ArenaHeader) -> Result<(ServerLevel, Services), String> {
+fn build_world(
+    header: &ArenaHeader,
+    world_defaults: &str,
+) -> Result<(ServerLevel, Services), String> {
     let mut level = ServerLevel::new_region_backed(ServerLevelConfig {
         missing_chunk_policy: MissingChunkPolicy::RequireLoaded,
         ..ServerLevelConfig::default()
@@ -462,9 +464,9 @@ fn build_world(header: &ArenaHeader) -> Result<(ServerLevel, Services), String> 
     level
         .install_generation_environment(environment)
         .map_err(|e| format!("environment install: {:?}", e.error))?;
-    let settings =
-        WorldRuntimeSettings::from_yaml(PAPER_WORLD_DEFAULTS, "", "", "minecraft:overworld")
-            .map_err(|e| format!("runtime settings: {e:?}"))?;
+    let settings = WorldRuntimeSettings::from_yaml(world_defaults, "", "", "minecraft:overworld")
+        .map_err(|e| format!("runtime settings: {e:?}"))?;
+    let water_over_lava_flow_speed = settings.water_over_lava_flow_speed;
     level
         .install_runtime_settings(
             rivet_world::data::worldgen::worldgen_bootstraps::build_worldgen_registries(),
@@ -500,8 +502,13 @@ fn build_world(header: &ArenaHeader) -> Result<(ServerLevel, Services), String> 
         Arc::new(crate::server::tick::shutdown::Shutdown::new()),
     );
     host.finish_loading();
-    let services =
-        NativeWorldServices::new(Arc::new(host), ArenaEffects, MAX_CHAINED_NEIGHBOR_UPDATES);
+    let services = NativeWorldServices::new(
+        Arc::new(host),
+        ArenaEffects {
+            water_over_lava_flow_speed,
+        },
+        MAX_CHAINED_NEIGHBOR_UPDATES,
+    );
     Ok((level, services))
 }
 
@@ -797,16 +804,21 @@ fn tick_block(
     }
 }
 
-/// Replay one arena. `Err` is a harness failure (the arena could not be set
-/// up at all); a Rust refusal during the run is an `error` line instead.
-pub fn run(header: &ArenaHeader, exclusions: &Exclusions) -> Result<Vec<String>, String> {
+/// Replay one arena. `world_defaults` is the `paper-world-defaults.yml` the
+/// Paper arena boot ran under. `Err` is a harness failure (the arena could not
+/// be set up at all); a Rust refusal during the run is an `error` line instead.
+pub fn run(
+    header: &ArenaHeader,
+    exclusions: &Exclusions,
+    world_defaults: &str,
+) -> Result<Vec<String>, String> {
     if !header.opt_in.is_empty() {
         return Err(format!(
             "opt-in {:?} has no Rust runner support",
             header.opt_in
         ));
     }
-    let (level, services) = build_world(header)?;
+    let (level, services) = build_world(header, world_defaults)?;
     let mut runner = Runner {
         header,
         exclusions,

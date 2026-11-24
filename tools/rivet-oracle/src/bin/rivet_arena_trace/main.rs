@@ -154,7 +154,8 @@ fn rivet_trace(paper: &str, exclusions: &Exclusions) -> Result<String, String> {
         serde_json::from_str(paper.lines().next().ok_or("empty trace")?)
             .map_err(|e| e.to_string())?;
     let header = ArenaHeader::parse(&header)?;
-    Ok(arena_trace::run(&header, exclusions)?.join("\n") + "\n")
+    let world_defaults = read(&oracle_dir().join("fixtures/paper-world-defaults.yml"))?;
+    Ok(arena_trace::run(&header, exclusions, &world_defaults)?.join("\n") + "\n")
 }
 
 struct Outcome {
@@ -295,8 +296,10 @@ fn write_ledger(outcomes: &[Outcome], how: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn regressions(outcomes: &[Outcome]) -> Vec<String> {
-    let ledger = ledger_status();
+/// Arenas the committed ledger records as PASS that fail now. Read the
+/// ledger before `--ledger` rewrites it, or a regression would erase its own
+/// baseline.
+fn regressions(outcomes: &[Outcome], ledger: &BTreeMap<String, String>) -> Vec<String> {
     outcomes
         .iter()
         .filter(|o| !o.comparison.passed())
@@ -468,6 +471,7 @@ fn run() -> Result<(), (u8, String)> {
             };
             let outcomes = differential(&names, &traces).map_err(fail)?;
             report(&outcomes);
+            let regressed = regressions(&outcomes, &ledger_status());
             if ledger {
                 let how = if command == "check" {
                     "vs committed twin-admitted Paper traces"
@@ -482,14 +486,14 @@ fn run() -> Result<(), (u8, String)> {
                         &outcomes.len().to_string(),
                         "0",
                         &format!(
-                            "{command}: {} arenas, Paper twin admission byte-identical, closure held, tamper negative detected on every trace",
-                            outcomes.len()
+                            "{command}: {} arenas, Paper twin admission byte-identical ({}), closure held, tamper negative detected on every trace",
+                            outcomes.len(),
+                            if command == "check" { "per the committed manifest" } else { "two fresh boots, identical to the committed recordings" }
                         ),
                     )
                     .map_err(fail)?;
                 }
             }
-            let regressed = regressions(&outcomes);
             if !regressed.is_empty() {
                 return Err((1, format!("ledger PASS arenas regressed: {regressed:?}")));
             }
@@ -583,6 +587,27 @@ mod tests {
             assert_eq!(d.tick, Some(t), "{name}");
             assert!(compare_traces(paper, paper).unwrap().passed(), "{name}");
         }
+    }
+
+    /// A failing arena the committed ledger records as PASS is a regression;
+    /// a FAIL that was already FAIL is not.
+    #[test]
+    fn regression_is_judged_against_the_ledger_read_before_recording() {
+        let outcome = |name: &str, passed: bool| Outcome {
+            name: name.into(),
+            comparison: Comparison {
+                matched: usize::from(passed),
+                declared: 1,
+                divergence: None,
+            },
+        };
+        let ledger: BTreeMap<String, String> = [
+            ("arena.a".to_owned(), "PASS".to_owned()),
+            ("arena.b".to_owned(), "FAIL".to_owned()),
+        ]
+        .into();
+        let outcomes = [outcome("a", false), outcome("b", false), outcome("c", true)];
+        assert_eq!(regressions(&outcomes, &ledger), ["a"]);
     }
 
     /// The Rivet runner sets up every committed arena and produces a trace

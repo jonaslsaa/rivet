@@ -39,7 +39,8 @@ tracing-subscriber = { workspace = true }
 
 [features]
 # The L4 arena tick-trace runner (`server::level::arena_trace`): test support
-# for `tools/rivet-oracle`'s `rivet-arena-trace`, never used by the server.
+# for `tools/rivet-oracle`'s `rivet-arena-trace`. Workspace builds enable it
+# through that tool (feature unification); the server never calls it.
 arena-trace = []
 
 [target.'cfg(unix)'.dependencies]

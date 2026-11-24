@@ -59,6 +59,19 @@ divergence, not a harness failure. `scripts/gate.sh` runs `check` only when
   0x9E3779B97F4A7C15 + ordinal)` at the sites in `seed-sites.tsv`. An arena
   must not exercise an RNG that is not listed there (for example random ticks:
   `simpleRandom` only draws when `randomTickSpeed > 0`).
+  VERIFICATION 2.5 also names `level.getThreadSafeRandom()`; Paper 26.2's
+  `Level`/`ServerLevel` have no such source, so there is no site for it. On
+  the Rust side the reseed is a call on the arena's own level
+  (`random_mut().set_seed`) inside the test-support runner, never a global.
+- **Seeded RNG coverage today.** Only site 1 is exercised, and only by arenas
+  whose mechanics draw from the level RNG. `spawner_idle_seeded` runs under
+  the contract but draws nothing: with no player in range `BaseSpawner.serverTick`
+  returns before any draw (Paper's trace shows the spawner unchanged). A
+  spawner that spawns needs an arena player, which neither side has yet.
+- **Block-entity NBT.** Paper places the block (fresh entity) and then loads
+  the arena NBT into it; the Rust runner puts the header's full post-load NBT
+  pending before the same quiet placement, which creates the live entity from
+  it. Both start tick 0 from the same entity state.
 - **Admission.** Two fresh Paper boots must produce byte-identical traces
   before a recording is committed or a live comparison counts.
 - **Opt-in.** `opt_in` in an arena turns a frozen mechanic back on. None is
