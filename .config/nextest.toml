@@ -1,0 +1,10 @@
+# nextest runs every test in its own process. rivet-parity's oracle-op tests each
+# load the recorded op corpus (~87k inputs) in the debug profile, so running many
+# at once exhausts the host (19 GB; observed memory PSI 87%, gate stalled > 2 h).
+# Cap them at two concurrent processes; every other package keeps full parallelism.
+[test-groups]
+oracle-replay = { max-threads = 2 }
+
+[[profile.default.overrides]]
+filter = 'package(rivet-parity)'
+test-group = 'oracle-replay'
