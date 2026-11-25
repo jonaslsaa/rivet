@@ -1,0 +1,1082 @@
+{
+ "configured_feature": [
+  {
+   "key": "minecraft:acacia",
+   "type": "minecraft:tree"
+  },
+  {
+   "key": "minecraft:amethyst_geode",
+   "type": "minecraft:geode"
+  },
+  {
+   "key": "minecraft:azalea_tree",
+   "type": "minecraft:tree"
+  },
+  {
+   "key": "minecraft:bamboo_no_podzol",
+   "type": "minecraft:bamboo"
+  },
+  {
+   "key": "minecraft:bamboo_some_podzol",
+   "type": "minecraft:bamboo"
+  },
+  {
+   "key": "minecraft:bamboo_vegetation",
+   "type": "minecraft:random_selector"
+  },
+  {
+   "key": "minecraft:basalt_blobs",
+   "type": "minecraft:netherrack_replace_blobs"
+  },
+  {
+   "key": "minecraft:basalt_pillar",
+   "type": "minecraft:basalt_pillar"
+  },
+  {
+   "key": "minecraft:berry_bush",
+   "type": "minecraft:simple_block"
+  },
+  {
+   "key": "minecraft:birch",
+   "type": "minecraft:tree"
+  },
+  {
+   "key": "minecraft:birch_bees_0002",
+   "type": "minecraft:tree"
+  },
+  {
+   "key": "minecraft:birch_bees_0002_leaf_litter",
+   "type": "minecraft:tree"
+  },
+  {
+   "key": "minecraft:birch_bees_002",
+   "type": "minecraft:tree"
+  },
+  {
+   "key": "minecraft:birch_bees_005",
+   "type": "minecraft:tree"
+  },
+  {
+   "key": "minecraft:birch_leaf_litter",
+   "type": "minecraft:tree"
+  },
+  {
+   "key": "minecraft:birch_tall",
+   "type": "minecraft:random_selector"
+  },
+  {
+   "key": "minecraft:blackstone_blobs",
+   "type": "minecraft:netherrack_replace_blobs"
+  },
+  {
+   "key": "minecraft:blue_ice",
+   "type": "minecraft:blue_ice"
+  },
+  {
+   "key": "minecraft:bonus_chest",
+   "type": "minecraft:bonus_chest"
+  },
+  {
+   "key": "minecraft:brown_mushroom",
+   "type": "minecraft:simple_block"
+  },
+  {
+   "key": "minecraft:bush",
+   "type": "minecraft:simple_block"
+  },
+  {
+   "key": "minecraft:cactus",
+   "type": "minecraft:block_column"
+  },
+  {
+   "key": "minecraft:cave_vine",
+   "type": "minecraft:block_column"
+  },
+  {
+   "key": "minecraft:cave_vine_in_moss",
+   "type": "minecraft:block_column"
+  },
+  {
+   "key": "minecraft:cherry",
+   "type": "minecraft:tree"
+  },
+  {
+   "key": "minecraft:cherry_bees_005",
+   "type": "minecraft:tree"
+  },
+  {
+   "key": "minecraft:chorus_plant",
+   "type": "minecraft:chorus_plant"
+  },
+  {
+   "key": "minecraft:clay_pool_with_dripleaves",
+   "type": "minecraft:waterlogged_vegetation_patch"
+  },
+  {
+   "key": "minecraft:clay_with_dripleaves",
+   "type": "minecraft:vegetation_patch"
+  },
+  {
+   "key": "minecraft:crimson_forest_vegetation",
+   "type": "minecraft:nether_forest_vegetation"
+  },
+  {
+   "key": "minecraft:crimson_forest_vegetation_bonemeal",
+   "type": "minecraft:nether_forest_vegetation"
+  },
+  {
+   "key": "minecraft:crimson_fungus",
+   "type": "minecraft:huge_fungus"
+  },
+  {
+   "key": "minecraft:crimson_fungus_planted",
+   "type": "minecraft:huge_fungus"
+  },
+  {
+   "key": "minecraft:crimson_roots",
+   "type": "minecraft:simple_block"
+  },
+  {
+   "key": "minecraft:dark_forest_vegetation",
+   "type": "minecraft:random_selector"
+  },
+  {
+   "key": "minecraft:dark_oak",
+   "type": "minecraft:tree"
+  },
+  {
+   "key": "minecraft:dark_oak_leaf_litter",
+   "type": "minecraft:tree"
+  },
+  {
+   "key": "minecraft:dead_bush",
+   "type": "minecraft:simple_block"
+  },
+  {
+   "key": "minecraft:delta",
+   "type": "minecraft:delta_feature"
+  },
+  {
+   "key": "minecraft:desert_well",
+   "type": "minecraft:desert_well"
+  },
+  {
+   "key": "minecraft:disk_clay",
+   "type": "minecraft:disk"
+  },
+  {
+   "key": "minecraft:disk_grass",
+   "type": "minecraft:disk"
+  },
+  {
+   "key": "minecraft:disk_gravel",
+   "type": "minecraft:disk"
+  },
+  {
+   "key": "minecraft:disk_sand",
+   "type": "minecraft:disk"
+  },
+  {
+   "key": "minecraft:dripleaf",
+   "type": "minecraft:simple_random_selector"
+  },
+  {
+   "key": "minecraft:dripstone_cluster",
+   "type": "minecraft:speleothem_cluster"
+  },
+  {
+   "key": "minecraft:dry_grass",
+   "type": "minecraft:simple_block"
+  },
+  {
+   "key": "minecraft:end_gateway_delayed",
+   "type": "minecraft:end_gateway"
+  },
+  {
+   "key": "minecraft:end_gateway_return",
+   "type": "minecraft:end_gateway"
+  },
+  {
+   "key": "minecraft:end_island",
+   "type": "minecraft:end_island"
+  },
+  {
+   "key": "minecraft:end_platform",
+   "type": "minecraft:end_platform"
+  },
+  {
+   "key": "minecraft:end_spike",
+   "type": "minecraft:end_spike"
+  },
+  {
+   "key": "minecraft:fallen_birch_tree",
+   "type": "minecraft:fallen_tree"
+  },
+  {
+   "key": "minecraft:fallen_jungle_tree",
+   "type": "minecraft:fallen_tree"
+  },
+  {
+   "key": "minecraft:fallen_oak_tree",
+   "type": "minecraft:fallen_tree"
+  },
+  {
+   "key": "minecraft:fallen_spruce_tree",
+   "type": "minecraft:fallen_tree"
+  },
+  {
+   "key": "minecraft:fallen_super_birch_tree",
+   "type": "minecraft:fallen_tree"
+  },
+  {
+   "key": "minecraft:fancy_oak",
+   "type": "minecraft:tree"
+  },
+  {
+   "key": "minecraft:fancy_oak_bees",
+   "type": "minecraft:tree"
+  },
+  {
+   "key": "minecraft:fancy_oak_bees_0002_leaf_litter",
+   "type": "minecraft:tree"
+  },
+  {
+   "key": "minecraft:fancy_oak_bees_002",
+   "type": "minecraft:tree"
+  },
+  {
+   "key": "minecraft:fancy_oak_bees_005",
+   "type": "minecraft:tree"
+  },
+  {
+   "key": "minecraft:fancy_oak_leaf_litter",
+   "type": "minecraft:tree"
+  },
+  {
+   "key": "minecraft:firefly_bush",
+   "type": "minecraft:simple_block"
+  },
+  {
+   "key": "minecraft:flower_cherry",
+   "type": "minecraft:simple_block"
+  },
+  {
+   "key": "minecraft:flower_default",
+   "type": "minecraft:simple_block"
+  },
+  {
+   "key": "minecraft:flower_flower_forest",
+   "type": "minecraft:simple_block"
+  },
+  {
+   "key": "minecraft:flower_meadow",
+   "type": "minecraft:simple_block"
+  },
+  {
+   "key": "minecraft:flower_pale_garden",
+   "type": "minecraft:simple_block"
+  },
+  {
+   "key": "minecraft:flower_plain",
+   "type": "minecraft:simple_block"
+  },
+  {
+   "key": "minecraft:flower_swamp",
+   "type": "minecraft:simple_block"
+  },
+  {
+   "key": "minecraft:forest_flowers",
+   "type": "minecraft:simple_random_selector"
+  },
+  {
+   "key": "minecraft:forest_rock",
+   "type": "minecraft:block_blob"
+  },
+  {
+   "key": "minecraft:fossil_coal",
+   "type": "minecraft:fossil"
+  },
+  {
+   "key": "minecraft:fossil_diamonds",
+   "type": "minecraft:fossil"
+  },
+  {
+   "key": "minecraft:freeze_top_layer",
+   "type": "minecraft:freeze_top_layer"
+  },
+  {
+   "key": "minecraft:glow_lichen",
+   "type": "minecraft:multiface_growth"
+  },
+  {
+   "key": "minecraft:glowstone_extra",
+   "type": "minecraft:glowstone_blob"
+  },
+  {
+   "key": "minecraft:grass",
+   "type": "minecraft:simple_block"
+  },
+  {
+   "key": "minecraft:grass_jungle",
+   "type": "minecraft:simple_block"
+  },
+  {
+   "key": "minecraft:huge_brown_mushroom",
+   "type": "minecraft:huge_brown_mushroom"
+  },
+  {
+   "key": "minecraft:huge_red_mushroom",
+   "type": "minecraft:huge_red_mushroom"
+  },
+  {
+   "key": "minecraft:ice_patch",
+   "type": "minecraft:disk"
+  },
+  {
+   "key": "minecraft:ice_spike",
+   "type": "minecraft:spike"
+  },
+  {
+   "key": "minecraft:iceberg_blue",
+   "type": "minecraft:iceberg"
+  },
+  {
+   "key": "minecraft:iceberg_packed",
+   "type": "minecraft:iceberg"
+  },
+  {
+   "key": "minecraft:jungle_bush",
+   "type": "minecraft:tree"
+  },
+  {
+   "key": "minecraft:jungle_tree",
+   "type": "minecraft:tree"
+  },
+  {
+   "key": "minecraft:jungle_tree_no_vine",
+   "type": "minecraft:tree"
+  },
+  {
+   "key": "minecraft:kelp",
+   "type": "minecraft:kelp"
+  },
+  {
+   "key": "minecraft:lake_lava",
+   "type": "minecraft:lake"
+  },
+  {
+   "key": "minecraft:large_basalt_columns",
+   "type": "minecraft:basalt_columns"
+  },
+  {
+   "key": "minecraft:large_dripstone",
+   "type": "minecraft:large_dripstone"
+  },
+  {
+   "key": "minecraft:large_fern",
+   "type": "minecraft:simple_block"
+  },
+  {
+   "key": "minecraft:leaf_litter",
+   "type": "minecraft:simple_block"
+  },
+  {
+   "key": "minecraft:lush_caves_clay",
+   "type": "minecraft:random_boolean_selector"
+  },
+  {
+   "key": "minecraft:mangrove",
+   "type": "minecraft:tree"
+  },
+  {
+   "key": "minecraft:mangrove_vegetation",
+   "type": "minecraft:random_selector"
+  },
+  {
+   "key": "minecraft:meadow_trees",
+   "type": "minecraft:random_selector"
+  },
+  {
+   "key": "minecraft:mega_jungle_tree",
+   "type": "minecraft:tree"
+  },
+  {
+   "key": "minecraft:mega_pine",
+   "type": "minecraft:tree"
+  },
+  {
+   "key": "minecraft:mega_spruce",
+   "type": "minecraft:tree"
+  },
+  {
+   "key": "minecraft:melon",
+   "type": "minecraft:simple_block"
+  },
+  {
+   "key": "minecraft:monster_room",
+   "type": "minecraft:monster_room"
+  },
+  {
+   "key": "minecraft:moss_patch",
+   "type": "minecraft:vegetation_patch"
+  },
+  {
+   "key": "minecraft:moss_patch_bonemeal",
+   "type": "minecraft:vegetation_patch"
+  },
+  {
+   "key": "minecraft:moss_patch_ceiling",
+   "type": "minecraft:vegetation_patch"
+  },
+  {
+   "key": "minecraft:moss_vegetation",
+   "type": "minecraft:simple_block"
+  },
+  {
+   "key": "minecraft:mushroom_island_vegetation",
+   "type": "minecraft:random_boolean_selector"
+  },
+  {
+   "key": "minecraft:nether_sprouts",
+   "type": "minecraft:nether_forest_vegetation"
+  },
+  {
+   "key": "minecraft:nether_sprouts_bonemeal",
+   "type": "minecraft:nether_forest_vegetation"
+  },
+  {
+   "key": "minecraft:oak",
+   "type": "minecraft:tree"
+  },
+  {
+   "key": "minecraft:oak_bees_0002_leaf_litter",
+   "type": "minecraft:tree"
+  },
+  {
+   "key": "minecraft:oak_bees_002",
+   "type": "minecraft:tree"
+  },
+  {
+   "key": "minecraft:oak_bees_005",
+   "type": "minecraft:tree"
+  },
+  {
+   "key": "minecraft:oak_leaf_litter",
+   "type": "minecraft:tree"
+  },
+  {
+   "key": "minecraft:ore_ancient_debris_large",
+   "type": "minecraft:scattered_ore"
+  },
+  {
+   "key": "minecraft:ore_ancient_debris_small",
+   "type": "minecraft:scattered_ore"
+  },
+  {
+   "key": "minecraft:ore_andesite",
+   "type": "minecraft:ore"
+  },
+  {
+   "key": "minecraft:ore_blackstone",
+   "type": "minecraft:ore"
+  },
+  {
+   "key": "minecraft:ore_clay",
+   "type": "minecraft:ore"
+  },
+  {
+   "key": "minecraft:ore_coal",
+   "type": "minecraft:ore"
+  },
+  {
+   "key": "minecraft:ore_coal_buried",
+   "type": "minecraft:ore"
+  },
+  {
+   "key": "minecraft:ore_copper_large",
+   "type": "minecraft:ore"
+  },
+  {
+   "key": "minecraft:ore_copper_small",
+   "type": "minecraft:ore"
+  },
+  {
+   "key": "minecraft:ore_diamond_buried",
+   "type": "minecraft:ore"
+  },
+  {
+   "key": "minecraft:ore_diamond_large",
+   "type": "minecraft:ore"
+  },
+  {
+   "key": "minecraft:ore_diamond_medium",
+   "type": "minecraft:ore"
+  },
+  {
+   "key": "minecraft:ore_diamond_small",
+   "type": "minecraft:ore"
+  },
+  {
+   "key": "minecraft:ore_diorite",
+   "type": "minecraft:ore"
+  },
+  {
+   "key": "minecraft:ore_dirt",
+   "type": "minecraft:ore"
+  },
+  {
+   "key": "minecraft:ore_emerald",
+   "type": "minecraft:ore"
+  },
+  {
+   "key": "minecraft:ore_gold",
+   "type": "minecraft:ore"
+  },
+  {
+   "key": "minecraft:ore_gold_buried",
+   "type": "minecraft:ore"
+  },
+  {
+   "key": "minecraft:ore_granite",
+   "type": "minecraft:ore"
+  },
+  {
+   "key": "minecraft:ore_gravel",
+   "type": "minecraft:ore"
+  },
+  {
+   "key": "minecraft:ore_gravel_nether",
+   "type": "minecraft:ore"
+  },
+  {
+   "key": "minecraft:ore_infested",
+   "type": "minecraft:ore"
+  },
+  {
+   "key": "minecraft:ore_iron",
+   "type": "minecraft:ore"
+  },
+  {
+   "key": "minecraft:ore_iron_small",
+   "type": "minecraft:ore"
+  },
+  {
+   "key": "minecraft:ore_lapis",
+   "type": "minecraft:ore"
+  },
+  {
+   "key": "minecraft:ore_lapis_buried",
+   "type": "minecraft:ore"
+  },
+  {
+   "key": "minecraft:ore_magma",
+   "type": "minecraft:ore"
+  },
+  {
+   "key": "minecraft:ore_nether_gold",
+   "type": "minecraft:ore"
+  },
+  {
+   "key": "minecraft:ore_quartz",
+   "type": "minecraft:ore"
+  },
+  {
+   "key": "minecraft:ore_redstone",
+   "type": "minecraft:ore"
+  },
+  {
+   "key": "minecraft:ore_soul_sand",
+   "type": "minecraft:ore"
+  },
+  {
+   "key": "minecraft:ore_tuff",
+   "type": "minecraft:ore"
+  },
+  {
+   "key": "minecraft:pale_forest_flower",
+   "type": "minecraft:simple_block"
+  },
+  {
+   "key": "minecraft:pale_garden_vegetation",
+   "type": "minecraft:random_selector"
+  },
+  {
+   "key": "minecraft:pale_moss_patch",
+   "type": "minecraft:vegetation_patch"
+  },
+  {
+   "key": "minecraft:pale_moss_patch_bonemeal",
+   "type": "minecraft:vegetation_patch"
+  },
+  {
+   "key": "minecraft:pale_moss_vegetation",
+   "type": "minecraft:simple_block"
+  },
+  {
+   "key": "minecraft:pale_oak",
+   "type": "minecraft:tree"
+  },
+  {
+   "key": "minecraft:pale_oak_bonemeal",
+   "type": "minecraft:tree"
+  },
+  {
+   "key": "minecraft:pale_oak_creaking",
+   "type": "minecraft:tree"
+  },
+  {
+   "key": "minecraft:patch_fire",
+   "type": "minecraft:simple_block"
+  },
+  {
+   "key": "minecraft:patch_soul_fire",
+   "type": "minecraft:simple_block"
+  },
+  {
+   "key": "minecraft:pile_hay",
+   "type": "minecraft:block_pile"
+  },
+  {
+   "key": "minecraft:pile_ice",
+   "type": "minecraft:block_pile"
+  },
+  {
+   "key": "minecraft:pile_melon",
+   "type": "minecraft:block_pile"
+  },
+  {
+   "key": "minecraft:pile_pumpkin",
+   "type": "minecraft:block_pile"
+  },
+  {
+   "key": "minecraft:pile_snow",
+   "type": "minecraft:block_pile"
+  },
+  {
+   "key": "minecraft:pine",
+   "type": "minecraft:tree"
+  },
+  {
+   "key": "minecraft:pointed_dripstone",
+   "type": "minecraft:simple_random_selector"
+  },
+  {
+   "key": "minecraft:pumpkin",
+   "type": "minecraft:simple_block"
+  },
+  {
+   "key": "minecraft:red_mushroom",
+   "type": "minecraft:simple_block"
+  },
+  {
+   "key": "minecraft:rooted_azalea_tree",
+   "type": "minecraft:root_system"
+  },
+  {
+   "key": "minecraft:rooted_sulfur_spring",
+   "type": "minecraft:root_system"
+  },
+  {
+   "key": "minecraft:sculk_patch_ancient_city",
+   "type": "minecraft:sculk_patch"
+  },
+  {
+   "key": "minecraft:sculk_patch_deep_dark",
+   "type": "minecraft:sculk_patch"
+  },
+  {
+   "key": "minecraft:sculk_vein",
+   "type": "minecraft:multiface_growth"
+  },
+  {
+   "key": "minecraft:sea_pickle",
+   "type": "minecraft:sea_pickle"
+  },
+  {
+   "key": "minecraft:seagrass_mid",
+   "type": "minecraft:seagrass"
+  },
+  {
+   "key": "minecraft:seagrass_short",
+   "type": "minecraft:seagrass"
+  },
+  {
+   "key": "minecraft:seagrass_slightly_less_short",
+   "type": "minecraft:seagrass"
+  },
+  {
+   "key": "minecraft:seagrass_tall",
+   "type": "minecraft:seagrass"
+  },
+  {
+   "key": "minecraft:small_basalt_columns",
+   "type": "minecraft:basalt_columns"
+  },
+  {
+   "key": "minecraft:spore_blossom",
+   "type": "minecraft:simple_block"
+  },
+  {
+   "key": "minecraft:spring_lava_frozen",
+   "type": "minecraft:spring_feature"
+  },
+  {
+   "key": "minecraft:spring_lava_nether",
+   "type": "minecraft:spring_feature"
+  },
+  {
+   "key": "minecraft:spring_lava_overworld",
+   "type": "minecraft:spring_feature"
+  },
+  {
+   "key": "minecraft:spring_nether_closed",
+   "type": "minecraft:spring_feature"
+  },
+  {
+   "key": "minecraft:spring_nether_open",
+   "type": "minecraft:spring_feature"
+  },
+  {
+   "key": "minecraft:spring_water",
+   "type": "minecraft:spring_feature"
+  },
+  {
+   "key": "minecraft:spruce",
+   "type": "minecraft:tree"
+  },
+  {
+   "key": "minecraft:sugar_cane",
+   "type": "minecraft:block_column"
+  },
+  {
+   "key": "minecraft:sulfur_pool",
+   "type": "minecraft:sequence"
+  },
+  {
+   "key": "minecraft:sulfur_spike",
+   "type": "minecraft:simple_random_selector"
+  },
+  {
+   "key": "minecraft:sulfur_spike_cluster",
+   "type": "minecraft:speleothem_cluster"
+  },
+  {
+   "key": "minecraft:sulfur_spring",
+   "type": "minecraft:weighted_random_selector"
+  },
+  {
+   "key": "minecraft:sunflower",
+   "type": "minecraft:simple_block"
+  },
+  {
+   "key": "minecraft:super_birch_bees",
+   "type": "minecraft:tree"
+  },
+  {
+   "key": "minecraft:super_birch_bees_0002",
+   "type": "minecraft:tree"
+  },
+  {
+   "key": "minecraft:swamp_oak",
+   "type": "minecraft:tree"
+  },
+  {
+   "key": "minecraft:taiga_grass",
+   "type": "minecraft:simple_block"
+  },
+  {
+   "key": "minecraft:tall_grass",
+   "type": "minecraft:simple_block"
+  },
+  {
+   "key": "minecraft:tall_mangrove",
+   "type": "minecraft:tree"
+  },
+  {
+   "key": "minecraft:trees_badlands",
+   "type": "minecraft:random_selector"
+  },
+  {
+   "key": "minecraft:trees_birch",
+   "type": "minecraft:random_selector"
+  },
+  {
+   "key": "minecraft:trees_birch_and_oak_leaf_litter",
+   "type": "minecraft:random_selector"
+  },
+  {
+   "key": "minecraft:trees_flower_forest",
+   "type": "minecraft:random_selector"
+  },
+  {
+   "key": "minecraft:trees_grove",
+   "type": "minecraft:random_selector"
+  },
+  {
+   "key": "minecraft:trees_jungle",
+   "type": "minecraft:random_selector"
+  },
+  {
+   "key": "minecraft:trees_old_growth_pine_taiga",
+   "type": "minecraft:random_selector"
+  },
+  {
+   "key": "minecraft:trees_old_growth_spruce_taiga",
+   "type": "minecraft:random_selector"
+  },
+  {
+   "key": "minecraft:trees_plains",
+   "type": "minecraft:random_selector"
+  },
+  {
+   "key": "minecraft:trees_savanna",
+   "type": "minecraft:random_selector"
+  },
+  {
+   "key": "minecraft:trees_snowy",
+   "type": "minecraft:random_selector"
+  },
+  {
+   "key": "minecraft:trees_sparse_jungle",
+   "type": "minecraft:random_selector"
+  },
+  {
+   "key": "minecraft:trees_taiga",
+   "type": "minecraft:random_selector"
+  },
+  {
+   "key": "minecraft:trees_water",
+   "type": "minecraft:random_selector"
+  },
+  {
+   "key": "minecraft:trees_windswept_hills",
+   "type": "minecraft:random_selector"
+  },
+  {
+   "key": "minecraft:twisting_vines",
+   "type": "minecraft:twisting_vines"
+  },
+  {
+   "key": "minecraft:twisting_vines_bonemeal",
+   "type": "minecraft:twisting_vines"
+  },
+  {
+   "key": "minecraft:underwater_magma",
+   "type": "minecraft:underwater_magma"
+  },
+  {
+   "key": "minecraft:vines",
+   "type": "minecraft:vines"
+  },
+  {
+   "key": "minecraft:void_start_platform",
+   "type": "minecraft:void_start_platform"
+  },
+  {
+   "key": "minecraft:warm_ocean_vegetation",
+   "type": "minecraft:simple_random_selector"
+  },
+  {
+   "key": "minecraft:warped_forest_vegetation",
+   "type": "minecraft:nether_forest_vegetation"
+  },
+  {
+   "key": "minecraft:warped_forest_vegetation_bonemeal",
+   "type": "minecraft:nether_forest_vegetation"
+  },
+  {
+   "key": "minecraft:warped_fungus",
+   "type": "minecraft:huge_fungus"
+  },
+  {
+   "key": "minecraft:warped_fungus_planted",
+   "type": "minecraft:huge_fungus"
+  },
+  {
+   "key": "minecraft:waterlily",
+   "type": "minecraft:simple_block"
+  },
+  {
+   "key": "minecraft:weeping_vines",
+   "type": "minecraft:weeping_vines"
+  },
+  {
+   "key": "minecraft:wildflower",
+   "type": "minecraft:simple_block"
+  }
+ ],
+ "configured_carver": [
+  {
+   "key": "minecraft:canyon",
+   "type": "minecraft:canyon"
+  },
+  {
+   "key": "minecraft:cave",
+   "type": "minecraft:cave"
+  },
+  {
+   "key": "minecraft:cave_extra_underground",
+   "type": "minecraft:cave"
+  },
+  {
+   "key": "minecraft:nether_cave",
+   "type": "minecraft:nether_cave"
+  }
+ ],
+ "structure_set": [
+  {
+   "key": "minecraft:ancient_cities",
+   "placement": "minecraft:random_spread",
+   "structures": [
+    "minecraft:ancient_city"
+   ]
+  },
+  {
+   "key": "minecraft:buried_treasures",
+   "placement": "minecraft:random_spread",
+   "structures": [
+    "minecraft:buried_treasure"
+   ]
+  },
+  {
+   "key": "minecraft:desert_pyramids",
+   "placement": "minecraft:random_spread",
+   "structures": [
+    "minecraft:desert_pyramid"
+   ]
+  },
+  {
+   "key": "minecraft:end_cities",
+   "placement": "minecraft:random_spread",
+   "structures": [
+    "minecraft:end_city"
+   ]
+  },
+  {
+   "key": "minecraft:igloos",
+   "placement": "minecraft:random_spread",
+   "structures": [
+    "minecraft:igloo"
+   ]
+  },
+  {
+   "key": "minecraft:jungle_temples",
+   "placement": "minecraft:random_spread",
+   "structures": [
+    "minecraft:jungle_pyramid"
+   ]
+  },
+  {
+   "key": "minecraft:mineshafts",
+   "placement": "minecraft:random_spread",
+   "structures": [
+    "minecraft:mineshaft",
+    "minecraft:mineshaft_mesa"
+   ]
+  },
+  {
+   "key": "minecraft:nether_complexes",
+   "placement": "minecraft:random_spread",
+   "structures": [
+    "minecraft:fortress",
+    "minecraft:bastion_remnant"
+   ]
+  },
+  {
+   "key": "minecraft:nether_fossils",
+   "placement": "minecraft:random_spread",
+   "structures": [
+    "minecraft:nether_fossil"
+   ]
+  },
+  {
+   "key": "minecraft:ocean_monuments",
+   "placement": "minecraft:random_spread",
+   "structures": [
+    "minecraft:monument"
+   ]
+  },
+  {
+   "key": "minecraft:ocean_ruins",
+   "placement": "minecraft:random_spread",
+   "structures": [
+    "minecraft:ocean_ruin_cold",
+    "minecraft:ocean_ruin_warm"
+   ]
+  },
+  {
+   "key": "minecraft:pillager_outposts",
+   "placement": "minecraft:random_spread",
+   "structures": [
+    "minecraft:pillager_outpost"
+   ]
+  },
+  {
+   "key": "minecraft:ruined_portals",
+   "placement": "minecraft:random_spread",
+   "structures": [
+    "minecraft:ruined_portal",
+    "minecraft:ruined_portal_desert",
+    "minecraft:ruined_portal_jungle",
+    "minecraft:ruined_portal_swamp",
+    "minecraft:ruined_portal_mountain",
+    "minecraft:ruined_portal_ocean",
+    "minecraft:ruined_portal_nether"
+   ]
+  },
+  {
+   "key": "minecraft:shipwrecks",
+   "placement": "minecraft:random_spread",
+   "structures": [
+    "minecraft:shipwreck",
+    "minecraft:shipwreck_beached"
+   ]
+  },
+  {
+   "key": "minecraft:strongholds",
+   "placement": "minecraft:concentric_rings",
+   "structures": [
+    "minecraft:stronghold"
+   ]
+  },
+  {
+   "key": "minecraft:swamp_huts",
+   "placement": "minecraft:random_spread",
+   "structures": [
+    "minecraft:swamp_hut"
+   ]
+  },
+  {
+   "key": "minecraft:trail_ruins",
+   "placement": "minecraft:random_spread",
+   "structures": [
+    "minecraft:trail_ruins"
+   ]
+  },
+  {
+   "key": "minecraft:trial_chambers",
+   "placement": "minecraft:random_spread",
+   "structures": [
+    "minecraft:trial_chambers"
+   ]
+  },
+  {
+   "key": "minecraft:villages",
+   "placement": "minecraft:random_spread",
+   "structures": [
+    "minecraft:village_plains",
+    "minecraft:village_desert",
+    "minecraft:village_savanna",
+    "minecraft:village_snowy",
+    "minecraft:village_taiga"
+   ]
+  },
+  {
+   "key": "minecraft:woodland_mansions",
+   "placement": "minecraft:random_spread",
+   "structures": [
+    "minecraft:mansion"
+   ]
+  }
+ ]
+}

@@ -1,12 +1,129 @@
 op	count	reason
+carver.carve	8	carver minecraft:nether_cave is not ported (Rivet ports the overworld cave, cave_extra_underground and canyon carvers)
+feature.place	8	SculkPatchFeature.place is not implemented (RivetTodo #232: the SculkSpreader addCursors/updateCursors growth loop and isCollisionShapeFullBlock are not ported)
+feature.place	7	WorldGenRegion.canSurvive is not implemented for minecraft:azalea (RivetTodo #232)
+feature.place	8	WorldGenRegion.canSurvive is not implemented for minecraft:blue_orchid (RivetTodo #232)
+feature.place	8	WorldGenRegion.canSurvive is not implemented for minecraft:brown_mushroom (RivetTodo #232)
+feature.place	8	WorldGenRegion.canSurvive is not implemented for minecraft:bush (RivetTodo #232)
+feature.place	16	WorldGenRegion.canSurvive is not implemented for minecraft:closed_eyeblossom (RivetTodo #232)
+feature.place	17	WorldGenRegion.canSurvive is not implemented for minecraft:dandelion (RivetTodo #232)
+feature.place	8	WorldGenRegion.canSurvive is not implemented for minecraft:dead_bush (RivetTodo #232)
+feature.place	2	WorldGenRegion.canSurvive is not implemented for minecraft:flowering_azalea (RivetTodo #232)
+feature.place	1	WorldGenRegion.canSurvive is not implemented for minecraft:lilac (RivetTodo #232)
+feature.place	3	WorldGenRegion.canSurvive is not implemented for minecraft:lily_of_the_valley (RivetTodo #232)
+feature.place	8	WorldGenRegion.canSurvive is not implemented for minecraft:lily_pad (RivetTodo #232)
+feature.place	8	WorldGenRegion.canSurvive is not implemented for minecraft:melon (RivetTodo #232)
+feature.place	8	WorldGenRegion.canSurvive is not implemented for minecraft:orange_tulip (RivetTodo #232)
+feature.place	1	WorldGenRegion.canSurvive is not implemented for minecraft:oxeye_daisy (RivetTodo #232)
+feature.place	2	WorldGenRegion.canSurvive is not implemented for minecraft:peony (RivetTodo #232)
+feature.place	8	WorldGenRegion.canSurvive is not implemented for minecraft:pink_petals (RivetTodo #232)
+feature.place	6	WorldGenRegion.canSurvive is not implemented for minecraft:poppy (RivetTodo #232)
+feature.place	6	WorldGenRegion.canSurvive is not implemented for minecraft:potent_sulfur (RivetTodo #232)
+feature.place	8	WorldGenRegion.canSurvive is not implemented for minecraft:pumpkin (RivetTodo #232)
+feature.place	8	WorldGenRegion.canSurvive is not implemented for minecraft:red_mushroom (RivetTodo #232)
+feature.place	2	WorldGenRegion.canSurvive is not implemented for minecraft:rose_bush (RivetTodo #232)
+feature.place	15	WorldGenRegion.canSurvive is not implemented for minecraft:seagrass (RivetTodo #232)
+feature.place	3	WorldGenRegion.canSurvive is not implemented for minecraft:short_dry_grass (RivetTodo #232)
+feature.place	8	WorldGenRegion.canSurvive is not implemented for minecraft:spore_blossom (RivetTodo #232)
+feature.place	8	WorldGenRegion.canSurvive is not implemented for minecraft:sunflower (RivetTodo #232)
+feature.place	8	WorldGenRegion.canSurvive is not implemented for minecraft:sweet_berry_bush (RivetTodo #232)
+feature.place	5	WorldGenRegion.canSurvive is not implemented for minecraft:tall_dry_grass (RivetTodo #232)
+feature.place	17	WorldGenRegion.canSurvive is not implemented for minecraft:tall_seagrass (RivetTodo #232)
+feature.place	8	WorldGenRegion.canSurvive is not implemented for minecraft:tuff (RivetTodo #232)
+feature.place	8	WorldGenRegion.canSurvive is not implemented for minecraft:wildflowers (RivetTodo #232)
+feature.place	8	generated feature minecraft:desert_well is not implemented
+feature.place	8	generated feature minecraft:dripstone_cluster is not implemented
+feature.place	8	generated feature minecraft:fossil_coal is not implemented
+feature.place	8	generated feature minecraft:fossil_diamonds is not implemented
+feature.place	8	generated feature minecraft:large_dripstone is not implemented
+feature.place	3	generated feature minecraft:pointed_dripstone features[0] is not implemented
+feature.place	8	generated feature minecraft:rooted_azalea_tree is not implemented
+feature.place	8	generated feature minecraft:rooted_sulfur_spring is not implemented
+feature.place	3	generated feature minecraft:sulfur_spike features[0] is not implemented
+feature.place	8	generated feature minecraft:sulfur_spike_cluster is not implemented
+feature.place	8	minecraft:basalt_blobs is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:basalt_pillar is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:birch is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:birch_bees_005 is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:blackstone_blobs is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:bonus_chest is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:cherry is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:chorus_plant is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:crimson_forest_vegetation is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:crimson_forest_vegetation_bonemeal is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:crimson_fungus is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:crimson_fungus_planted is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:crimson_roots is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:dark_oak is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:delta is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:end_gateway_delayed is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:end_gateway_return is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:end_island is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:end_platform is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:end_spike is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:glowstone_extra is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:jungle_tree_no_vine is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:large_basalt_columns is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:moss_patch_bonemeal is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:nether_sprouts is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:nether_sprouts_bonemeal is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:ore_ancient_debris_large is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:ore_ancient_debris_small is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:ore_blackstone is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:ore_gravel_nether is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:ore_magma is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:ore_nether_gold is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:ore_quartz is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:ore_soul_sand is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:pale_moss_patch_bonemeal is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:pale_oak_bonemeal is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:patch_fire is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:patch_soul_fire is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:pile_hay is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:pile_ice is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:pile_melon is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:pile_pumpkin is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:pile_snow is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:sculk_patch_ancient_city is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:small_basalt_columns is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:spring_lava_nether is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:spring_nether_closed is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:spring_nether_open is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:twisting_vines is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:twisting_vines_bonemeal is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:void_start_platform is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:warped_forest_vegetation is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:warped_forest_vegetation_bonemeal is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:warped_fungus is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:warped_fungus_planted is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	minecraft:weeping_vines is outside Rivet's generated 170-entry configured-feature closure (a data-scope gap; its feature type may be ported)
+feature.place	8	multiface_growth growth block 'minecraft:sculk_vein' spreader is not ported (RivetTodo #232: SculkVeinSpreaderConfig defers with the block port)
 loot.roll	3872	only the blocks/* loot tables have a Rust evaluator (rivet_world::block::drops); chest, entity, gameplay and fishing tables need loot functions, conditions and entity/level context that are not ported
-recipe.match	3	special recipe CraftingSpecialFireworkStarFade has no matching logic
-recipe.match	3	special recipe CraftingSpecialMapExtending has no matching logic
-recipe.match	3	special recipe CraftingSpecialShieldDecoration has no matching logic
 recipe.match	4	special recipe CraftingDecoratedPot has no matching logic
+recipe.match	64	special recipe CraftingSpecialBannerDuplicate has no matching logic
 recipe.match	4	special recipe CraftingSpecialBookCloning has no matching logic
 recipe.match	4	special recipe CraftingSpecialFireworkRocket has no matching logic
-recipe.match	4	special recipe CraftingSpecialRepairItem has no matching logic
 recipe.match	5	special recipe CraftingSpecialFireworkStar has no matching logic
-recipe.match	64	special recipe CraftingSpecialBannerDuplicate has no matching logic
+recipe.match	3	special recipe CraftingSpecialFireworkStarFade has no matching logic
+recipe.match	3	special recipe CraftingSpecialMapExtending has no matching logic
+recipe.match	4	special recipe CraftingSpecialRepairItem has no matching logic
+recipe.match	3	special recipe CraftingSpecialShieldDecoration has no matching logic
+structure.start	8	structure piece builder not ported: structure registry has no executable authority for minecraft:ancient_city (minecraft:jigsaw)
+structure.start	8	structure piece builder not ported: structure registry has no executable authority for minecraft:desert_pyramid (minecraft:desert_pyramid)
+structure.start	8	structure piece builder not ported: structure registry has no executable authority for minecraft:end_city (minecraft:end_city)
+structure.start	8	structure piece builder not ported: structure registry has no executable authority for minecraft:fortress (minecraft:fortress)
+structure.start	8	structure piece builder not ported: structure registry has no executable authority for minecraft:igloo (minecraft:igloo)
+structure.start	8	structure piece builder not ported: structure registry has no executable authority for minecraft:jungle_pyramid (minecraft:jungle_temple)
+structure.start	8	structure piece builder not ported: structure registry has no executable authority for minecraft:mansion (minecraft:woodland_mansion)
+structure.start	8	structure piece builder not ported: structure registry has no executable authority for minecraft:monument (minecraft:ocean_monument)
+structure.start	8	structure piece builder not ported: structure registry has no executable authority for minecraft:nether_fossil (minecraft:nether_fossil)
+structure.start	8	structure piece builder not ported: structure registry has no executable authority for minecraft:ocean_ruin_cold (minecraft:ocean_ruin)
+structure.start	8	structure piece builder not ported: structure registry has no executable authority for minecraft:pillager_outpost (minecraft:jigsaw)
+structure.start	8	structure piece builder not ported: structure registry has no executable authority for minecraft:ruined_portal (minecraft:ruined_portal)
+structure.start	8	structure piece builder not ported: structure registry has no executable authority for minecraft:shipwreck (minecraft:shipwreck)
+structure.start	8	structure piece builder not ported: structure registry has no executable authority for minecraft:stronghold (minecraft:stronghold)
+structure.start	8	structure piece builder not ported: structure registry has no executable authority for minecraft:swamp_hut (minecraft:swamp_hut)
+structure.start	8	structure piece builder not ported: structure registry has no executable authority for minecraft:trail_ruins (minecraft:jigsaw)
+structure.start	8	structure piece builder not ported: structure registry has no executable authority for minecraft:trial_chambers (minecraft:jigsaw)
+structure.start	8	structure piece builder not ported: structure registry has no executable authority for minecraft:village_plains (minecraft:jigsaw)
 trade.offers	1088	villager_trade / trade_set data-pack documents have no Rust loader (rivet_world::trading has the value types and the selection loop, not the documents or the loot context their providers read)

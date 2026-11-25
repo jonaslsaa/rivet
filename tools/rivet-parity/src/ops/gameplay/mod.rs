@@ -323,6 +323,7 @@ mod tests {
     /// reason: a handler that starts answering an input, or a new unported
     /// input, moves this table with it.
     #[test]
+    #[ignore = "heavy: run via scripts/gate.sh release replay step"]
     fn unavailable_table_is_what_the_handlers_report() {
         let text = fs::read_to_string(ops_dir().join("unavailable.tsv")).unwrap();
         let mut lines = text.lines();
@@ -338,11 +339,13 @@ mod tests {
         }
         let exclusions =
             super::super::compare::load_exclusions(&ops_dir().join("exclusions.tsv")).unwrap();
-        let fixtures = load_fixtures(&ops_dir(), &op_source()).unwrap();
         let mut actual: BTreeMap<(String, String), usize> = BTreeMap::new();
-        for row in super::super::check(&fixtures, &exclusions, None) {
-            for (reason, count) in row.unavailable_reasons {
-                actual.insert((row.op.clone(), reason), count);
+        // One op at a time: the fixtures of the other ops are not held while it runs.
+        for fixture in load_fixtures(&ops_dir(), &op_source()).unwrap() {
+            for row in super::super::check(&[fixture], &exclusions, None) {
+                for (reason, count) in row.unavailable_reasons {
+                    actual.insert((row.op.clone(), reason), count);
+                }
             }
         }
         assert_eq!(committed, actual);

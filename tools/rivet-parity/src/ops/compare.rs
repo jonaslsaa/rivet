@@ -548,6 +548,23 @@ pub fn tamper(outcome: &Outcome) -> Outcome {
     }
 }
 
+/// The first input a tamper negative can corrupt: one the comparator matched,
+/// that no exclusion covers, and that Rust actually executed (an unported
+/// input never reaches a comparison, so corrupting it detects nothing).
+pub fn tamper_index(
+    op: &str,
+    expected: &[(String, Outcome)],
+    actual: &[(String, Outcome)],
+    exclusions: &[Exclusion],
+    clean: &Comparison,
+) -> Option<usize> {
+    (0..expected.len().min(actual.len())).find(|&i| {
+        !clean.mismatched_ids.contains(&expected[i].0)
+            && !input_excluded(op, &expected[i].0, exclusions)
+            && !matches!(actual[i].1, Outcome::Unported(_))
+    })
+}
+
 /// The mandatory negative control for one comparator: tamper the expected
 /// answer of the first input the real comparison matched and require the
 /// comparator to detect it and name exactly that input. `None` when no input
@@ -559,11 +576,7 @@ pub fn tamper_negative(
     exclusions: &[Exclusion],
 ) -> Option<rivet_harness_common::negative::Verdict> {
     let clean = compare(op, expected, actual, exclusions);
-    let index = (0..expected.len().min(actual.len())).find(|&i| {
-        !clean.mismatched_ids.contains(&expected[i].0)
-            && !input_excluded(op, &expected[i].0, exclusions)
-            && !matches!(actual[i].1, Outcome::Unported(_))
-    })?;
+    let index = tamper_index(op, expected, actual, exclusions, &clean)?;
     let mut tampered = expected.to_vec();
     tampered[index].1 = tamper(&tampered[index].1);
     let result = compare(op, &tampered, actual, exclusions);

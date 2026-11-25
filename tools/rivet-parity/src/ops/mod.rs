@@ -42,6 +42,7 @@ pub mod packet_corpus;
 pub mod packet_seeds;
 pub mod shapes;
 pub mod shapes_corpus;
+pub mod worldgen;
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -119,6 +120,32 @@ pub struct OpFixture {
     pub declared: usize,
     pub corpus: Vec<CorpusEntry>,
     pub recorded: Vec<(String, Outcome)>,
+}
+
+impl OpFixture {
+    /// The inputs `keep` accepts, with their recorded answers; `declared` is
+    /// the subset's size.
+    pub fn subset(&self, mut keep: impl FnMut(&CorpusEntry) -> bool) -> OpFixture {
+        let corpus: Vec<CorpusEntry> = self.corpus.iter().filter(|e| keep(e)).cloned().collect();
+        let ids: std::collections::HashSet<&str> = corpus.iter().map(|e| e.id.as_str()).collect();
+        OpFixture {
+            op: self.op.clone(),
+            declared: corpus.len(),
+            recorded: self
+                .recorded
+                .iter()
+                .filter(|(id, _)| ids.contains(id.as_str()))
+                .cloned()
+                .collect(),
+            corpus,
+        }
+    }
+
+    /// The inputs of one world seed (the worldgen sweep ops carry `seed`).
+    #[cfg(test)]
+    pub fn for_seed(&self, seed: i64) -> OpFixture {
+        self.subset(|e| e.request.get("seed").and_then(Value::as_i64) == Some(seed))
+    }
 }
 
 /// Why the recorded fixtures could not be used.
@@ -345,11 +372,16 @@ fn run_rust(
                     Outcome::Unavailable("skipped input not executed".into()),
                 );
             }
-            if trace {
-                eprintln!("[ops trace] {op} {}", entry.id);
-            }
+            let started = std::time::Instant::now();
             let outcome = catch_unwind(AssertUnwindSafe(|| (side.handler)(&entry.request)))
                 .unwrap_or_else(|_| Outcome::Unavailable("Rust handler panicked".into()));
+            if trace {
+                eprintln!(
+                    "[ops trace] {op} {} {:.2}s",
+                    entry.id,
+                    started.elapsed().as_secs_f64()
+                );
+            }
             // The deliberately broken handler: every answer is corrupted, the
             // way a wrong port would be.
             let outcome = if side.broken {
@@ -613,16 +645,32 @@ pub fn live(
             rows.push(no_handler_row("live", fixture));
             continue;
         };
-        let actual = run_rust(&fixture.op, side, &fixture.corpus, exclusions);
+        // The Rust handlers of the worldgen sweep ops run for the live seeds
+        // only (see `worldgen::live_seeds`); Paper answered every seed above.
+        let view = match worldgen::live_seeds(&fixture.op) {
+            Some(seeds) => fixture.subset(|e| {
+                e.request
+                    .get("seed")
+                    .and_then(Value::as_i64)
+                    .is_some_and(|seed| seeds.contains(&seed))
+            }),
+            None => fixture.clone(),
+        };
+        let paper: Vec<(String, Outcome)> = {
+            let ids: std::collections::HashSet<&str> =
+                view.corpus.iter().map(|e| e.id.as_str()).collect();
+            paper
+                .into_iter()
+                .filter(|(id, _)| ids.contains(id.as_str()))
+                .collect()
+        };
+        let bodies: Vec<String> = view.corpus.iter().map(|e| e.body(&view.op)).collect();
+        let actual = run_rust(&view.op, side, &view.corpus, exclusions);
         // The negative goes through the client's tamper hook: re-ask Paper for
         // the first input that matched, have the hook corrupt that response
         // line, and require the comparator to detect and name the input.
-        let clean = compare::compare(&fixture.op, &paper, &actual, exclusions);
-        let negative = match fixture.corpus.iter().enumerate().position(|(i, entry)| {
-            !clean.mismatched_ids.contains(&entry.id)
-                && !compare::input_excluded(&fixture.op, &entry.id, exclusions)
-                && !matches!(actual[i].1, Outcome::Unported(_))
-        }) {
+        let clean = compare::compare(&view.op, &paper, &actual, exclusions);
+        let negative = match compare::tamper_index(&view.op, &paper, &actual, exclusions, &clean) {
             Some(index) => {
                 oracle
                     .client()
@@ -633,24 +681,24 @@ pub fn live(
                 let line = oracle
                     .client()
                     .call(&bodies[index])
-                    .map_err(|e| format!("{}: tamper re-ask failed: {e}", fixture.op))?;
+                    .map_err(|e| format!("{}: tamper re-ask failed: {e}", view.op))?;
                 let mut tampered = paper.clone();
-                tampered[index].1 = Outcome::from_live(&fixture.op, &line);
-                let result = compare::compare(&fixture.op, &tampered, &actual, exclusions);
+                tampered[index].1 = Outcome::from_live(&view.op, &line);
+                let result = compare::compare(&view.op, &tampered, &actual, exclusions);
                 let named: Vec<String> = result
                     .mismatched_ids
                     .into_iter()
                     .filter(|id| !clean.mismatched_ids.contains(id))
                     .collect();
                 Some(rivet_harness_common::negative::verdict(
-                    &fixture.corpus[index].id,
+                    &view.corpus[index].id,
                     &named,
                 ))
             }
             None => None,
         };
         rows.push(evaluate(
-            "live", fixture, &paper, &actual, negative, exclusions,
+            "live", &view, &paper, &actual, negative, exclusions,
         ));
     }
     Ok(rows)
@@ -740,12 +788,15 @@ pub fn emit_corpus() -> Result<Vec<(&'static str, String)>, String> {
 
     let mut corpora = vec![
         ("brigadier.dispatch", brigadier_corpus::emit()?),
+        ("carver.carve", worldgen::emit_carver_corpus()),
         ("codec.reencode", codec_corpus::emit()?),
         ("component.json", component),
+        ("feature.place", worldgen::emit_feature_corpus()),
         ("nbt.decode", decode),
         ("packet.reencode", packet_corpus::emit()?),
         ("shapes.eval", shapes_corpus::emit()?),
         ("snbt.parse", snbt),
+        ("structure.start", worldgen::emit_structure_corpus()),
     ];
     corpora.extend(entity_corpus::emit());
     corpora.extend(gameplay::emit());
@@ -987,13 +1038,40 @@ mod tests {
         load_fixtures(&ops_dir(), &op_source()).expect("committed recorded ops load and close")
     }
 
+    /// The recorded ops other than the worldgen sweeps, which replay below.
+    fn light_fixtures() -> Vec<OpFixture> {
+        fixtures()
+            .into_iter()
+            .filter(|f| !worldgen::OPS.contains(&f.op.as_str()))
+            .collect()
+    }
+
+    fn assert_row_passes(row: &OpRow) {
+        assert_eq!(
+            row.status,
+            Status::Pass,
+            "{} {}: {:?} first={:?} note={:?}",
+            row.op,
+            row.closure,
+            row.negative,
+            row.first.as_ref().map(ToString::to_string),
+            row.note
+        );
+        assert!(
+            row.closure.executed > 0
+                && row.closure.executed + row.closure.excluded + row.closure.unavailable
+                    == row.closure.declared
+        );
+    }
+
     /// The offline tier of the op framework: every recorded op's Rust handler
     /// reproduces Paper's recorded answers byte-for-byte, closure holds, and
-    /// each comparator's tamper negative is detected and named.
+    /// each comparator's tamper negative is detected and named. The worldgen
+    /// sweeps are replayed by their own tests (they are far heavier).
     #[test]
     fn recorded_ops_match_rust_handlers_offline() {
         let exclusions = compare::load_exclusions(&ops_dir().join("exclusions.tsv")).unwrap();
-        let rows = check(&fixtures(), &exclusions, None);
+        let rows = check(&light_fixtures(), &exclusions, None);
         assert!(!rows.is_empty());
         for row in &rows {
             if fully_unported(row) {
@@ -1002,20 +1080,118 @@ mod tests {
                 assert!(!row.unavailable_reasons.is_empty(), "{}", row.op);
                 continue;
             }
+            assert_row_passes(row);
+        }
+    }
+
+    fn replay_worldgen(op: &str, seed: Option<i64>) {
+        let exclusions = compare::load_exclusions(&ops_dir().join("exclusions.tsv")).unwrap();
+        let all = fixtures();
+        let fixture = all.iter().find(|f| f.op == op).unwrap();
+        let fixture = match seed {
+            Some(seed) => fixture.for_seed(seed),
+            None => fixture.clone(),
+        };
+        let rows = check(&[fixture], &exclusions, None);
+        assert_row_passes(&rows[0]);
+    }
+
+    /// A cheap sample of one worldgen op: every `stride`-th input, plus the inputs
+    /// whose id satisfies `always`. The whole-corpus replays below are the heavy
+    /// tests (the gate's release replay step); this keeps the default run honest.
+    fn replay_sample(op: &str, stride: usize, always: impl Fn(&str) -> bool) {
+        let exclusions = compare::load_exclusions(&ops_dir().join("exclusions.tsv")).unwrap();
+        let all = fixtures();
+        let fixture = all.iter().find(|f| f.op == op).unwrap();
+        let mut index = 0;
+        let sample = fixture.subset(|e| {
+            index += 1;
+            (index - 1) % stride == 0 || always(&e.id)
+        });
+        let rows = check(&[sample], &exclusions, None);
+        assert_row_passes(&rows[0]);
+    }
+
+    #[test]
+    fn worldgen_ops_replay_a_sample_offline() {
+        replay_sample("feature.place", 16, |_| false);
+        replay_sample("carver.carve", 4, |_| false);
+        // The two sets with ported piece builders, for one seed (the rest answer
+        // `unported` without generating anything).
+        replay_sample("structure.start", 40, |id| {
+            id.ends_with("#42")
+                && ["buried_treasures", "mineshafts"]
+                    .iter()
+                    .any(|set| id.contains(set))
+        });
+    }
+
+    #[test]
+    #[ignore = "heavy: run via scripts/gate.sh release replay step"]
+    fn feature_place_replays_offline() {
+        replay_worldgen("feature.place", None);
+    }
+
+    #[test]
+    #[ignore = "heavy: run via scripts/gate.sh release replay step"]
+    fn carver_carve_replays_offline() {
+        replay_worldgen("carver.carve", None);
+    }
+
+    /// One test per recorded seed, so the replay of the heavy op runs in
+    /// parallel (heavy: ignored by default, run by the gate's release replay step).
+    macro_rules! structure_start_seed_tests {
+        ($($name:ident: $seed:expr,)*) => {
+            $(
+                #[test]
+                #[ignore = "heavy: run via scripts/gate.sh release replay step"]
+                fn $name() {
+                    replay_worldgen("structure.start", Some($seed));
+                }
+            )*
+        };
+    }
+
+    structure_start_seed_tests! {
+        structure_start_replays_seed_0: 0,
+        structure_start_replays_seed_1: 1,
+        structure_start_replays_seed_42: 42,
+        structure_start_replays_seed_1337: 1337,
+        structure_start_replays_seed_minus_1: -1,
+        structure_start_replays_seed_8675309: 8_675_309,
+        structure_start_replays_seed_2_pow_62_plus_1: 4_611_686_018_427_387_905,
+        structure_start_replays_seed_long_min: i64::MIN,
+    }
+
+    /// The declared count of a worldgen sweep is its registry size times the
+    /// eight seeds, and the committed seeds are the ones the corpus carries.
+    #[test]
+    fn worldgen_sweeps_declare_registry_times_seeds() {
+        let all = fixtures();
+        for (op, registry) in [
+            ("feature.place", "configured_feature"),
+            ("carver.carve", "configured_carver"),
+            ("structure.start", "structure_set"),
+        ] {
+            let fixture = all.iter().find(|f| f.op == op).unwrap();
+            let registry_size = worldgen::registries()[registry].as_array().unwrap().len();
             assert_eq!(
-                row.status,
-                Status::Pass,
-                "{} {}: {:?} first={:?} note={:?}",
-                row.op,
-                row.closure,
-                row.negative,
-                row.first.as_ref().map(ToString::to_string),
-                row.note
+                fixture.declared,
+                registry_size * worldgen::SEEDS.len(),
+                "{op}"
             );
+            for seed in worldgen::SEEDS {
+                assert_eq!(
+                    fixture.for_seed(seed).declared,
+                    registry_size,
+                    "{op} seed {seed}"
+                );
+            }
+        }
+        for live in worldgen::live_seeds("feature.place").unwrap() {
             assert!(
-                row.closure.executed > 0
-                    && row.closure.executed + row.closure.excluded + row.closure.unavailable
-                        == row.closure.declared
+                worldgen::SEEDS.contains(&live),
+                "live seed {live} is not a recorded seed"
             );
         }
     }
@@ -1025,7 +1201,7 @@ mod tests {
     #[test]
     fn stale_input_exclusion_fails_the_row() {
         let mut exclusions = compare::load_exclusions(&ops_dir().join("exclusions.tsv")).unwrap();
-        let fixtures = fixtures();
+        let fixtures = light_fixtures();
         let fixture = fixtures.iter().find(|f| f.op == "snbt.parse").unwrap();
         let id = fixture.corpus[0].id.clone();
         exclusions.push(Exclusion {
@@ -1063,16 +1239,33 @@ mod tests {
     }
 
     /// The automated negative: a deliberately broken Rust handler must be
-    /// detected and named (op, input id, field) by the same comparator.
+    /// detected and named (op, input id, field) by the same comparator. The
+    /// worldgen sweeps run their first inputs only (the first input of each is
+    /// one the Rust handler answers or declines, and either way the broken
+    /// handler's tampered answer must diverge from Paper's).
     #[test]
     fn deliberately_broken_rust_handler_is_detected_and_named() {
         let exclusions = compare::load_exclusions(&ops_dir().join("exclusions.tsv")).unwrap();
-        let fixtures = fixtures();
-        for fixture in &fixtures {
+        let all = fixtures();
+        let probe = all.iter().find(|f| f.op == "snbt.parse").unwrap().clone();
+        for fixture in &all {
             if handlers::handler(&fixture.op).is_none() {
                 continue;
             }
-            let rows = check(&fixtures, &exclusions, Some(&fixture.op));
+            let fixture = if worldgen::OPS.contains(&fixture.op.as_str()) {
+                let mut head = 0;
+                fixture.subset(|_| {
+                    head += 1;
+                    head <= 8
+                })
+            } else {
+                fixture.clone()
+            };
+            let rows = check(
+                &[fixture.clone(), probe.clone()],
+                &exclusions,
+                Some(&fixture.op),
+            );
             assert_eq!(
                 broken_handler_verdict(&rows, &fixture.op),
                 0,

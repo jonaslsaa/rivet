@@ -4,7 +4,7 @@
   "paper": "26.2-DEV-main@0a99345",
   "paper_commit": "0a99345",
   "op_source": "tools/rivet-reference-oracle/src",
-  "op_source_sha256": "5c6598f1f39eb452b84cfb5a4fe72be25bb1a78372689d9f05c0ab1291d4f48e",
+  "op_source_sha256": "87575a8a7beb438a104577d3982c9cc3ac83eaa648ac3841b02e127042e23ae1",
   "ops": [
     {
       "op": "brigadier.dispatch",
@@ -14,6 +14,15 @@
       "output": "brigadier.dispatch.jsonl",
       "output_sha256": "63872b275a52d7ca9ea79b83091d2aa1f4ede3b532e17e12f2069d848c69cfac",
       "output_n": 3539
+    },
+    {
+      "op": "carver.carve",
+      "corpus": "corpus/carver.carve.jsonl",
+      "corpus_sha256": "790091c0958e88d3c781906bad2822ad30d345652bd54c72dc43844abf0441ab",
+      "corpus_n": 32,
+      "output": "carver.carve.jsonl",
+      "output_sha256": "795f4f9efc792ab113a970b47006a570f2c1f41afe2682ffaf109f4495f4db79",
+      "output_n": 32
     },
     {
       "op": "codec.reencode",
@@ -68,6 +77,15 @@
       "output": "enchant.select.jsonl",
       "output_sha256": "96028ef67f7adddfe4303cc6d45a7a75549a55f4eb3bafbd57165a396efa0eb8",
       "output_n": 3252
+    },
+    {
+      "op": "feature.place",
+      "corpus": "corpus/feature.place.jsonl",
+      "corpus_sha256": "fd6283cbb7826b4b0c280c657a26f863b47407223870b582e5e908c01f7f1c63",
+      "corpus_n": 1808,
+      "output": "feature.place.jsonl",
+      "output_sha256": "08e4b56f5f64541848a136d867223de7e03cbb462d671b9a6e6d33a6fca2d8c1",
+      "output_n": 1808
     },
     {
       "op": "food.exhaustion",
@@ -140,6 +158,15 @@
       "output": "snbt.parse.jsonl",
       "output_sha256": "263c55f8b330f1953d6b9e666bc8b9e620ed48abeb357cf28df80e40dc8958a8",
       "output_n": 170
+    },
+    {
+      "op": "structure.start",
+      "corpus": "corpus/structure.start.jsonl",
+      "corpus_sha256": "0b7429cc16f08da4e6794b811729b0cbf741a94551f69289ab6bd0ce2311a2ae",
+      "corpus_n": 160,
+      "output": "structure.start.jsonl",
+      "output_sha256": "34c77d821dd813cde339f45ae3ad09442ec12bf2d6efe757e9b3ad7e925aa542",
+      "output_n": 160
     },
     {
       "op": "trade.offers",

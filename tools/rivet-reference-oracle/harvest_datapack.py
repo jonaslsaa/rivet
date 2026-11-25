@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Harvest codec.reencode seeds from the vanilla data pack inside the Paper jar.
 
+Also writes fixtures/ops/corpus-src/worldgen-registries.json: the key, dispatch type
+and (for structure sets) placement type and structures of every vanilla configured
+feature, configured carver and structure set, which the worldgen sweep ops
+(feature.place, carver.carve, structure.start) are generated from.
+
 Writes fixtures/ops/corpus-src/codec-datapack.jsonl: {"codec", "source", "json"}
 lines, deterministic (sorted by source file). Every distinct document this script
 routes to a table codec is kept: nothing is sampled or size-capped, but only the
@@ -286,3 +291,27 @@ for codec in late:
 emit(late, sorted(c for c in late if late[c]))
 out.write_text("\n".join(lines) + "\n")
 print(f"wrote {len(lines)} seeds for {len(found.keys() | late.keys())} codecs to {out}")
+
+
+# ---- the registries the worldgen sweep ops iterate (VERIFICATION section 5 item 5) ----
+sweep_out = out.parent / "worldgen-registries.json"
+registries = {"configured_feature": [], "configured_carver": [], "structure_set": []}
+with zipfile.ZipFile(jar) as archive:
+    for name in sorted(archive.namelist()):
+        for folder in registries:
+            prefix = f"data/minecraft/worldgen/{folder}/"
+            if name.startswith(prefix) and name.endswith(".json"):
+                doc = json.loads(archive.read(name))
+                key = "minecraft:" + name[len(prefix):-len(".json")]
+                if folder == "structure_set":
+                    registries[folder].append({
+                        "key": key,
+                        "placement": doc["placement"]["type"],
+                        "structures": [entry["structure"] for entry in doc["structures"]],
+                    })
+                else:
+                    registries[folder].append({"key": key, "type": doc["type"]})
+for entries in registries.values():
+    entries.sort(key=lambda entry: entry["key"])
+sweep_out.write_text(json.dumps(registries, indent=1) + "\n")
+print(f"wrote {sum(map(len, registries.values()))} worldgen registry entries to {sweep_out}")

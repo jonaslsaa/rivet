@@ -210,7 +210,8 @@ One comparator, used everywhere:
    exclusion added in the same PR as the port it would excuse.
 4. **Every comparator has a tamper negative** (the existing convention: `--expect-fail`, `--mutate`,
    `--tamper`). A row without a detected negative is UNVERIFIED, not PASS.
-5. **Closure is checked**: declared corpus count == executed count; zero executed is UNVERIFIED. This
+5. **Closure is checked**: declared corpus count == executed count (+ excluded + unavailable, the inputs a
+   Rust handler declined because Rust has no implementation or no data for what they exercise); zero executed is UNVERIFIED. This
    is already how `rivet-parity` behaves; make it the shared library behavior in `rivet-harness-common`.
 
 ### 2.5 Nondeterminism
@@ -240,7 +241,7 @@ must be byte-identical after normalization before the Paper-vs-Rivet comparison 
 
 One committed file, `VERIFY.tsv`, is the source of truth. One row per verification surface:
 
-`id · layer · rust_globs · java_classes · mechanism (op/probe/scenario) · corpus_n · negative (y/n) · tier · status · matched · mismatched · last_verified_commit`
+`id · layer · rust_globs · java_classes · mechanism (op/probe/scenario) · corpus_n · negative (y/n) · tier · status · matched · mismatched · unavailable · last_verified_commit`
 
 - `rust_globs` maps source files to the row that verifies them. A file may be covered by several rows.
 - `status` is one of `PASS`, `FAIL`, `UNVERIFIED`, `INACTIVE`. Only the tool writes status and counts.
@@ -529,6 +530,101 @@ L = several days / multiple rounds. Ordered by risk x already-ported-unverified 
   the three codec-less stub packets, the bundle packets and the ported packets with no table entry
   (`update_recipes`, `show_dialog`, `resource_pack_push`).
   The live op boots registries lazily (about 6 s on first use).
+
+**Status of item 5 (worldgen sweep: `feature.place`, `carver.carve`, `structure.start`).**
+- *Ops.* Each op sweeps a whole vanilla registry for eight fixed world seeds (`0, 1, 42, 1337, -1, 8675309,
+  4611686018427387905, Long.MIN_VALUE`). `--record` refuses a corpus that omits a registry entry for any seed
+  (`corpusCheck` in `RivetReferenceOracle.java`), so the declared count is Paper's registry size x 8:
+  `feature.place` 226 configured features = 1,808 inputs, `carver.carve` 4 configured carvers = 32,
+  `structure.start` 20 structure sets = 160 (key lists harvested from the Paper jar into
+  `fixtures/ops/corpus-src/worldgen-registries.json`; `emit-corpus` derives the corpora from it). Answers carry
+  geometry, never a hash.
+- *`feature.place {feature, seed, region}` -> `{placed, rng_next, scheduled, blocks[, threw]}`.* The region
+  contract. A 3 x 3 window of proto chunks around chunk (0, 0), status CARVERS, the centre chunk with its final
+  heightmaps primed, each a copy of the profile's base fill (by y; horizontally uniform except `cave`) with the
+  profile's biome at every position and light 0, behind a `WorldGenRegion` (FEATURES step: write radius 1).
+  A write more than one chunk from (0, 0) answers `false`; a read outside the window is the `Requested chunk
+  unavailable during world generation` crash and is answered `threw: true` (Paper's real region also holds the
+  chunks two to eight away, at STRUCTURE_STARTS status with no blocks, so a feature that reads there sees air in
+  Paper and a crash here: a stricter synthetic region, the same on both sides). y outside [-64, 319] reads void
+  air. The feature is placed at the profile's origin with `XoroshiroRandomSource(seed)`; the region's own random
+  is `XoroshiroRandomSource(99)`; the sea level and the build window (-64, 384) are the profile's. `placed` is the
+  return value, `rng_next` the next long of the placement random afterwards, `scheduled` the ticks left in the
+  chunks' tick containers (`[x, y, z, "block"|"fluid", id]`, sorted; the container keeps one tick per type and
+  position and drops the delay), `blocks` every position with x, z in [-16, 32) and y in [-64, 320) whose state
+  differs from the profile's base fill (`[x, y, z, global state id]`, sorted x, y, z). Compared: block states
+  only; block entity data, entities, light and neighbour updates are not. Profiles (base fill by y; origin):
+  `stone` (stone <= 63; (8, 40, 8)), `surface` (stone <= 60, dirt 61-62, grass block 63; (8, 64, 8)), `cave`
+  (stone <= 63 with an air cavity x, z in [-8, 24], y in [30, 44]; (8, 30, 8)), `ocean` (stone <= 43, sand 44,
+  water 45-62; (8, 45, 8)), `nether` (netherrack y <= 40 and y >= 120, sea level 32, nether_wastes; (8, 41, 8)),
+  `nether_ceiling` (the same fill; (8, 119, 8)), `end` (end stone <= 62, sea level 0, the_end; (8, 63, 8)) and
+  `void` (air everywhere, the_void; (8, 64, 8)); the others are plains with sea level 63. `region_for` in
+  `tools/rivet-parity/src/ops/worldgen/feature.rs` gives each feature its profile (a kelp forest the ocean, a
+  nether ore the nether, a geode the stone profile; everything else the surface). Paper's side builds the
+  region over real `ProtoChunk`s, a shell `ServerLevel` (so the template manager and the chunk generator the
+  fossil, sulfur and pale moss features reach exist) and a `java.lang.reflect.Proxy` for `WorldGenLevel`; a
+  method the proxy does not implement is a harness fault (`unavailable`, which aborts a recording), never a
+  verdict. In the recorded run 1,519 of the 1,808 inputs place and none throws or faults.
+- *`carver.carve {carver, seed, index}` -> `{chunks}`.* The 3 x 3 grid of chunks around (0, 0), each stone for
+  y <= 63 and air above, carved the way `applyCarvers` loops: for every source chunk within 8,
+  `WorldgenRandom(LegacyRandomSource(0)).setLargeFeatureSeed(seed + index, x, z)`, then `isStartChunk` and
+  `carve`. The aquifer is `Aquifer.createDisabled` over the global fluid picker (lava below -54, water below
+  the overworld sea level 63) and there is no surface rule, so no top material replaces a carved block. `index`
+  is the carver's position in its dimension's list (cave 0, cave_extra_underground 1, canyon 2, nether_cave 0).
+  Per chunk: the number of start chunks, the number of carves that returned true, the carving-mask set bits
+  (index `x | z << 4 | (y + 64) << 8`) and the changed blocks, both as `[start, length]` / `[start, length,
+  state id]` runs. Seeds that agree in their low 48 bits (0 and `Long.MIN_VALUE`; 1 and 2^62 + 1) give the same
+  carving, because `LegacyRandomSource` keeps 48 bits: the duplicates are Paper's behaviour, not a harness
+  defect.
+- *`structure.start {structure_set, seed, dimension}` -> `{candidates, starts}`.* The chunk grid [-48, 47]^2
+  (the first stronghold ring lies 88 or more chunks out, so the stronghold sweep has no candidate: its eight
+  inputs verify that and nothing else), in the real overworld, nether or end biome source and noise settings
+  (`end_cities` end, `nether_complexes` and `nether_fossils` nether, the rest overworld). A chunk is a
+  candidate where Paper's own placement holds: `ChunkGeneratorStructureState.possibleStructureSets()` with the
+  spigot-salted, keyed placements (`injectSpigot`) and the default `SpigotWorldConfig` seeds. The start is the
+  weighted selection of `setLargeFeatureSeed(seed, x, z)` over the set's structures, each tried through
+  `Structure.generate` until one is valid; `starts` lists chunk, structure and pieces (`type`, `box`, `rotation`
+  and `mirror` where the piece has an orientation, `depth`), in order, without placing a block.
+- *Closure.* `declared == executed + excluded + unavailable`. The framework has a new verdict: a Rust handler
+  answers `unported` (with the reason) for an input whose feature, carver or structure Rivet has not ported, or
+  whose registry entry is outside Rivet's generated data; it is counted `unavailable`, apart from matched and
+  mismatched, printed by `rivet-parity ops check|live` with its reasons, listed per op and reason in
+  `fixtures/ops/unavailable.tsv` (one table for every op, pinned to the handlers by a rivet-parity test), and
+  `VERIFY.tsv` has a result column `unavailable` (`verify_ledger.py --check` rejects an op row whose matched count
+  is not `corpus_n` minus excluded minus unavailable, and a recorded row whose count differs from the table). The Rust handlers only call what is already
+  ported (`rivet-server`'s configured-feature registry and `WorldGenRegion`, the carvers, the structure state and
+  `generate_start`); a capability the ported code refuses loudly (`not implemented`, `RivetTodo`) is `unported`,
+  any other panic is a hard mismatch.
+- *Scoreboard (2026-11-24).* `feature.place`: 1,037 executed and matched, 14 excluded, 0 mismatched,
+  757 unavailable of 1,808. The unavailable inputs: 448 (56 configured features) are a data-scope gap, not
+  unported feature types: those configured features are outside Rivet's codegen'd 170-entry
+  configured-feature closure (`CONFIGURED_FEATURE_BY_NAME`), although their feature types are partly ported
+  (nether ores, `spring_nether_*`, several trees); 223 reach the
+  `WorldGenRegion.canSurvive` of a block state that is not ported, 70 a generated feature body that is not
+  ported (`desert_well`, `fossil_*`, `large_dripstone`, `dripstone_cluster`, `rooted_azalea_tree`, the sulfur
+  features), 16 the sculk spreader. 133 of the 226 features have at least one input that ran (excluded ones included). The 14 excluded
+  inputs are the two mismatches, each filed and left unfixed: #820 `forest_rock` (8 inputs: Rivet parses
+  `-1i32.wrapping_add(random.next_int_bound(2))` as `-(1 + n)`) and #821 `iceberg_blue` and `iceberg_packed`
+  (6 inputs: Rivet draws the steep-loop bound once, Paper on every iteration). `carver.carve`: 24 executed and
+  matched, 8 unavailable (`nether_cave` is not ported), 0 mismatched of 32. `structure.start`: 16 executed
+  and matched, 144 unavailable of 160: only `mineshafts` and `buried_treasures` have ported piece builders; the
+  other 18 sets answer `unported` naming their first unported structure (so their placement candidates, which
+  Rivet has ported, are not compared either).
+- *Live.* `ops live` asks Paper for every recorded seed (freshness of all 2,000 recorded answers), but
+  compares the Rust handlers for the two seeds in `fixtures/ops/corpus-src/worldgen-live-seeds.json` (42 and
+  1337) only: `structure.start` costs about a minute of debug-profile Rust per seed and `gate.sh` runs the debug
+  profile. The live rows therefore declare 452, 8 and 40 inputs: `feature.place` 260 matched, 2 excluded,
+  190 unavailable; `carver.carve` 6 matched, 2 unavailable; `structure.start` 4 matched, 36 unavailable, all with
+  0 mismatched and the tamper negative detected (`VERIFY.tsv` carries the same counts and
+  `verify_ledger.py` reads the same seed file). `ops check` replays all eight offline; the cargo tests replay a sample of each
+  op by default, and the whole-corpus replays (`structure.start` as eight per-seed tests, `feature.place`,
+  `carver.carve`, the `unavailable.tsv` pin) are `#[ignore = "heavy: ..."]` tests that the gate's
+  `rivet-parity heavy replay (release, --ignored)` step runs with `--test-threads=1`.
+- *Gaps.* Unavailable (not ported, or outside the generated feature closure): see the counts above. The region is a 3 x 3 window, not Paper's 17 x 17
+  (above). Block entities, entities and light are outside the answer. The stronghold sweep is vacuous in the
+  grid. A set with any unported structure verifies none of its placement. The Rust handler generates starts in the
+  overworld only (`OverworldGenerator`), so the nether and end sets are unavailable whatever their structures. Re-recording gives
+  byte-identical files (checked twice).
 
 **Status of item 7 (arena tick-trace harness).**
 - 16 arenas under `tools/rivet-oracle/arenas/` (corpus: `arenas.tsv`; Paper twin-admitted traces in `paper/`; seed sites in `seed-sites.tsv`). Schema `rivet.arena-trace/1`; Java `ArenaTraceProbe`, Rust runner in `rivet-oracle` over rivet-server's public level API.

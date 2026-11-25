@@ -8,6 +8,7 @@ tree whose expected values were read off the named files by hand.
 """
 
 import sys
+import json
 import unittest
 from pathlib import Path
 
@@ -22,7 +23,7 @@ HEADER = "\t".join(vl.COLUMNS)
 def row(**kw) -> dict[str, str]:
     base = {"id": "x", "layer": "L1", "rust_globs": "-", "java_classes": "-", "mechanism": "m",
             "fixtures": "-", "corpus_n": "1", "negative": "n", "tier": "T0", "status": "UNVERIFIED",
-            "matched": "-", "mismatched": "-", "last_verified_commit": "-", "note": "-"}
+            "matched": "-", "mismatched": "-", "unavailable": "-", "last_verified_commit": "-", "note": "-"}
     base.update(kw)
     return base
 
@@ -108,7 +109,7 @@ class ValidateTest(unittest.TestCase):
 
 
     def test_op_row_counts_must_add_up_to_the_corpus_minus_exclusions(self):
-        excluded = vl.op_excluded_counts().get("codec.reencode", 0)
+        excluded = len(vl.op_excluded_ids().get("codec.reencode", []))
         self.assertGreater(excluded, 0)
         ok = row(id="op.codec.reencode.recorded", corpus_n=str(1000 + excluded), status="PASS",
                  matched="1000", mismatched="0", last_verified_commit="abc")
@@ -117,18 +118,46 @@ class ValidateTest(unittest.TestCase):
         errs = vl.validate(render(stale))
         self.assertTrue(any("re-record the row" in e for e in errs), errs)
 
+    def test_unavailable_inputs_are_subtracted_like_exclusions(self):
+        """An input the Rust side declined as not ported is neither matched nor mismatched."""
+        excluded = len(vl.op_excluded_ids().get("codec.reencode", []))
+        ok = row(id="op.codec.reencode.live", corpus_n=str(1000 + excluded + 30), status="PASS",
+                 matched="1000", mismatched="0", unavailable="30", last_verified_commit="abc")
+        self.assertEqual(vl.validate(render(ok)), [])
+        # The same counts without the declared unavailable inputs do not add up.
+        errs = vl.validate(render(dict(ok, unavailable="-")))
+        self.assertTrue(any("re-record the row" in e for e in errs), errs)
+        errs = vl.validate(render(dict(ok, unavailable="many")))
+        self.assertTrue(any("unavailable" in e for e in errs), errs)
+
+    def test_worldgen_live_rows_count_the_live_seeds_only(self):
+        """`ops live` runs the sweep ops' Rust handlers for the live seeds, so the live row's corpus_n
+        is that subset and the recorded row's is the whole registry x 8 seeds."""
+        tracked = vl.git_files()
+        rows = {r["id"]: r for r in vl.op_rows(tracked)}
+        seeds = json.loads((vl.REPO / vl.WORLDGEN_LIVE_SEEDS).read_text(encoding="utf-8"))
+        for op in vl.WORLDGEN_OPS:
+            recorded, live = rows[f"op.{op}.recorded"], rows[f"op.{op}.live"]
+            self.assertEqual(int(live["corpus_n"]) * 8, int(recorded["corpus_n"]) * len(seeds), op)
+            self.assertIn(vl.WORLDGEN_LIVE_SEEDS, live["fixtures"])
+        other = rows["op.snbt.parse.live"]
+        self.assertEqual(other["corpus_n"], rows["op.snbt.parse.recorded"]["corpus_n"])
+
 
     def test_op_row_counts_also_subtract_the_unavailable_inputs(self):
         unavailable = vl.op_unavailable_counts().get("recipe.match", 0)
         self.assertGreater(unavailable, 0)
-        excluded = vl.op_excluded_counts().get("recipe.match", 0)
+        excluded = len(vl.op_excluded_ids().get("recipe.match", []))
         ok = row(id="op.recipe.match.recorded", corpus_n=str(1000 + unavailable + excluded), status="PASS",
-                 matched="1000", mismatched="0", last_verified_commit="abc")
+                 matched="1000", mismatched="0", unavailable=str(unavailable), last_verified_commit="abc")
         self.assertEqual(vl.validate(render(ok)), [])
         # Counting an unavailable input as matched is a stale row.
         stale = dict(ok, matched=str(1000 + unavailable))
         errs = vl.validate(render(stale))
-        self.assertTrue(any("excluded or unavailable" in e and "re-record the row" in e for e in errs), errs)
+        self.assertTrue(any("unavailable inputs" in e and "re-record the row" in e for e in errs), errs)
+        # A recorded row's unavailable count is the table's, whatever the row claims.
+        errs = vl.validate(render(dict(ok, unavailable="1", corpus_n=str(1000 + excluded + 1))))
+        self.assertTrue(any("unavailable.tsv lists" in e for e in errs), errs)
 
     def test_unavailable_counts_sum_the_table_per_op(self):
         counts = vl.op_unavailable_counts()
